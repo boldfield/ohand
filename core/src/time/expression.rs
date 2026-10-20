@@ -3,9 +3,14 @@
 // The check fails closed. After the span, the expression ends only where the text or a sentence
 // ends, or where the next word starts the task ("... 5 p.m. to call Sam"). Any other word there
 // (a place, a zone, "on October 15") is taken to continue the time, so the span is truncated.
-// Task text before a time is open-ended ("call Sam today at noon"), so on that side it is the
-// closed class of temporal words that marks a continuation: numbers, day and month names, units,
-// zones, and relative words such as "after", "from" or "next".
+// Before the span it also fails closed when the span names no day: the resolver anchors such a
+// clock to today, so any word before it other than the start of the text or the person being
+// reminded ("Remind me at 5 p.m.") may carry the day ("the twelfth at 3 p.m.", "tmrw at 5 p.m.").
+// When the span does name a day, task text before it is open-ended ("call Sam today at noon"), so
+// there it is the closed class of temporal words that marks a continuation: numbers, day and month
+// names, units, zones, and relative words such as "after", "from" or "next". A connector ("or",
+// "and", "then") joins a further time when the word beyond it is temporal ("Friday at 3 p.m. or
+// Saturday at 4 p.m."), so the span then covers only one alternative.
 
 const MERIDIEMS: &[&str] = &["a.m.", "a.m", "am", "p.m.", "p.m", "pm"];
 /// Zone abbreviations and region words that qualify a clock time ("9 a.m. EST").
@@ -149,8 +154,10 @@ const TEMPORAL_MODIFIERS: &[&str] = &[
 
 /// Whether `span` (character offsets into `basis_text`) covers the whole time expression around
 /// it. It is `false` when the span starts or ends inside a word; when any word follows the span
-/// other than one that starts the task (`to`, `for`, `and`, ...), before the sentence ends; or
-/// when the word before the span (past an `at`/`on`) is temporal. A bracketed aside after the
+/// other than one that starts the task (`to`, `for`, `about`, ...), before the sentence ends; when
+/// a connector after the span leads to more time text ("or Saturday at 4 p.m."); when the span
+/// names no day and the word before it (past an `at`/`on`) is anything but the start of the text
+/// or the person reminded; or when the span names a day and the word before it is temporal. A bracketed aside after the
 /// span counts as task text only when it reads as one ("(call Sam about the quote)") and names
 /// nothing temporal; "(EST)" or "(Tokyo)" do not.
 pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -> bool {
@@ -178,11 +185,45 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         .collect::<String>()
         .to_lowercase();
     let meridiem_dot_open = span_text.ends_with("a.m") || span_text.ends_with("p.m");
-    !preceded_by_time_text(&before) && !followed_by_more_than_task_text(&after, meridiem_dot_open)
+    !preceded_by_time_text(&before, names_day(&span_text))
+        && !followed_by_more_than_task_text(&after, meridiem_dot_open)
 }
 
-/// Whether the word before the span, past one `at` or `on`, continues the time expression.
-fn preceded_by_time_text(before: &str) -> bool {
+/// Whether the span names the day its clock falls on: `today`, `tomorrow`, a weekday or an ISO
+/// date. Without one the resolver anchors the clock to today.
+fn names_day(span_text: &str) -> bool {
+    span_text
+        .split_whitespace()
+        .map(normalized_word)
+        .any(|word| {
+            matches!(
+                word.as_str(),
+                "today"
+                    | "tonight"
+                    | "tomorrow"
+                    | "monday"
+                    | "tuesday"
+                    | "wednesday"
+                    | "thursday"
+                    | "friday"
+                    | "saturday"
+                    | "sunday"
+            ) || is_iso_date(&word)
+        })
+}
+
+fn is_iso_date(word: &str) -> bool {
+    let parts: Vec<&str> = word.split('-').collect();
+    parts.len() == 3
+        && [4, 2, 2]
+            .iter()
+            .zip(&parts)
+            .all(|(length, part)| part.len() == *length && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether the text before the span, past one `at` or `on`, continues the time expression. For a
+/// span naming no day, anything but the start of the text or the person reminded continues it.
+fn preceded_by_time_text(before: &str, span_names_day: bool) -> bool {
     let mut words = before
         .split_whitespace()
         .rev()
@@ -192,7 +233,60 @@ fn preceded_by_time_text(before: &str) -> bool {
     if matches!(previous.as_deref(), Some("at" | "on")) {
         previous = words.next();
     }
-    previous.is_some_and(|word| is_temporal(&word) || TEMPORAL_MODIFIERS.contains(&word.as_str()))
+    let Some(previous) = previous else {
+        return false;
+    };
+    if !span_names_day {
+        return !is_reminded_party(&previous);
+    }
+    if is_connector(&previous) {
+        // "Friday or Saturday at 3 p.m.": the span holds only the last alternative.
+        return words.next().is_some_and(|word| is_temporal(&word));
+    }
+    is_temporal(&previous) || TEMPORAL_MODIFIERS.contains(&previous.as_str())
+}
+
+/// Words before a clock that end the request rather than carry its day ("Remind me at 5 p.m.").
+fn is_reminded_party(word: &str) -> bool {
+    matches!(
+        word,
+        "me" | "us" | "you" | "him" | "her" | "them" | "remind" | "reminder" | "ping" | "alert"
+    )
+}
+
+/// Words that may join one time to another ("Friday at 3 p.m. or Saturday at 4 p.m.").
+fn is_connector(word: &str) -> bool {
+    matches!(word, "or" | "and" | "then" | "nor")
+}
+
+/// Whether the words after a connector name another time, past fillers such as "at", "maybe" or
+/// "then" ("... or maybe at 4 p.m.").
+fn connector_joins_time(mut words: impl Iterator<Item = String>) -> bool {
+    words
+        .find(|word| {
+            !matches!(
+                word.as_str(),
+                "at" | "on"
+                    | "in"
+                    | "by"
+                    | "the"
+                    | "a"
+                    | "an"
+                    | "maybe"
+                    | "perhaps"
+                    | "possibly"
+                    | "probably"
+                    | "else"
+                    | "then"
+                    | "again"
+                    | "also"
+                    | "if"
+                    | "not"
+                    | "instead"
+                    | "even"
+            )
+        })
+        .is_some_and(|word| is_temporal(&word) || TEMPORAL_MODIFIERS.contains(&word.as_str()))
 }
 
 /// Whether anything other than the task or the end of a sentence follows the span. A dot right
@@ -231,6 +325,9 @@ fn followed_by_more_than_task_text(after: &str, mut meridiem_dot_open: bool) -> 
                     .map(normalized_word)
                     .filter(|word| !word.is_empty());
                 let word = words.next().unwrap_or_default();
+                if is_connector(&word) {
+                    return connector_joins_time(words);
+                }
                 if is_task_word(&word) {
                     return false;
                 }
@@ -247,8 +344,6 @@ fn is_task_word(word: &str) -> bool {
         word,
         "to" | "for"
             | "so"
-            | "and"
-            | "then"
             | "about"
             | "that"
             | "because"
@@ -258,7 +353,6 @@ fn is_task_word(word: &str) -> bool {
             | "thank"
             | "re"
             | "regarding"
-            | "or"
             | "ok"
             | "okay"
     )
@@ -414,7 +508,25 @@ mod tests {
                 "Remind me Friday at 3 p.m., the quote wasn't cheap",
                 "Friday at 3 p.m.",
             ),
-            ("Remind me Friday at 3 p.m. or Saturday", "Friday at 3 p.m."),
+            ("At 5 p.m. to call Sam", "At 5 p.m."),
+            ("Remind us at noon to stretch", "at noon"),
+            ("Set a reminder at 5 p.m. to call Sam", "at 5 p.m."),
+            (
+                "Remind me Friday at 3 p.m. or I'll forget the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. and then call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. then the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me to email Ann and Friday at 3 p.m. to call Sam",
+                "Friday at 3 p.m.",
+            ),
         ] {
             assert!(covers(text, quoted), "{text:?} / {quoted:?}");
         }
@@ -529,6 +641,37 @@ mod tests {
                 "Friday at 3 p.m.",
             ),
             ("Remind me Friday at 3 p.m. - in Tokyo", "Friday at 3 p.m."),
+            // A span naming no day is anchored to today; any word before it may carry the day.
+            ("Remind me on the twelfth at 3 p.m.", "at 3 p.m."),
+            ("Remind me on the nineteenth at 3 p.m.", "at 3 p.m."),
+            ("Remind me the twenty-first at 3 p.m.", "at 3 p.m."),
+            ("Remind me Christmas Eve at 6 p.m.", "at 6 p.m."),
+            ("Remind me on Halloween at 3 p.m.", "at 3 p.m."),
+            ("Remind me tmrw at 5 p.m.", "at 5 p.m."),
+            ("Remind me to call Sam at noon", "at noon"),
+            // Alternatives: the span holds only one of two explicit times.
+            ("Remind me Friday at 3 p.m. or Saturday", "Friday at 3 p.m."),
+            (
+                "Remind me Friday at 3 p.m. or Saturday at 4 p.m. to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. or maybe at 4 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. and again Saturday",
+                "Friday at 3 p.m.",
+            ),
+            ("Remind me Friday at 3 p.m. then 5 p.m.", "Friday at 3 p.m."),
+            (
+                "Remind me Friday or Saturday at 4 p.m.",
+                "Saturday at 4 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., or Saturday at 4 p.m.",
+                "Friday at 3 p.m.",
+            ),
         ] {
             assert!(!covers(text, quoted), "{text:?} / {quoted:?}");
         }

@@ -1117,6 +1117,74 @@ fn a_span_missing_the_surrounding_date_is_rejected() {
 }
 
 #[test]
+fn a_dayless_span_after_a_spelled_or_abbreviated_day_is_rejected() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me on the twelfth at 3 p.m. to call the roofer",
+            "at 3 p.m.",
+            "2026-10-08T15:00:00-04:00",
+        ),
+        (
+            "Remind me the twenty-first at 3 p.m. to call the roofer",
+            "at 3 p.m.",
+            "2026-10-08T15:00:00-04:00",
+        ),
+        (
+            "Remind me Christmas Eve at 6 p.m. to call the roofer",
+            "at 6 p.m.",
+            "2026-10-08T18:00:00-04:00",
+        ),
+        (
+            "Remind me tmrw at 5 p.m. to call the roofer",
+            "at 5 p.m.",
+            "2026-10-08T17:00:00-04:00",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_span_holding_one_of_two_alternative_times_is_rejected() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m. or Saturday at 4 p.m. to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. or maybe at 4 p.m. to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday or Saturday at 4 p.m. to call the roofer",
+            "Saturday at 4 p.m.",
+            "2026-10-10T16:00:00-04:00",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_connector_into_the_task_still_schedules() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me Friday at 3 p.m. and call the roofer",
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call the roofer",
+    );
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    assert_eq!(fixture.reminder_row().request_state, "resolved");
+}
+
+#[test]
 fn a_bracketed_task_aside_after_the_time_still_schedules() {
     let (fixture, disposition) = apply_clock_proposal(
         "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
@@ -1362,7 +1430,8 @@ fn a_reminder_on_an_item_that_is_not_an_action_is_not_recorded() {
 
 #[test]
 fn a_later_proposal_refines_an_unresolved_reminder_but_never_replaces_a_committed_time() {
-    let text = "remind me to call the roofer 2026-01-16 09:00:00 or 2026-01-17 09:00:00";
+    let text =
+        "remind me to call the roofer 2026-01-16 09:00:00 and remind me again 2026-01-17 09:00:00";
     let mut fixture = Fixture::new(text);
     let build = |fixture: &Fixture, lease: &Lease, phrase: &str, instant: Option<&str>, quality| {
         fixture
