@@ -1,9 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// The composer home: a glass header, an empty body and the composer at the bottom. Voice or silent capture and the
-/// acknowledgment are all it shows. It has no history, suggestions, dashboard or webview, and it is shown from the
-/// model alone, so recents never appear here.
+/// The composer home: a glass header, a body slot and the composer at the bottom. The slot is empty unless the host
+/// injects one (the home's recent captures and lock states); the entry itself is shown from the model alone, so it never
+/// reads history, and it has no suggestions, dashboard or webview.
 struct CaptureEntryView: View {
     static let noticeIdentifier = "capture-entry.notice"
     static let messageIdentifier = "capture-entry.message"
@@ -21,6 +21,8 @@ struct CaptureEntryView: View {
     var actionsAreDisabled = false
     var open: (String) -> Void = { _ in }
     var notice: String?
+    /// The home body between the header and the composer. Empty by default.
+    var homeBody: () -> AnyView = { AnyView(Color.clear) }
     /// Test seam: receives where the header, composer and Saved pill (and Settings or Done) land on screen.
     var layoutReporter: (([String: CGRect]) -> Void)?
 
@@ -34,7 +36,7 @@ struct CaptureEntryView: View {
     @State private var observedSave: ObservedSave?
 
     var body: some View {
-        Color.clear
+        homeBody()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(DSColor.surface0.color.ignoresSafeArea())
             .safeAreaInset(edge: .top, spacing: 0) { header }
