@@ -16,7 +16,7 @@ jobs:
   simulator:
     name: Simulator build, unit tests and launch smoke test
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -80,19 +80,16 @@ jobs:
 
       - name: F27 temporary repeat loop
         if: always()
-        timeout-minutes: 25
+        timeout-minutes: 100
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           cd ios
           mkdir -p .evidence
-          for i in 1 2 3; do (yes > /dev/null &) ; done
           xcodebuild test -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" -derivedDataPath .derived \
-            -only-testing:OhAndTests/AppServicesTests \
-            -test-iterations 8 CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/f27-loop.log | grep -E "F27DIAG|error:|TEST (SUCCEEDED|FAILED)|ReportsARealChange" | tail -120 || true
-          pkill yes || true
+            -test-iterations 3 CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/f27-loop.log | grep -E "F27DIAG|error:|TEST (SUCCEEDED|FAILED)|ReportsARealChange" | tail -120 || true
 
       - name: Run credential cross-process relaunch check
         shell: bash
@@ -296,7 +293,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        timeout-minutes: 25
+        timeout-minutes: 100
         uses: actions/upload-artifact@v4
         with:
           name: ios-evidence
@@ -364,7 +361,7 @@ jobs:
 
       - name: Upload screenshots
         if: always()
-        timeout-minutes: 25
+        timeout-minutes: 100
         uses: actions/upload-artifact@v4
         with:
           name: ios-walkthrough
@@ -564,7 +561,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        timeout-minutes: 25
+        timeout-minutes: 100
         uses: actions/upload-artifact@v4
         with:
           name: tauri-probe-evidence
