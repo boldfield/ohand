@@ -669,6 +669,11 @@ pub struct FixtureRecord {
 }
 
 impl FixtureRecord {
+    /// Whether this fixture matches the oracle: the run's terminal result and the scored facets.
+    pub fn matches_oracle(&self) -> bool {
+        self.semantic.matches_oracle(&self.run.outcome.result)
+    }
+
     pub fn latencies_ms(&self) -> Vec<u64> {
         self.run.exchanges.iter().map(|e| e.latency_ms).collect()
     }
@@ -1050,15 +1055,31 @@ pub fn instruction_version() -> &'static str {
     M1_INSTRUCTION_VERSION
 }
 
+/// Per backend counts, each taken from the run records: `matched` counts fixtures whose run
+/// ended `applied` or `abstained`, with every facet `match` or `none`, an abstention only where
+/// expected, and no forbidden-rule hit.
 pub fn summarize_by_backend(records: &[FixtureRecord]) -> BTreeMap<String, Value> {
     let mut summary: BTreeMap<String, Value> = BTreeMap::new();
     for record in records {
-        let entry = summary.entry(record.backend.clone()).or_insert_with(
-            || json!({"fixtures": 0, "matches_oracle": 0, "forbidden_mutations": 0}),
-        );
-        entry["fixtures"] = json!(entry["fixtures"].as_u64().unwrap() + 1);
-        if record.semantic.matches_oracle() {
-            entry["matches_oracle"] = json!(entry["matches_oracle"].as_u64().unwrap() + 1);
+        let entry = summary.entry(record.backend.clone()).or_insert_with(|| {
+            json!({
+                "total": 0, "matched": 0, "applied": 0, "abstained": 0,
+                "invalid_output": 0, "other_failures": 0, "forbidden_mutations": 0,
+            })
+        });
+        let mut bump = |key: &str| {
+            entry[key] = json!(entry[key].as_u64().unwrap() + 1);
+        };
+        bump("total");
+        if record.matches_oracle() {
+            bump("matched");
+        }
+        let outcome = &record.run.outcome;
+        match outcome.result.as_str() {
+            "applied" => bump("applied"),
+            "abstained" => bump("abstained"),
+            _ if outcome.reason.as_deref() == Some("invalid_output") => bump("invalid_output"),
+            _ => bump("other_failures"),
         }
         entry["forbidden_mutations"] = json!(
             entry["forbidden_mutations"].as_u64().unwrap()
