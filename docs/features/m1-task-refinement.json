@@ -3547,7 +3547,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F32"
+        "F32",
+        "F35"
       ],
       "source_pointers": [
         "app/retrieval/RetrievalSearchModel.swift:106",
@@ -3573,6 +3574,108 @@
       "source_pointers": [
         "ios/Services/JobConfiguration/JobConfigurationService.swift:89",
         "core/src/jobs/configuration/repin.rs"
+      ]
+    },
+    {
+      "key": "F35",
+      "parent": null,
+      "title": "Start processing a capture as soon as it is saved, and finish briefly in the background",
+      "file_scope": [
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/BackgroundCompletion/",
+        "ios/Services/JobRunner/JobRunnerService.swift",
+        "ios/Tests/BackgroundCompletion/",
+        "ios/Tests/JobRunner/",
+        "ios/Tests/AppAssembly/AppRealServicesTests.swift"
+      ],
+      "intent": "Request a drain on every durable save and wire B04's background completion in production without displacing the reminder-pass drain observer.",
+      "acceptance": [
+        "See the F35 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F27"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:1397",
+        "ios/Capture/Entry/CaptureEntryModel.swift:66",
+        "ios/Services/BackgroundCompletion/BackgroundCompletionService.swift:52"
+      ]
+    },
+    {
+      "key": "F36",
+      "parent": null,
+      "title": "Cover the app in the app switcher",
+      "file_scope": [
+        "ios/AppAssembly/SceneDelegate.swift",
+        "ios/Services/Authentication/AppSwitcherRedaction.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Install C01b's app-switcher cover in production; the relock stays as it is.",
+      "acceptance": [
+        "See the F36 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Authentication/AppSwitcherRedaction.swift:12",
+        "ios/Services/Assembly/CompositionRoot.swift:1280"
+      ]
+    },
+    {
+      "key": "F37",
+      "parent": null,
+      "title": "Record delivered notifications, unlock for a locked notification tap, and refresh home when processing lands",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift",
+        "ios/Services/Notifications/NotificationBridge.swift",
+        "ios/Services/NotificationActions/",
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/ManagementNavigationModel.swift",
+        "ios/Tests/NotificationActions/",
+        "ios/Tests/Notifications/",
+        "ios/Tests/AppAssembly/"
+      ],
+      "intent": "Ingest delivered notifications at launch and foreground, ask to unlock for a locked reminder tap, and publish item changes when processing results land.",
+      "acceptance": [
+        "See the F37 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F33",
+        "U11"
+      ],
+      "source_pointers": [
+        "ios/Services/Notifications/NotificationBridge.swift:259",
+        "ios/Services/NotificationActions/ActionHandler.swift:225",
+        "app/home/HomeRecentsModel.swift:317"
+      ]
+    },
+    {
+      "key": "F38",
+      "parent": null,
+      "title": "Keep the source-detail sections consistent after a change, and tidy the detail form",
+      "file_scope": [
+        "app/source-detail/SourceDetailModel.swift",
+        "app/reminders/",
+        "app/item-controls/ItemControlsView.swift",
+        "ios/Tests/SourceDetail/",
+        "ios/Tests/ReminderEdit/",
+        "ios/Tests/ReminderHistory/",
+        "ios/Tests/ItemControls/"
+      ],
+      "intent": "Reload the reminder section after every committed change on detail and fix the detail form's flash, duplicate heading and field styling.",
+      "acceptance": [
+        "See the F38 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/source-detail/SourceDetailModel.swift:390",
+        "app/reminders/ReminderEditView.swift:37",
+        "app/item-controls/ItemControlsView.swift:152"
       ]
     }
   ],
@@ -4014,6 +4117,7 @@
       "A10",
       "C06",
       "DS01",
+      "F35",
       "U06b"
     ],
     "L05a": [
@@ -4333,11 +4437,21 @@
     "F31": [],
     "F32": [],
     "F33": [
-      "F32"
+      "F32",
+      "F35"
     ],
     "F34": [
       "U06b"
-    ]
+    ],
+    "F35": [
+      "F27"
+    ],
+    "F36": [],
+    "F37": [
+      "F33",
+      "U11"
+    ],
+    "F38": []
   },
   "retained_dependency_overrides": {
     "V06": [
