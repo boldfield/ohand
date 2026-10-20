@@ -102,7 +102,8 @@ final class ReminderEditModel: ObservableObject {
         let generation = loadGeneration
         isLoading = true
         defer { if generation == loadGeneration { isLoading = false } }
-        await history?.load()
+        // The history read runs beside the reminder read rather than ahead of it.
+        async let historyRead: Void = loadHistory()
         do {
             let answer = try await editor.reminder(itemID: itemID)
             guard generation == loadGeneration else { return }
@@ -113,6 +114,8 @@ final class ReminderEditModel: ObservableObject {
             reject(error)
         }
     }
+
+    @MainActor private func loadHistory() async { await history?.load() }
 
     /// A stored time shows the notification permission from the first read, not only after an edit in this session.
     @MainActor private func learnPermission(generation: Int) async {

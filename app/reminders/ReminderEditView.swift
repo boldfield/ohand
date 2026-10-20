@@ -183,6 +183,9 @@ struct ReminderHistoryList: View {
                         Text(row.occurred.isEmpty ? row.title : "\(row.title) · \(row.occurred)")
                             .font(DSFont.footer)
                             .foregroundColor(DSColor.ink.color)
+                            .reportReminderRendered(
+                                Self.lineIdentifier(row.occurred.isEmpty ? row.title : "\(row.title) · \(row.occurred)"),
+                                text: row.occurred.isEmpty ? row.title : "\(row.title) · \(row.occurred)")
                         if let detail = row.detail, !detail.isEmpty { note(detail) }
                     }
                     .accessibilityElement(children: .combine)
@@ -193,10 +196,15 @@ struct ReminderHistoryList: View {
         .accessibilityIdentifier(ReminderEditSection.historyIdentifier)
     }
 
+    /// Each visible line reports itself under this prefix so a hosted test can read what is rendered.
+    static let linePrefix = "reminder.history.line:"
+    private static func lineIdentifier(_ text: String) -> String { linePrefix + text }
+
     private func note(_ text: String) -> some View {
         Text(text)
             .font(DSFont.footer)
             .foregroundColor(DSColor.inkMuted.color)
             .fixedSize(horizontal: false, vertical: true)
+            .reportReminderRendered(Self.lineIdentifier(text), text: text)
     }
 }

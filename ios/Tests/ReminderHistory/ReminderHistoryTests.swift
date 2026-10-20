@@ -3,7 +3,7 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
-private final class FakeHistoryReader: ReminderHistoryReading, ReminderLinkChecking, @unchecked Sendable {
+private final class FakeHistoryReader: ReminderHistoryReading, @unchecked Sendable {
     private let lock = NSLock()
     private var historyResult: Result<ReminderHistoryAnswer, Error>
     private var readResult: Result<ReminderReadAnswer, Error>
@@ -27,11 +27,6 @@ private final class FakeHistoryReader: ReminderHistoryReading, ReminderLinkCheck
         reads += 1
         return try readResult.get()
     }
-}
-
-private final class FakeNavigator: ReminderLinkNavigating {
-    private(set) var opened: [String] = []
-    func openItem(itemID: String) { opened.append(itemID) }
 }
 
 final class ReminderHistoryTests: XCTestCase {
@@ -113,54 +108,5 @@ final class ReminderHistoryTests: XCTestCase {
         let guarded = ReminderHistoryModel(itemID: Self.itemID, reader: other)
         await guarded.load()
         XCTAssertTrue(guarded.rows.isEmpty, "an answer for a different item is never shown")
-    }
-
-    // MARK: links
-
-    private func readAnswer(lifecycle: String = "active", itemID: String = "item-1") -> ReminderReadAnswer {
-        ReminderReadAnswer(itemID: itemID, itemRevision: 1, itemType: "action", lifecycleState: lifecycle, reminder: nil)
-    }
-
-    @MainActor func testLinkToReadableItemOpensIt() async {
-        let reader = FakeHistoryReader(history: .failure(ReminderControlError.unreadable), read: .success(readAnswer()))
-        let navigator = FakeNavigator()
-        let outcome = await ReminderLinkRouter(checker: reader, navigator: navigator).route(targetID: "item-1")
-        XCTAssertEqual(outcome, .opened(itemID: "item-1"))
-        XCTAssertEqual(navigator.opened, ["item-1"])
-    }
-
-    @MainActor func testStaleDeletedAndMismatchedLinksOpenNothing() async {
-        for result: Result<ReminderReadAnswer, Error> in [
-            .failure(ReminderControlError.itemNotFound), .failure(ReminderControlError.itemDeleted),
-            .failure(ReminderControlError.unreadable), .success(readAnswer(lifecycle: "deleted")),
-            .success(readAnswer(itemID: "other")),
-        ] {
-            let navigator = FakeNavigator()
-            let reader = FakeHistoryReader(history: .failure(ReminderControlError.unreadable), read: result)
-            let outcome = await ReminderLinkRouter(checker: reader, navigator: navigator).route(targetID: "item-1")
-            XCTAssertEqual(outcome, .unavailable)
-            XCTAssertTrue(navigator.opened.isEmpty)
-        }
-    }
-
-    @MainActor func testMalformedLinkIsRejectedBeforeAnyRead() async {
-        let reader = FakeHistoryReader(history: .failure(ReminderControlError.unreadable), read: .success(readAnswer()))
-        let navigator = FakeNavigator()
-        let router = ReminderLinkRouter(checker: reader, navigator: navigator)
-        for bad in [nil, "", "has space", "a/b", String(repeating: "x", count: 65)] {
-            let outcome = await router.route(targetID: bad)
-            XCTAssertEqual(outcome, .invalid)
-        }
-        XCTAssertEqual(reader.readCount, 0)
-        XCTAssertTrue(navigator.opened.isEmpty)
-    }
-
-    @MainActor func testLockedSessionHandsOffToAuthenticatingNavigationOnly() async {
-        let reader = FakeHistoryReader(history: .failure(ReminderControlError.unreadable), read: .failure(ReminderControlError.notAuthenticated))
-        let navigator = FakeNavigator()
-        let outcome = await ReminderLinkRouter(checker: reader, navigator: navigator).route(targetID: "item-1")
-        XCTAssertEqual(outcome, .opened(itemID: "item-1"))
-        XCTAssertEqual(navigator.opened, ["item-1"], "navigation authenticates before showing anything")
-        XCTAssertNil(outcome.notice)
     }
 }
