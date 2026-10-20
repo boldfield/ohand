@@ -143,6 +143,11 @@ final class AppServicesTests: XCTestCase {
         XCTAssertTrue(held)
         time.releaseTimers()
         let reconciled = await timeChangeWaitUntil { services.lifecycle.finishedPassCount == 1 }
+        if !reconciled {
+            let started = Date()
+            let late = await timeChangeWaitUntil(timeout: 45) { services.lifecycle.finishedPassCount >= 1 }
+            NSLog("F27DIAG late=\(late) after=\(Date().timeIntervalSince(started)) report=\(String(describing: services.lifecycle.lastReport)) evals=\(services.timeChange.evaluationsPerformed) reported=\(services.timeChange.reportedChangeCount)")
+        }
         XCTAssertTrue(reconciled)
         XCTAssertEqual(services.lifecycle.lastReport?.triggers, [.systemTimeChange])
         XCTAssertEqual(services.timeChange.reportedChangeCount, 1)
