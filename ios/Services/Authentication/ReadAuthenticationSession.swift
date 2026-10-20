@@ -71,6 +71,9 @@ final class ReadAuthenticationSession {
     private var accessEpoch: UInt64 = 0
     private var attemptSequence: UInt64 = 0
     private var attemptInFlight: UInt64?
+    /// Whether the attempt in flight is the quiet, biometrics-only one. Meaningful only while `attemptInFlight` is set.
+    private var attemptInFlightIsQuiet = false
+    private var quietAttemptObservers: [UInt64: () -> Void] = [:]
     private var recordedRelockReason: RelockReason?
     private let deliveryLock = NSRecursiveLock()
     private var scopeObservers: [UInt64: (SessionScopeTransition) -> Void] = [:]
@@ -85,6 +88,43 @@ final class ReadAuthenticationSession {
         lock.lock()
         defer { lock.unlock() }
         return currentScope
+    }
+
+    /// True while a quiet attempt is in flight. It rises when `authenticateQuietly` starts one and falls when the attempt
+    /// finishes, is superseded by an explicit attempt, or a relock ends it. Reading it changes no scope.
+    var isQuietAttemptInFlight: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return quietAttemptInFlightLocked
+    }
+
+    private var quietAttemptInFlightLocked: Bool { attemptInFlight != nil && attemptInFlightIsQuiet }
+
+    /// Registers an observer told each time `isQuietAttemptInFlight` changes. It reads the property for the new value, and
+    /// is not called for the value at registration.
+    @discardableResult
+    func observeQuietAttempt(_ observer: @escaping () -> Void) -> SessionScopeObserverToken {
+        lock.lock()
+        defer { lock.unlock() }
+        nextObserverIdentifier += 1
+        quietAttemptObservers[nextObserverIdentifier] = observer
+        return SessionScopeObserverToken(identifier: nextObserverIdentifier)
+    }
+
+    func removeQuietAttemptObserver(_ token: SessionScopeObserverToken) {
+        lock.lock()
+        quietAttemptObservers.removeValue(forKey: token.identifier)
+        lock.unlock()
+    }
+
+    /// Called after `lock` is released, with whether the flag was set before the mutation.
+    private func notifyQuietAttemptChange(wasInFlight: Bool) {
+        lock.lock()
+        let changed = quietAttemptInFlightLocked != wasInFlight
+        let observers = quietAttemptObservers.sorted { $0.key < $1.key }.map { $0.value }
+        lock.unlock()
+        guard changed else { return }
+        for observer in observers { observer() }
     }
 
     /// The reason for the most recent relock, nil if the session never relocked.
@@ -130,10 +170,13 @@ final class ReadAuthenticationSession {
     /// attempt supersedes one still in flight, which then reports `interrupted`.
     func authenticate(reason: String, completion: @escaping (ReadAuthenticationResult) -> Void) {
         lock.lock()
+        let wasQuiet = quietAttemptInFlightLocked
         attemptSequence += 1
         let attempt = attemptSequence
         attemptInFlight = attempt
+        attemptInFlightIsQuiet = false
         lock.unlock()
+        notifyQuietAttemptChange(wasInFlight: wasQuiet)
 
         boundary.authenticate(reason: reason) { [weak self] outcome in
             guard let self else { return }
@@ -156,7 +199,9 @@ final class ReadAuthenticationSession {
         attemptSequence += 1
         let attempt = attemptSequence
         attemptInFlight = attempt
+        attemptInFlightIsQuiet = true
         lock.unlock()
+        notifyQuietAttemptChange(wasInFlight: false)
 
         boundary.authenticateQuietly(reason: reason) { [weak self] outcome in
             guard let self else { return }
@@ -172,6 +217,7 @@ final class ReadAuthenticationSession {
         defer { deliveryLock.unlock() }
         lock.lock()
         let attemptWasInFlight = attemptInFlight != nil
+        let wasQuiet = quietAttemptInFlightLocked
         recordedRelockReason = reason
         revokeLocked()
         let observers = observersInRegistrationOrderLocked()
@@ -180,6 +226,7 @@ final class ReadAuthenticationSession {
             boundary.invalidatePendingAttempt()
         }
         publish(SessionScopeTransition(scope: .captureOnly, cause: .relocked(reason)), to: observers)
+        notifyQuietAttemptChange(wasInFlight: wasQuiet)
     }
 
     private func finish(attempt: UInt64, outcome: ReadAuthenticationOutcome) -> ReadAuthenticationResult {
@@ -190,6 +237,7 @@ final class ReadAuthenticationSession {
             lock.unlock()
             return .notAuthenticated(.interrupted)
         }
+        let wasQuiet = quietAttemptInFlightLocked
         attemptInFlight = nil
         let result: ReadAuthenticationResult
         let transition: SessionScopeTransition
@@ -214,6 +262,7 @@ final class ReadAuthenticationSession {
         let observers = observersInRegistrationOrderLocked()
         lock.unlock()
         publish(transition, to: observers)
+        notifyQuietAttemptChange(wasInFlight: wasQuiet)
         return result
     }
 

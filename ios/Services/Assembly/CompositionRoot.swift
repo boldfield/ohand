@@ -1489,6 +1489,22 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    /// True while a quiet attempt is in flight. Read-only; reading it changes no scope.
+    public var isQuietReadAuthenticationInFlight: Bool { adapters.readSession.isQuietAttemptInFlight }
+
+    /// Calls `observer` after every change of the read scope (success, relock, failed attempt) and every change of
+    /// `isQuietReadAuthenticationInFlight`. It carries no content; read `readScope` and the flag for the new state. The
+    /// observer may run on any thread. Returns a closure that removes the registration.
+    public func observeReadAccess(_ observer: @escaping @Sendable () -> Void) -> () -> Void {
+        let session = adapters.readSession
+        let scopeToken = session.observeScope { _ in observer() }
+        let quietToken = session.observeQuietAttempt { observer() }
+        return { [session] in
+            session.removeScopeObserver(scopeToken)
+            session.removeQuietAttemptObserver(quietToken)
+        }
+    }
+
     /// Returns to capture-only and invalidates every read still waiting for its answer. The root also relocks itself
     /// when the app enters the background or returns to the foreground, and when protected data becomes unavailable.
     public func relockReads() {
