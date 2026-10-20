@@ -33,7 +33,7 @@ final class ReminderHistoryRootIntegrationTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    @MainActor func testSavedTimeAppearsInHistoryAndReentryAfterALapseShowsTheSameListWithoutADigest() async throws {
+    func testSavedTimeAppearsInHistoryAndReentryAfterALapseShowsTheSameListWithoutADigest() async throws {
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
         let root = try ServiceCompositionRoot(
@@ -73,7 +73,7 @@ final class ReminderHistoryRootIntegrationTests: XCTestCase {
         XCTAssertTrue(history.rows.contains { $0.title == "Time saved" }, "\(history.rows)")
         let before = history.rows
 
-        history.lock()
+        await history.lock()
         XCTAssertTrue(history.rows.isEmpty)
         XCTAssertEqual(history.unavailable, .locked)
 
