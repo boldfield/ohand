@@ -20,7 +20,14 @@ final class AppServicesTests: XCTestCase {
 
     override func tearDownWithError() throws {
         created.forEach { $0.shutDown() }
+        // A core read issued before the shutdown completes on its own queue; wait for it and for its buffer to be freed.
+        let pending = created
         created = []
+        let deadline = Date().addingTimeInterval(5)
+        while pending.contains(where: { $0.homeRecents.readsInFlight > 0 })
+            || CoreHandle.liveResultBufferCount != baselineBuffers, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -334,6 +341,21 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(services.root.readScope, .authenticated)
         let refreshed = await timeChangeWaitUntil { services.captureEntry.access.readAuthorized }
         XCTAssertTrue(refreshed, "the capture surface learns of the success")
+    }
+
+    func testShuttingDownRightAfterAuthenticatingLeavesNoHomeReadBehind() async throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        let center = NotificationCenter()
+        let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
+        services.start(isActive: false)
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertEqual(services.root.readScope, .authenticated)
+
+        services.shutDown()
+        let freed = await timeChangeWaitUntil { CoreHandle.liveResultBufferCount == baselineBuffers }
+
+        XCTAssertTrue(freed, "no home read outlives the shutdown")
+        XCTAssertTrue(services.homeRecents.entries.isEmpty)
     }
 
     func testEachForegroundAfterABackgroundMakesOneAttemptAndTheRelockDoesNotCancelIt() throws {
