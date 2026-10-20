@@ -222,6 +222,41 @@ final class DeletionViewTests: XCTestCase {
         await withResetScreen(controls) { _ in
             XCTAssertEqual(text(ResetSettingsView.stateIdentifier), DeletionText.nativeWorkOwedText)
             assertTappable(ResetSettingsView.retryIdentifier)
+            XCTAssertNil(rendered[ResetSettingsView.keepIdentifier], "a restarted pending reset offers no new choice")
+            XCTAssertNil(rendered[ResetSettingsView.removeIdentifier])
+            XCTAssertNil(rendered[ResetSettingsView.choiceRequiredIdentifier])
+            XCTAssertEqual(text(ResetSettingsView.choiceFixedIdentifier), DeletionText.choiceFixedNote)
+        }
+    }
+
+    func testAPendingResetNeverShowsACredentialChoiceItsRetryWouldNotCarryOut() async {
+        let controls = FakeReset()
+        let pending = ResetOutcome(
+            state: .pending, progress: Self.resetProgress(.pending), blockers: [.credentialRemovalIncomplete])
+        controls.resetResults = [.success(pending)]
+        controls.finishResults = [.success(pending)]
+        await withResetScreen(controls) { model in
+            model.choose(.remove)
+            model.beginConfirmation()
+            await model.confirmReset()
+            await settle()
+            XCTAssertNil(rendered[ResetSettingsView.keepIdentifier], "Keep cannot be selected once Remove has started")
+            XCTAssertNil(rendered[ResetSettingsView.removeIdentifier])
+            XCTAssertEqual(text(ResetSettingsView.choiceFixedIdentifier), DeletionText.choiceFixedNote)
+
+            model.choose(.keep)
+            await settle()
+            XCTAssertEqual(model.credentialChoice, .remove, "a pending reset takes no new choice")
+            XCTAssertNil(rendered[ResetSettingsView.keepIdentifier])
+
+            await model.retry()
+            await settle()
+            XCTAssertEqual(controls.finishCalls, 1)
+            XCTAssertEqual(controls.choices, [.remove], "the retry starts no reset under another choice")
+            XCTAssertNil(rendered[ResetSettingsView.keepIdentifier])
+            XCTAssertNil(rendered[ResetSettingsView.removeIdentifier])
+            XCTAssertEqual(text(ResetSettingsView.choiceFixedIdentifier), DeletionText.choiceFixedNote)
+            assertTappable(ResetSettingsView.retryIdentifier)
         }
     }
 
@@ -236,6 +271,8 @@ final class DeletionViewTests: XCTestCase {
             await model.confirmReset()
             await settle()
             XCTAssertEqual(text(ResetSettingsView.stateIdentifier), DeletionText.completedText)
+            XCTAssertNil(rendered[ResetSettingsView.keepIdentifier])
+            XCTAssertEqual(text(ResetSettingsView.choiceFixedIdentifier), DeletionText.choiceFixedNote)
         }
         scope = .captureOnly
         await withResetScreen(FakeReset()) { _ in

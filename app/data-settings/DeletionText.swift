@@ -73,6 +73,9 @@ enum DeletionText {
     static let keepCredentialsTitle = "Keep my provider settings and keys"
     static let removeCredentialsTitle = "Remove my provider settings and keys too"
     static let choiceRequiredNote = "Choose what happens to your provider settings and keys before you continue."
+    static let choiceFixedNote =
+        "This reset keeps the choice about provider settings and keys made when it started. Trying again finishes it "
+        + "under that choice and cannot change it."
     static let resettingText = "Deleting all data…"
     static let completedText =
         "All data was deleted from this device. New captures are saved as fresh content."

@@ -110,6 +110,7 @@ struct ResetSettingsView: View {
     static let keepIdentifier = "data-settings.reset.credentials.keep"
     static let removeIdentifier = "data-settings.reset.credentials.remove"
     static let choiceRequiredIdentifier = "data-settings.reset.choice-required"
+    static let choiceFixedIdentifier = "data-settings.reset.choice-fixed"
     static let continueIdentifier = "data-settings.reset.continue"
     static let confirmIdentifier = "data-settings.reset.confirm"
     static let cancelIdentifier = "data-settings.reset.cancel"
@@ -150,10 +151,14 @@ struct ResetSettingsView: View {
             deletionNote(DeletionText.resetLimitsNote, identifier: Self.limitsIdentifier)
             deletionNote(DeletionText.resetCaptureNote, identifier: Self.captureNoteIdentifier)
             Text(DeletionText.credentialQuestion).font(.headline)
-            choice(.keep, title: DeletionText.keepCredentialsTitle, identifier: Self.keepIdentifier)
-            choice(.remove, title: DeletionText.removeCredentialsTitle, identifier: Self.removeIdentifier)
-            if model.credentialChoice == nil {
-                deletionNote(DeletionText.choiceRequiredNote, identifier: Self.choiceRequiredIdentifier)
+            if model.isChoiceOpen {
+                choice(.keep, title: DeletionText.keepCredentialsTitle, identifier: Self.keepIdentifier)
+                choice(.remove, title: DeletionText.removeCredentialsTitle, identifier: Self.removeIdentifier)
+                if model.credentialChoice == nil {
+                    deletionNote(DeletionText.choiceRequiredNote, identifier: Self.choiceRequiredIdentifier)
+                }
+            } else {
+                deletionNote(DeletionText.choiceFixedNote, identifier: Self.choiceFixedIdentifier)
             }
             actions
         }
@@ -161,7 +166,7 @@ struct ResetSettingsView: View {
 
     private func choice(_ value: ResetCredentialChoice, title: String, identifier: String) -> some View {
         Button {
-            model.credentialChoice = value
+            model.choose(value)
         } label: {
             HStack {
                 Image(systemName: model.credentialChoice == value ? "largecircle.fill.circle" : "circle")

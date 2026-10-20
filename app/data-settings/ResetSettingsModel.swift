@@ -62,6 +62,16 @@ final class ResetSettingsModel: ObservableObject {
 
     var canRetry: Bool { phase.isPending }
 
+    /// Whether the credential choice is still open. Once a reset has started (resetting, pending or completed) the
+    /// choice it started with is fixed, so the section stops offering one: a retry could not honour a new selection.
+    var isChoiceOpen: Bool { phase == .idle || phase == .confirming || isFailed }
+
+    /// Selects a credential option while the choice is still open; ignored once a reset has started.
+    func choose(_ choice: ResetCredentialChoice) {
+        guard phase == .idle || isFailed else { return }
+        credentialChoice = choice
+    }
+
     private var isFailed: Bool {
         if case .failed = phase { return true }
         return false

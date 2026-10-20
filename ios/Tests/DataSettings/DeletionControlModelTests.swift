@@ -496,6 +496,25 @@ final class ResetSettingsModelTests: XCTestCase {
         XCTAssertEqual(controls.finishCalls, 1)
     }
 
+    func testTheCredentialChoiceClosesOnceAResetHasStarted() async {
+        let controls = FakeReset()
+        controls.resetResults = [.success(Self.outcome(.pending, blockers: [.credentialRemovalIncomplete]))]
+        let model = makeModel(controls)
+        XCTAssertTrue(model.isChoiceOpen)
+        model.choose(.remove)
+        XCTAssertEqual(model.credentialChoice, .remove)
+        model.beginConfirmation()
+        XCTAssertTrue(model.isChoiceOpen, "the choice is still shown, disabled, while confirming")
+        model.choose(.keep)
+        XCTAssertEqual(model.credentialChoice, .remove, "confirming does not change the choice")
+        await model.confirmReset()
+
+        XCTAssertTrue(model.phase.isPending)
+        XCTAssertFalse(model.isChoiceOpen)
+        model.choose(.keep)
+        XCTAssertEqual(model.credentialChoice, .remove, "a started reset takes no new choice")
+    }
+
     func testAResetThatStartedNothingIsAnErrorWithItsReason() async {
         let controls = FakeReset()
         controls.resetResults = [.success(Self.outcome(.notStarted, blockers: [.credentialsUnreadable]))]
