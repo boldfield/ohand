@@ -142,7 +142,9 @@ final class AppServicesTests: XCTestCase {
         let held = await timeChangeWaitUntil { time.sleeperCount == 3 }
         XCTAssertTrue(held)
         time.releaseTimers()
+        let releasedAt = Date()
         let reconciled = await timeChangeWaitUntil { services.lifecycle.finishedPassCount == 1 }
+        NSLog("F27DIAG pass took \(Date().timeIntervalSince(releasedAt)) reconciled=\(reconciled)")
         if !reconciled {
             let started = Date()
             let late = await timeChangeWaitUntil(timeout: 45) { services.lifecycle.finishedPassCount >= 1 }
