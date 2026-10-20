@@ -6,17 +6,20 @@
 //
 // A span that names its day ("Friday at 3 p.m.", "tomorrow at 9 a.m.", "2026-10-09 09:00") is
 // covered when nothing temporal comes earlier in its sentence (a modifier such as "next", "the
-// day after", "a week from", or an alternative such as "Friday or ... Saturday") and when the
-// expression ends right after it. After the span the expression ends only at the end of the
-// sentence, at a word that starts the task ("... 5 p.m. to call Sam"), or, after a comma, colon,
-// dash or ellipsis, at a word that starts a new clause ("..., I don't want to miss it"). A
-// connector ("or", "and", "then", "but") ends it only when nothing temporal or relative follows
-// in the sentence ("or I'll forget" but not "or around 4 p.m.", "or after the meeting"); when
-// the connector opens a whole clause ("then I won't need to cancel by the weekend"), that clause
-// is commentary unless it names a day, date, clock or counted duration itself ("or we could do
-// Saturday at 4 p.m.", "or I'll do it in two days"). Any other word is taken to continue the
-// time (a place, a zone, "on October 15"), so the span is truncated. Task text after a task word
-// is open-ended for a day-naming span: "Friday at 3 p.m. to prep for the 9 a.m. meeting"
+// day after", "a week from", or an alternative such as "Friday or ... Saturday"), when no
+// relative modifier makes the day inexact ("before Friday", "sometime Friday", "by Friday", "no
+// later than Friday", "after the meeting Friday at 3 p.m."), and when the expression ends right
+// after it. After the span the expression ends only at the end of the sentence, at a word that
+// starts the task ("... 5 p.m. to call Sam"), or, after a comma, colon, dash or ellipsis, at a
+// word that starts a new clause. A connector ("or", "and", "then", "but") ends it only when
+// nothing temporal or relative follows in the sentence ("or I'll forget" but not "or around 4
+// p.m.", "or after the meeting"). A clause, whether it follows a connector ("then I won't need to
+// cancel by the weekend") or a clause mark ("..., I don't want to miss it"), is commentary only
+// when it names no time itself: no day, date, clock, time of day, zone, counted duration or bare
+// number ("or we could do Saturday at 4 p.m.", "..., sorry, Saturday at 3 p.m.", "..., I mean
+// 10 a.m.", "..., make it four", "..., it's Tokyo time"). Any other word is taken to continue
+// the time (a place, a zone, "on October 15"), so the span is truncated. Task text after a task
+// word is open-ended for a day-naming span: "Friday at 3 p.m. to prep for the 9 a.m. meeting"
 // schedules Friday.
 //
 // A span that names no day ("at 5 p.m.") is anchored to today by the resolver, which is a guess
@@ -237,12 +240,14 @@ const RELATIVE_DAY_WORDS: &[&str] = &[
 
 /// Whether `span` (character offsets into `basis_text`) covers the whole time expression around
 /// it. It is `false` when the span starts or ends inside a word; when the span names a day and
-/// anything temporal comes earlier in its sentence; when any word follows the span other than one
-/// that starts the task or a new clause, before the sentence ends; when a connector after the
-/// span leads to more time text ("or Saturday at 4 p.m.", "or around 4", "or after lunch"); or
-/// when the span names no day and the capture names any time anywhere else. A bracketed aside
-/// after the span counts as task text only when it reads as one ("(call Sam about the quote)")
-/// and names nothing temporal; "(EST)" or "(Tokyo)" do not.
+/// anything temporal comes earlier in its sentence, or a relative modifier precedes it ("before
+/// Friday at 3 p.m.", "no later than Friday at 3 p.m."); when any word follows the span other
+/// than one that starts the task or a new clause, before the sentence ends; when a clause or
+/// connector after the span leads to more time text ("or Saturday at 4 p.m.", "or around 4",
+/// "or after lunch", "..., I mean 10 a.m.", "..., it's Tokyo time"); or when the span names no
+/// day and the capture names any time anywhere else. A bracketed aside after the span counts as
+/// task text only when it reads as one ("(call Sam about the quote)") and names nothing
+/// temporal; "(EST)" or "(Tokyo)" do not.
 pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -> bool {
     let characters: Vec<char> = basis_text.chars().collect();
     if start > end || end > characters.len() {
@@ -273,9 +278,8 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
     }
     let before_words = words(&before);
     if names_day(&span_text) {
-        !sentence_before_span(&before_words)
-            .iter()
-            .any(|word| is_temporal(&word.text))
+        let sentence = sentence_before_span(&before_words);
+        !sentence.iter().any(|word| is_temporal(&word.text)) && !made_inexact_by_modifier(sentence)
     } else {
         // The resolver anchors the clock to today: nothing else in the capture may name a time.
         let (earlier_sentences, own_sentence) = split_at_last_sentence_end(&before_words);
@@ -347,6 +351,64 @@ fn words(text: &str) -> Vec<Word> {
         }
     }
     words
+}
+
+/// Whether the words before a day-naming span make its day inexact: a relative word anywhere in
+/// the sentence other than a plain preposition ("before Friday at 3 p.m.", "sometime Friday at
+/// 3 p.m.", "no later than Friday at 3 p.m.", "after the meeting Friday at 3 p.m."), or any
+/// relative word right before the span, past hedges, other than the `on`/`at` the grammar
+/// accepts there ("by Friday at 3 p.m.", "from Friday at 3 p.m.", "until maybe Friday at 3
+/// p.m."). Prepositions inside the task text ("to check in on Sam Friday at 3 p.m.") do not.
+fn made_inexact_by_modifier(sentence: &[Word]) -> bool {
+    let adjacent = sentence
+        .iter()
+        .rev()
+        .map(|word| word.text.as_str())
+        .find(|word| !is_hedge(word));
+    sentence
+        .iter()
+        .any(|word| is_relative_time_word(&word.text) && !is_plain_preposition(&word.text))
+        || adjacent.is_some_and(|word| is_relative_time_word(word) && !matches!(word, "on" | "at"))
+}
+
+/// Prepositions that only shift a time when they sit right before it, and are otherwise ordinary
+/// task text ("check in on Sam", "the quote from Acme").
+fn is_plain_preposition(word: &str) -> bool {
+    matches!(
+        word,
+        "at" | "on" | "in" | "by" | "from" | "around" | "past" | "within"
+    )
+}
+
+/// Words that may sit between a modifier and the time it modifies ("no later than maybe
+/// Friday", "by, say, Friday").
+fn is_hedge(word: &str) -> bool {
+    matches!(
+        word,
+        "maybe"
+            | "perhaps"
+            | "possibly"
+            | "probably"
+            | "roughly"
+            | "approximately"
+            | "approx"
+            | "about"
+            | "like"
+            | "say"
+            | "than"
+            | "right"
+            | "just"
+            | "even"
+            | "ideally"
+            | "preferably"
+            | "no"
+            | "not"
+            | "or"
+            | "and"
+            | "the"
+            | "this"
+            | "that"
+    )
 }
 
 /// Whether a raw whitespace-delimited token ends its sentence.
@@ -543,8 +605,12 @@ fn followed_by_more_than_task_text(after: &str, mut meridiem_dot_open: bool) -> 
                 if is_task_word(&word.text) {
                     return false;
                 }
+                // After a clause mark, a new clause is commentary only when it names no time
+                // ("..., I don't want to miss it" but not "..., sorry, Saturday at 3 p.m.").
                 let next_word = sentence.get(1).map(|word| word.text.as_str());
-                return !(after_clause_mark && starts_clause(&word.text, next_word));
+                return !(after_clause_mark
+                    && starts_clause(&word.text, next_word)
+                    && !clause_names_time(sentence));
             }
         }
         meridiem_dot_open = false;
@@ -565,17 +631,77 @@ fn connector_leads_to_more_time(rest: &[Word]) -> bool {
     }
 }
 
-/// Whether a clause names a day, date, clock, time of day, ordinal, holiday or relative day
-/// word, or a unit counted by a number or an article ("in two days", "in a week"). A unit on
-/// its own ("by the weekend") is not an alternative time.
+/// Whether a clause names a day, date, clock, time of day, ordinal, holiday, relative day word,
+/// zone or meridiem; a unit counted by a number or an article ("in two days", "in a week"); or
+/// a bare number word that counts nothing ("I mean four", "make it four, to call"). A unit on
+/// its own ("by the weekend"), a number counting a noun ("the two quotes") or "time" as an
+/// occasion ("last time", "this time", "in time") is not an alternative time.
 fn clause_names_time(words: &[Word]) -> bool {
     words.iter().enumerate().any(|(index, word)| {
-        names_day_or_clock(&word.text)
-            || word_in(&word.text, &[UNITS])
-                && index > 0
-                && (word_in(&words[index - 1].text, &[NUMBERS])
-                    || matches!(words[index - 1].text.as_str(), "a" | "an"))
+        !part_of_occasion_idiom(words, index)
+            && (names_day_or_clock(&word.text)
+                || word_in(&word.text, &[ZONE_WORDS, MERIDIEM_WORDS])
+                || word_in(&word.text, &[UNITS])
+                    && index > 0
+                    && (word_in(&words[index - 1].text, &[NUMBERS])
+                        || matches!(words[index - 1].text.as_str(), "a" | "an"))
+                || word_in(&word.text, &[NUMBERS])
+                    && words.get(index + 1).is_none_or(|next| {
+                        is_task_word(&next.text)
+                            || is_connector(&next.text)
+                            || is_temporal(&next.text)
+                            || is_relative_time_word(&next.text)
+                            || next.text == "instead"
+                            || next.text == "sharp"
+                    }))
     })
+}
+
+/// Whether the word at `index` is part of "time" used as an occasion rather than a zone ("last
+/// time", "next time", "the first time", "in time"): neither the lead word nor "time" then names
+/// a time.
+fn part_of_occasion_idiom(words: &[Word], index: usize) -> bool {
+    let leads = |word: &str| {
+        matches!(
+            word,
+            "last"
+                | "next"
+                | "this"
+                | "that"
+                | "every"
+                | "each"
+                | "first"
+                | "second"
+                | "one"
+                | "the"
+                | "a"
+                | "no"
+                | "some"
+                | "any"
+                | "more"
+                | "much"
+                | "enough"
+                | "long"
+                | "little"
+                | "of"
+                | "in"
+                | "on"
+                | "my"
+                | "your"
+                | "our"
+                | "their"
+                | "his"
+                | "her"
+                | "its"
+                | "same"
+                | "another"
+                | "whole"
+                | "entire"
+        )
+    };
+    let is_time = |word: &Word| word.text == "time";
+    is_time(&words[index]) && index > 0 && leads(&words[index - 1].text)
+        || leads(&words[index].text) && words.get(index + 1).is_some_and(is_time)
 }
 
 /// Words that start the task rather than continue the time ("... 5 p.m. to call Sam").
@@ -842,11 +968,20 @@ mod tests {
                 "tomorrow at 5 p.m.",
             ),
             (
-                "Remind me later today at 5 p.m. to call Sam",
-                "today at 5 p.m.",
+                "Remind me this Friday at 3 p.m. to call Sam",
+                "Friday at 3 p.m.",
+            ),
+            // Prepositions and hedges inside the task text are not modifiers of the time.
+            (
+                "Remind me to check in on Sam Friday at 3 p.m.",
+                "Friday at 3 p.m.",
             ),
             (
-                "Remind me this Friday at 3 p.m. to call Sam",
+                "Remind me to send the quote from Acme by email Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me to call the roofer, maybe Friday at 3 p.m.",
                 "Friday at 3 p.m.",
             ),
             (
@@ -865,6 +1000,27 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. or I'll forget the two quotes",
+                "Friday at 3 p.m.",
+            ),
+            // A clause after a comma is commentary when it names no time.
+            (
+                "Remind me Friday at 3 p.m., I don't want to miss it, to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., sorry, I forgot the two quotes, to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., it's the roofer's number, to call him",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., he said never mind last time",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., I hope I make it in time",
                 "Friday at 3 p.m.",
             ),
         ] {
@@ -1099,6 +1255,40 @@ mod tests {
                 "Remind me the Monday after next, Friday at 3 p.m.",
                 "Friday at 3 p.m.",
             ),
+            // A relative modifier before a day-naming span makes the day inexact.
+            ("Remind me before Friday at 3 p.m.", "Friday at 3 p.m."),
+            ("Remind me after Friday at 3 p.m.", "Friday at 3 p.m."),
+            (
+                "Remind me sometime Friday at 3 p.m. to call",
+                "Friday at 3 p.m.",
+            ),
+            ("Remind me by Friday at 3 p.m. to call", "Friday at 3 p.m."),
+            ("Remind me until Friday at 3 p.m.", "Friday at 3 p.m."),
+            ("Remind me from Friday at 3 p.m.", "Friday at 3 p.m."),
+            (
+                "Remind me no later than Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me not before Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me by maybe Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me to call Sam after the meeting Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me when I'm home Friday at 3 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me later today at 5 p.m. to call Sam",
+                "today at 5 p.m.",
+            ),
             // Alternatives: the span holds only one of two explicit times.
             ("Remind me Friday at 3 p.m. or Saturday", "Friday at 3 p.m."),
             (
@@ -1177,6 +1367,59 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m., or Saturday at 4 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            // A clause after a comma that names a time: self-corrections and zone asides.
+            (
+                "Remind me Friday at 3 p.m., sorry, Saturday at 3 p.m., to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me tomorrow at 9 a.m., I mean 10 a.m., to call the roofer",
+                "tomorrow at 9 a.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., we could also do Saturday at 4 p.m., to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., oh, make it 4 p.m., to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me tomorrow at 9 a.m., it's Tokyo time, to call the roofer",
+                "tomorrow at 9 a.m.",
+            ),
+            (
+                "Remind me tomorrow at 9 a.m., it's EST, to call the roofer",
+                "tomorrow at 9 a.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., I mean four, to call the roofer",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., oh, make it four instead",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m., I mean four",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m.: I'd rather do noon",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. - sorry, next week",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m... I mean in two days",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. or I mean four",
                 "Friday at 3 p.m.",
             ),
         ] {

@@ -1233,6 +1233,86 @@ fn a_day_naming_span_after_another_day_in_its_sentence_is_rejected() {
 }
 
 #[test]
+fn a_span_followed_by_a_self_correction_or_zone_aside_after_a_comma_is_rejected() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m., sorry, Saturday at 3 p.m., to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m., I mean 10 a.m., to call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m., we could also do Saturday at 4 p.m., to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m., oh, make it 4 p.m., to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m., it's Tokyo time, to call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m., I mean four, to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_commentary_clause_after_the_time_still_schedules() {
+    for text in [
+        "Remind me Friday at 3 p.m., I don't want to miss it, to call the roofer",
+        "Remind me Friday at 3 p.m., sorry, I forgot the two quotes, to call the roofer",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_eq!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert_eq!(fixture.reminder_row().request_state, "resolved", "{text}");
+    }
+}
+
+#[test]
+fn a_day_naming_span_after_a_relative_modifier_is_rejected() {
+    for text in [
+        "Remind me before Friday at 3 p.m. to call the roofer",
+        "Remind me after Friday at 3 p.m. to call the roofer",
+        "Remind me sometime Friday at 3 p.m. to call the roofer",
+        "Remind me by Friday at 3 p.m. to call the roofer",
+        "Remind me to call the roofer by Friday at 3 p.m.",
+        "Remind me to call the roofer after the meeting Friday at 3 p.m.",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
 fn a_dayless_span_after_a_day_earlier_in_the_sentence_is_rejected() {
     for (text, instant) in [
         (
