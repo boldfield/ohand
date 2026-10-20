@@ -71,12 +71,9 @@ private struct ExportShareSheetPresenter: UIViewControllerRepresentable {
 /// The export section of the data settings: scope and audio choices, the limits of an export, and how the last export
 /// ended. Everything it shows comes from `ExportSettingsModel`.
 struct ExportSettingsView: View {
-    static let explanationIdentifier = "data-settings.export.explanation"
-    static let limitsIdentifier = "data-settings.export.limits"
-    static let audioNoteIdentifier = "data-settings.export.audio-note"
     static let audioToggleIdentifier = "data-settings.export.audio-toggle"
     static let startIdentifier = "data-settings.export.start"
-    static let noScopeIdentifier = "data-settings.export.no-scope"
+    static let footerIdentifier = "data-settings.export.footer"
     static let stateIdentifier = "data-settings.export.state"
     static let lockedIdentifier = "data-settings.export.locked"
 
@@ -117,9 +114,7 @@ struct ExportSettingsView: View {
         if model.phase == .locked {
             note(ExportSettingsText.lockedText, identifier: Self.lockedIdentifier)
         } else {
-            DSGroupedSection(
-                title: "What to export", footer: model.selectedScopes.isEmpty ? nil : ExportSettingsText.footer
-            ) {
+            DSGroupedSection(title: "What to export", footer: scopeFooter) {
                 ForEach(ExportSettingsModel.selectableScopes, id: \.self) { scope in
                     DSToggleRow(
                         label: ExportSettingsText.scopeTitle(scope),
@@ -135,9 +130,7 @@ struct ExportSettingsView: View {
                     .reportDataSettingsRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
                     .disabled(isBusy)
             }
-            if model.selectedScopes.isEmpty {
-                note(ExportSettingsText.noScopeNote, identifier: Self.noScopeIdentifier)
-            }
+            .reportDataSettingsRendered(Self.footerIdentifier, text: scopeFooter)
             if let message = stateMessage {
                 DSGroupedSection(footer: message) { exportButton }
                     .reportDataSettingsRendered(Self.stateIdentifier, text: message)
@@ -154,6 +147,10 @@ struct ExportSettingsView: View {
             .accessibilityIdentifier(Self.startIdentifier)
             .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
             .disabled(!model.canStart)
+    }
+
+    private var scopeFooter: String {
+        ExportSettingsText.footer(hasScope: !model.selectedScopes.isEmpty, includeAudio: model.includeAudio)
     }
 
     private var isBusy: Bool { model.phase == .preparing || model.phase == .sharing }

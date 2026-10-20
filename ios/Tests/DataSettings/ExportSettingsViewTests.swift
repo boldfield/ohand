@@ -113,9 +113,9 @@ final class ExportSettingsViewTests: XCTestCase {
             XCTAssertEqual(
                 ExportSettingsView.infoParagraphs,
                 [ExportSettingsText.explanation, ExportSettingsText.limitsNote, ExportSettingsText.audioNote])
-            XCTAssertNil(rendered[ExportSettingsView.limitsIdentifier], "the limits live in the info sheet")
-            XCTAssertNil(rendered[ExportSettingsView.explanationIdentifier])
-            XCTAssertEqual(text(ExportSettingsView.noScopeIdentifier), ExportSettingsText.noScopeNote)
+            XCTAssertEqual(
+                text(ExportSettingsView.footerIdentifier), ExportSettingsText.noScopeNote,
+                "with nothing chosen the one footer asks for a choice")
             XCTAssertEqual(text(ExportSettingsView.scopeIdentifier(.personal)), "Personal")
             XCTAssertEqual(text(ExportSettingsView.scopeIdentifier(.work)), "Work")
             XCTAssertNotNil(rendered[ExportSettingsView.audioToggleIdentifier])
@@ -127,8 +127,16 @@ final class ExportSettingsViewTests: XCTestCase {
         await withScreen { model, _ in
             model.setScope(.work, selected: true)
             await settle()
-            XCTAssertNil(rendered[ExportSettingsView.noScopeIdentifier])
             XCTAssertEqual(rendered[ExportSettingsView.startIdentifier]?.isEnabled, true)
+            XCTAssertEqual(text(ExportSettingsView.footerIdentifier), ExportSettingsText.audioOffFooter)
+            model.includeAudio = true
+            await settle()
+            XCTAssertEqual(
+                text(ExportSettingsView.footerIdentifier), ExportSettingsText.audioOnFooter,
+                "the footer follows the audio switch")
+            model.setScope(.work, selected: false)
+            await settle()
+            XCTAssertEqual(text(ExportSettingsView.footerIdentifier), ExportSettingsText.noScopeNote)
         }
     }
 
