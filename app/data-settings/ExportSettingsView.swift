@@ -126,14 +126,14 @@ struct ExportSettingsView: View {
                         isOn: Binding(
                             get: { model.isSelected(scope) }, set: { model.setScope(scope, selected: $0) })
                     )
-                    .disabled(isBusy)
                     .accessibilityIdentifier(Self.scopeIdentifier(scope))
                     .reportDataSettingsRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
+                    .disabled(isBusy)
                 }
                 DSToggleRow(label: "Include audio recordings", isOn: $model.includeAudio)
-                    .disabled(isBusy)
                     .accessibilityIdentifier(Self.audioToggleIdentifier)
                     .reportDataSettingsRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
+                    .disabled(isBusy)
             }
             if model.selectedScopes.isEmpty {
                 note(ExportSettingsText.noScopeNote, identifier: Self.noScopeIdentifier)
@@ -151,9 +151,9 @@ struct ExportSettingsView: View {
         DSPillButton(title: "Export") { Task { await model.startExport() } }
             .frame(maxWidth: .infinity)
             .padding(DSSpacing.sm)
-            .disabled(!model.canStart)
             .accessibilityIdentifier(Self.startIdentifier)
             .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
+            .disabled(!model.canStart)
     }
 
     private var isBusy: Bool { model.phase == .preparing || model.phase == .sharing }
