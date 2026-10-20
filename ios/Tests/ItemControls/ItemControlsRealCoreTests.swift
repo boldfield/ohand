@@ -289,6 +289,60 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "editing resumes once the new values are read")
     }
 
+    func testStopSuggestingMarksPullOnlyAndKeepsTheItemSearchableAndOpen() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.stopSuggesting() }
+        XCTAssertEqual(controls.outcome, .actionDone(.stopSuggesting))
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1")
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertTrue(controls.canAct, "the item stays open, so the controls stay available")
+        XCTAssertNotNil(try readDetail(itemID), "the item is still retrievable")
+
+        root.shutDown()
+        root = try makeRoot()
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1", "survives relaunch")
+    }
+
+    func testNotNowRecordsACooldownThatIsNotPullOnly() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.notNow() }
+        XCTAssertEqual(controls.outcome, .actionDone(.notNow))
+        XCTAssertNotEqual(scalar("SELECT COALESCE(snoozed_until, '') FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "")
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "0")
+    }
+
+    func testCompletingEndsTheItemAndALaterActionIsRefusedWithoutWriting() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.complete() }
+        XCTAssertEqual(controls.outcome, .actionDone(.complete))
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
+        XCTAssertFalse(controls.canAct, "an ended item offers no further actions")
+        onMain { await controls.cancel() }
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
+    }
+
+    func testAnActionOnAnItemThatMovedOnIsAConflictAndWritesNothing() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        let revision = try XCTUnwrap(controls.snapshot?.revision)
+        try run { try await self.root.itemCorrections.correctText(
+            commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision,
+            text: "someone else's words") }
+        onMain { await controls.complete() }
+        guard case .actionConflict(.complete, _)? = controls.outcome else {
+            return XCTFail("expected a conflict, got \(String(describing: controls.outcome))")
+        }
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertGreaterThan(controls.snapshot?.revision ?? 0, revision, "the newer revision is loaded")
+    }
+
     // MARK: helpers
 
     private func hostControls(_ controls: ItemControlsModel) {
