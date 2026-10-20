@@ -27,7 +27,7 @@ public enum JobConfigurationError: Error, Equatable, Sendable {
 /// * **Authorized targets only.** A re-pin moves work only to the profile the core selects now and only if that profile
 ///   is authorized for the route; otherwise it moves nothing and says so with a zero count.
 /// * **Authenticated.** The session must be authenticated when a call is made; a capture-only session gets
-///   `notAuthenticated` and the core is not asked. The two reads of stored state go through the private read gate, so an answer that arrives after a relock is dropped undecoded. A change the
+///   `notAuthenticated` and the core is not asked. The reads of stored state go through the private read gate, so an answer that arrives after a relock is dropped undecoded. A change the
 ///   core confirmed is reported truthfully even if the session relocked while it ran.
 public final class JobConfigurationService: @unchecked Sendable {
     private let core: JobConfigurationCore
@@ -49,6 +49,20 @@ public final class JobConfigurationService: @unchecked Sendable {
         let answer = try await perform(
             .jobsPinnedToProfile(profileVersion: profileVersion, limit: limit), isRead: true)
         guard case .pinnedJobs(let jobs) = answer else { throw JobConfigurationError.unreadable }
+        return jobs
+    }
+
+    /// The jobs the revocation of `profileVersion` retired, one page in stable order. Read it after `revokeProfile`: the set
+    /// is then final and survives a relaunch. Pass the previous page's `nextCursor` as `after` for the next page. `limit`
+    /// (at least 1) narrows the page; the core caps it at 100. A version that was not revoked answers an empty list.
+    public func jobsRetired(byRevocationOf profileVersion: String, limit: Int? = nil, after: String? = nil) async throws
+        -> JobConfigurationRetiredJobs
+    {
+        guard Self.isIdentifier(profileVersion), limit.map({ $0 >= 1 }) ?? true, after.map(Self.isIdentifier) ?? true
+        else { throw JobConfigurationError.invalidRequest }
+        let answer = try await perform(
+            .jobsRetiredByRevocation(profileVersion: profileVersion, limit: limit, after: after), isRead: true)
+        guard case .retiredJobs(let jobs) = answer else { throw JobConfigurationError.unreadable }
         return jobs
     }
 
