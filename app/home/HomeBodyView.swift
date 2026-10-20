@@ -54,6 +54,8 @@ struct HomeBodyView: View {
     static let placeholderCount = 3
 
     @ObservedObject var model: HomeRecentsModel
+    /// Opens the item a tapped card shows. The assembly supplies it, so this folder never reaches the navigation model.
+    var openItem: (String) -> Void = { _ in }
     /// Test seam: receives every reported part of the body each time it is drawn.
     var renderReporter: (([String: HomeRenderedElement]) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -181,7 +183,23 @@ struct HomeBodyView: View {
 
     private func card(for entry: HomeRecentEntry) -> some View {
         let caption = Self.caption(for: entry, now: model.currentDate)
-        return DSCard {
+        let open = { openIfStillShown(entry.id) }
+        return Button(action: open) { cardContent(for: entry, caption: caption) }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier(Self.cardIdentifierPrefix + entry.id)
+            .reportHomeRendered(Self.cardIdentifierPrefix + entry.id, text: Self.text(for: entry), tap: open)
+    }
+
+    /// A card opens only while the list is unlocked and still holds it, so a relock that cleared the list wins.
+    private func openIfStillShown(_ itemID: String) {
+        guard model.bodyState == .unlocked, model.entries.contains(where: { $0.id == itemID }) else { return }
+        openItem(itemID)
+    }
+
+    private func cardContent(for entry: HomeRecentEntry, caption: String) -> some View {
+        DSCard {
             VStack(alignment: .leading, spacing: DSSpacing.xs) {
                 HStack(spacing: DSSpacing.xs) {
                     Circle()
@@ -201,9 +219,7 @@ struct HomeBodyView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(Self.cardIdentifierPrefix + entry.id)
-        .reportHomeRendered(Self.cardIdentifierPrefix + entry.id, text: Self.text(for: entry))
+        .contentShape(Rectangle())
     }
 
     // MARK: Wording
