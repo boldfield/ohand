@@ -110,8 +110,11 @@ final class ExportSettingsViewTests: XCTestCase {
 
     func testControlsLimitsAndTheNoScopePromptAreShownBeforeAnythingIsChosen() async {
         await withScreen { _, _ in
-            XCTAssertEqual(text(ExportSettingsView.limitsIdentifier), ExportSettingsText.limitsNote)
-            XCTAssertEqual(text(ExportSettingsView.audioNoteIdentifier), ExportSettingsText.audioNote)
+            XCTAssertEqual(
+                ExportSettingsView.infoParagraphs,
+                [ExportSettingsText.explanation, ExportSettingsText.limitsNote, ExportSettingsText.audioNote])
+            XCTAssertNil(rendered[ExportSettingsView.limitsIdentifier], "the limits live in the info sheet")
+            XCTAssertNil(rendered[ExportSettingsView.explanationIdentifier])
             XCTAssertEqual(text(ExportSettingsView.noScopeIdentifier), ExportSettingsText.noScopeNote)
             XCTAssertEqual(text(ExportSettingsView.scopeIdentifier(.personal)), "Personal")
             XCTAssertEqual(text(ExportSettingsView.scopeIdentifier(.work)), "Work")

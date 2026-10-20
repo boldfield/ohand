@@ -90,15 +90,15 @@ struct ExportSettingsView: View {
         self.renderReporter = renderReporter
     }
 
+    /// The full explanation behind the info button: what an export is, its limits and what happens to audio.
+    static let infoParagraphs = [
+        ExportSettingsText.explanation, ExportSettingsText.limitsNote, ExportSettingsText.audioNote,
+    ]
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                content
-            }
-            .padding()
+        SettingsScreenChrome(title: ExportSettingsText.heading, infoTitle: "About exports", infoParagraphs: Self.infoParagraphs) {
+            content
         }
-        .navigationTitle("Export")
-        .navigationBarTitleDisplayMode(.inline)
         .onPreferenceChange(RetentionRenderedKey.self) { elements in
             renderReporter?(elements)
         }
@@ -117,42 +117,43 @@ struct ExportSettingsView: View {
         if model.phase == .locked {
             note(ExportSettingsText.lockedText, identifier: Self.lockedIdentifier)
         } else {
-            note(ExportSettingsText.explanation, identifier: Self.explanationIdentifier)
-            note(ExportSettingsText.limitsNote, identifier: Self.limitsIdentifier)
-            Text("Areas to export").font(.headline)
-            ForEach(ExportSettingsModel.selectableScopes, id: \.self) { scope in
-                Toggle(
-                    ExportSettingsText.scopeTitle(scope),
-                    isOn: Binding(
-                        get: { model.isSelected(scope) }, set: { model.setScope(scope, selected: $0) })
-                )
-                .frame(minHeight: 44)
-                .disabled(isBusy)
-                .accessibilityIdentifier(Self.scopeIdentifier(scope))
-                .reportDataSettingsRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
+            DSGroupedSection(
+                title: "What to export", footer: model.selectedScopes.isEmpty ? nil : ExportSettingsText.footer
+            ) {
+                ForEach(ExportSettingsModel.selectableScopes, id: \.self) { scope in
+                    DSToggleRow(
+                        label: ExportSettingsText.scopeTitle(scope),
+                        isOn: Binding(
+                            get: { model.isSelected(scope) }, set: { model.setScope(scope, selected: $0) })
+                    )
+                    .disabled(isBusy)
+                    .accessibilityIdentifier(Self.scopeIdentifier(scope))
+                    .reportDataSettingsRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
+                }
+                DSToggleRow(label: "Include audio recordings", isOn: $model.includeAudio)
+                    .disabled(isBusy)
+                    .accessibilityIdentifier(Self.audioToggleIdentifier)
+                    .reportDataSettingsRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
             }
-            Toggle("Include audio recordings", isOn: $model.includeAudio)
-                .frame(minHeight: 44)
-                .disabled(isBusy)
-                .accessibilityIdentifier(Self.audioToggleIdentifier)
-                .reportDataSettingsRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
-            note(ExportSettingsText.audioNote, identifier: Self.audioNoteIdentifier)
             if model.selectedScopes.isEmpty {
                 note(ExportSettingsText.noScopeNote, identifier: Self.noScopeIdentifier)
             }
-            Button {
-                Task { await model.startExport() }
-            } label: {
-                Text("Export").frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.borderedProminent)
-            .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
-            .disabled(!model.canStart)
-            .accessibilityIdentifier(Self.startIdentifier)
             if let message = stateMessage {
-                note(message, identifier: Self.stateIdentifier)
+                DSGroupedSection(footer: message) { exportButton }
+                    .reportDataSettingsRendered(Self.stateIdentifier, text: message)
+            } else {
+                DSGroupedSection { exportButton }
             }
         }
+    }
+
+    private var exportButton: some View {
+        DSPillButton(title: "Export") { Task { await model.startExport() } }
+            .frame(maxWidth: .infinity)
+            .padding(DSSpacing.sm)
+            .disabled(!model.canStart)
+            .accessibilityIdentifier(Self.startIdentifier)
+            .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
     }
 
     private var isBusy: Bool { model.phase == .preparing || model.phase == .sharing }
@@ -171,8 +172,8 @@ struct ExportSettingsView: View {
 
     private func note(_ text: String, identifier: String) -> some View {
         Text(text)
-            .font(.body)
-            .foregroundColor(.secondary)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier(identifier)
