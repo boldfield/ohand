@@ -5,9 +5,9 @@ use chrono::Duration;
 use chrono::Utc;
 use ohand_core::jobs::configuration::{
     get_item_jobs_for_profile, get_jobs_pinned_to_profile, get_requeue_record,
-    is_job_profile_revoked, is_profile_available, requeue_job_to_new_profile,
-    resolve_execution_target, revoke_profile, revoke_profile_and_retire_jobs_in_tx,
-    ExecutionResolution,
+    is_job_profile_revoked, is_profile_available, jobs_retired_by_revocation,
+    requeue_job_to_new_profile, resolve_execution_target, revoke_profile,
+    revoke_profile_and_retire_jobs_in_tx, ExecutionResolution,
 };
 use ohand_core::jobs::queue::{
     claim_job_with_lease, complete_job, complete_job_in_tx, enqueue_job, JobStatus,
@@ -35,7 +35,11 @@ impl Clock for MockClock {
 }
 
 fn setup_test_db(mock_clock: &Arc<MockClock>) -> Result<(Database, String)> {
-    let db = Database::open(":memory:", mock_clock.clone() as Arc<dyn Clock>)?;
+    setup_test_db_at(":memory:", mock_clock)
+}
+
+fn setup_test_db_at(path: &str, mock_clock: &Arc<MockClock>) -> Result<(Database, String)> {
+    let db = Database::open(path, mock_clock.clone() as Arc<dyn Clock>)?;
     let item_id = "item-config-test-1";
     let capture_id = "capture-config-test-1";
 
@@ -1437,5 +1441,124 @@ fn test_requeue_rejects_job_cancelled_for_other_reason() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(replacement_count, 0);
+    Ok(())
+}
+
+fn enqueue_revision(
+    db: &mut Database,
+    job_id: &str,
+    item_id: &str,
+    profile_version: &str,
+    source_revision: i32,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    enqueue_job(
+        db,
+        job_id.to_string(),
+        item_id.to_string(),
+        "interpret".to_string(),
+        source_revision,
+        Some(profile_version.to_string()),
+        None,
+        1,
+        now,
+    )?;
+    Ok(())
+}
+
+/// The retired-by-revocation read lists queued and running jobs retired by the revoke, links a
+/// requeue, ignores work pinned elsewhere or enqueued after the revoke, pages each job exactly
+/// once, and is identical after the database is closed and reopened.
+#[test]
+fn test_jobs_retired_by_revocation_is_durable_and_exact() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("core.sqlite")
+        .to_string_lossy()
+        .into_owned();
+    let revoked = "profile-retired-aaaaaaaa";
+    let live = "profile-live-bbbbbbbbbb";
+    let now = clock.now();
+
+    let (mut db, item_id) = setup_test_db_at(&path, &clock)?;
+    create_profile(&mut db, "p-retired", revoked)?;
+    create_profile(&mut db, "p-live", live)?;
+    for revision in 0..4 {
+        enqueue_revision(
+            &mut db,
+            &format!("job-retired-{revision}"),
+            &item_id,
+            revoked,
+            revision,
+            now,
+        )?;
+    }
+    enqueue_revision(&mut db, "job-elsewhere", &item_id, live, 0, now)?;
+
+    // Not revoked yet: nothing is listed.
+    let before = jobs_retired_by_revocation(db.conn(), revoked, 10, None)?;
+    assert!(before.jobs.is_empty());
+    assert_eq!(before.total, 0);
+
+    // One job is running at the revoke.
+    let running = claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("a job");
+    assert_eq!(running.profile_version.as_deref(), Some(revoked));
+    revoke_profile(&mut db, revoked, now)?;
+
+    // Work enqueued after the revoke is pinned to the live profile and is not listed.
+    enqueue_revision(&mut db, "job-after", &item_id, live, 9, now)?;
+
+    // One retired job is requeued to the live profile.
+    requeue_job_to_new_profile(
+        &mut db,
+        "job-retired-1",
+        "job-retired-1-new".to_string(),
+        live.to_string(),
+        now,
+    )?;
+
+    let expected_ids: Vec<String> = (0..4).map(|n| format!("job-retired-{n}")).collect();
+    let read_all = |db: &Database| -> Result<Vec<(String, Option<String>)>> {
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = jobs_retired_by_revocation(db.conn(), revoked, 3, cursor.as_deref())?;
+            assert_eq!(page.total, 4);
+            assert!(page.jobs.len() <= 3);
+            collected.extend(
+                page.jobs
+                    .into_iter()
+                    .map(|job| (job.job_id, job.requeued_to)),
+            );
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(collected)
+    };
+    let listed = read_all(&db)?;
+    let listed_ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(listed_ids, expected_ids, "each job once, in stable order");
+    assert_eq!(listed[1].1.as_deref(), Some("job-retired-1-new"));
+    assert!(listed
+        .iter()
+        .filter(|(id, _)| id != "job-retired-1")
+        .all(|(_, requeued_to)| requeued_to.is_none()));
+    let first_page = jobs_retired_by_revocation(db.conn(), revoked, 3, None)?;
+    assert_eq!(first_page.jobs[0].retired_at, now.to_rfc3339());
+    assert_eq!(first_page.jobs[0].item_id, item_id);
+
+    let live_listing = jobs_retired_by_revocation(db.conn(), live, 10, None)?;
+    assert!(
+        live_listing.jobs.is_empty(),
+        "a live profile retired nothing"
+    );
+
+    drop(db);
+    let reopened = Database::open(&path, clock.clone() as Arc<dyn Clock>)?;
+    assert_eq!(read_all(&reopened)?, listed);
     Ok(())
 }
