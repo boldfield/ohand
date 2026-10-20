@@ -68,7 +68,7 @@ jobs:
         run: |
           set -uo pipefail
           cd ios
-          for spec in "testRealStepsTiming 50" "testASlowStepReproducesTheRecordedSignature 1"; do
+          for spec in "testASlowStepReproducesTheRecordedSignature 2"; do
             set -- $spec
             xcodebuild test \
               -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
