@@ -429,7 +429,9 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
                 results.append(LifecycleStepResult(step: step, outcome: .deferred("reset_unsettled")))
                 continue
             }
+            let diagStart = DispatchTime.now().uptimeNanoseconds
             let outcome = await runBounded(action, triggers: triggers)
+            NSLog("F27DIAG step=%@ ms=%.1f", step.rawValue, Double(DispatchTime.now().uptimeNanoseconds - diagStart) / 1e6)
             if step == .reset {
                 setResetUnsettled(outcome != .completed)
             }
@@ -446,7 +448,9 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
         guard !wanted.contains(.reset), wanted.contains(where: Self.isHeldByUnsettledReset), isResetUnsettled(),
             !stopped(), let resume = action(for: .reset)
         else { return }
+        let diagStart = DispatchTime.now().uptimeNanoseconds
         let outcome = await runBounded(resume, triggers: triggers)
+        NSLog("F27DIAG step=resetPrecondition ms=%.1f", Double(DispatchTime.now().uptimeNanoseconds - diagStart) / 1e6)
         setResetUnsettled(outcome != .completed)
     }
 

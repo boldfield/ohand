@@ -61,22 +61,22 @@ jobs:
         run: cd ios && ./scripts/generate.sh
 
       # Ad-hoc signed so the hosted test bundle carries the app's Keychain entitlement (V04 real-Keychain tests).
-      - name: Run OhAndTests on simulator
+      - name: F27 diagnostics (temporary)
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd ios
-          xcodebuild test \
-            -project OhAnd.xcodeproj \
-            -scheme OhAndTests \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-            -derivedDataPath .derived \
-            -resultBundlePath .evidence/OhAndTests.xcresult \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
+          for spec in "testRealStepsTiming 50" "testASlowStepReproducesTheRecordedSignature 1"; do
+            set -- $spec
+            xcodebuild test \
+              -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" -derivedDataPath .derived \
+              -only-testing:"OhAndTests/F27DiagTests/$1" -test-iterations "$2" \
+              CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee ".evidence/diag-$1.log" | grep -E "F27DIAG|error:|TEST SUCCEEDED|TEST FAILED|Test Case.*(passed|failed)" || true
+          done
+          exit 1
 
       - name: Run credential cross-process relaunch check
         shell: bash
