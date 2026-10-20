@@ -43,7 +43,7 @@ use crate::reminders::state::{
 };
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
-use crate::time::resolver::{TimeContext, TimeResolver};
+use crate::time::resolver::{ResolutionError, TimeContext, TimeResolver};
 use crate::time::span_covers_time_expression;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
@@ -850,6 +850,25 @@ fn record_reminder(
     }
 }
 
+/// The resolver's repeat detection applied to the whole text, punctuation treated as whitespace,
+/// as the reminder API applies it when it records a derived request.
+fn text_states_repeat(basis_text: &str, time_context: &TimeContext) -> bool {
+    let spaced: String = basis_text
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    matches!(
+        TimeResolver::resolve(&spaced, time_context),
+        Err(ResolutionError::UnsupportedRepeat(_))
+    )
+}
+
 struct FixedClock(DateTime<Utc>);
 
 impl Clock for FixedClock {
@@ -883,7 +902,11 @@ fn candidate_contradiction(
     let resolution = TimeResolver::resolve(phrase, time_context).ok()?;
     let resolved = resolution.resolved_time?;
     if let Some(span) = candidate.source_span {
-        if !span_covers_time_expression(basis_text, span.start, span.end) {
+        // A repeat marker elsewhere in the text ("every Monday starting ...") is stored as an
+        // unsupported recurrence without an instant, which says more than a rejection would.
+        if !span_covers_time_expression(basis_text, span.start, span.end)
+            && !text_states_repeat(basis_text, time_context)
+        {
             return Some("the proposed instant is not what the source phrase resolves to");
         }
     }
