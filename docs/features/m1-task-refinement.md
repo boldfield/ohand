@@ -3274,3 +3274,21 @@ Acceptance:
 3. Search: when the person returns from a result's detail and an item changed in the meantime, the same query and filters are re-run, so a deleted item is gone and a changed item shows its current text. When nothing changed, the kept results come back unchanged, without a new query, as now. A deleted item is never shown as a result, even while the re-run is in flight. The regular-width item pane behaves the same way.
 4. Detail: after the person deletes the item, the screen shows the deletion result and the back button only, not the "Not here" message as well. Opening an item that was deleted earlier still shows "Not here".
 5. Tests, real core where the read path matters: delete from detail, then home and search no longer list the item; correct text from detail, then home and search show the new text; a stale-revision refusal publishes nothing; a change while locked loads nothing; the signal never carries content. Exact-head macOS run linked.
+
+### F34
+
+Let the person send notes that are waiting to be sorted to a provider they have just allowed
+
+A07 added the explicit operation that moves waiting work onto a newly authorized profile (`repin_waiting_interpretations`, exposed as `JobConfigurationService.repinWaitingWork(routeID:)`). By design it never runs on its own (A07 acceptance 3). No screen calls it. On the maintainer's phone, which uses "On this phone" processing, typed notes from days ago are all "Not yet sorted". That is correct while no provider is set. Once a provider is configured and allowed, those notes still stay unsorted, because nothing offers the explicit step. Every note captured before the trial's provider is set up would stay unsorted.
+
+Owned paths: `app/privacy-settings/` and its tests (`ios/Tests/PrivacySettings/` or the existing test location for that directory).
+
+Dependencies: U06b, which owns `app/privacy-settings/`.
+
+Acceptance:
+
+1. On the Privacy screen, a route that has a granted, authorized processing profile offers one explicit control to sort the notes waiting on that route. Its explanation names where the notes will go (the provider's display name and whether it is a cloud provider or the person's own server) and says that only notes still waiting are sent. Nothing is sent until the person confirms.
+2. Confirming calls `repinWaitingWork(routeID:)` and keeps calling while it moves a full batch, up to a bounded number of calls. The screen then shows how many notes were queued, or "No notes were waiting" when the count is 0. A failure shows a retry, and nothing is reported as sent that was not.
+3. The control is absent for a route with no grant or no authorized profile, and while reads are locked. The operation itself requires an authenticated session (A07 acceptance 4).
+4. It never runs implicitly: granting a route or changing the default does not call it, and a test proves this.
+5. Real-core test: capture with no provider; configure a fake provider profile and grant the route; confirm; the waiting item's job is queued against that profile. Exact-head macOS run linked.

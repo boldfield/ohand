@@ -3554,6 +3554,26 @@
         "app/home/HomeRecentsModel.swift:131",
         "core/src/lifecycle/delete_intent/mod.rs:339"
       ]
+    },
+    {
+      "key": "F34",
+      "parent": null,
+      "title": "Let the person send notes that are waiting to be sorted to a provider they have just allowed",
+      "file_scope": [
+        "app/privacy-settings/"
+      ],
+      "intent": "Expose A07's explicit re-pin of waiting work on the Privacy screen so notes captured without a provider can be sorted after one is allowed.",
+      "acceptance": [
+        "See the F34 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U06b"
+      ],
+      "source_pointers": [
+        "ios/Services/JobConfiguration/JobConfigurationService.swift:89",
+        "core/src/jobs/configuration/repin.rs"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4314,6 +4334,9 @@
     "F32": [],
     "F33": [
       "F32"
+    ],
+    "F34": [
+      "U06b"
     ]
   },
   "retained_dependency_overrides": {
