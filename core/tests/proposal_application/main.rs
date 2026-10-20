@@ -1011,13 +1011,18 @@ fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
 
 /// Apply a clock-time reminder proposal for `text` (captured 2026-10-08T14:00:00Z, 10:00 EDT, in
 /// America/New_York) whose source span quotes `quoted`.
-fn apply_clock_proposal(text: &str, quoted: &str, instant: &str) -> (Fixture, ReminderDisposition) {
+fn apply_clock_proposal(
+    text: &str,
+    quoted: &str,
+    instant: &str,
+    item_span: &str,
+) -> (Fixture, ReminderDisposition) {
     let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
     let lease = fixture.claim_job(0, capture_instant());
     let proposal = fixture
         .proposal_for(&lease, 0)
         .with_item_type(Some(ItemType::Action))
-        .with_source_spans(Some(vec![span_of(text, "join the call")]))
+        .with_source_spans(Some(vec![span_of(text, item_span)]))
         .with_reminder_proposal(Some(ReminderProposal {
             instant: Some(instant.to_string()),
             timezone_id: Some("America/New_York".to_string()),
@@ -1030,9 +1035,10 @@ fn apply_clock_proposal(text: &str, quoted: &str, instant: &str) -> (Fixture, Re
 
 fn apply_friday_three_pm(instant: &str) -> (Fixture, ReminderDisposition) {
     apply_clock_proposal(
-        "Remind me Friday at 3 p.m. to join the call",
+        "Remind me Friday at 3 p.m. to call the roofer",
         "Friday at 3 p.m.",
         instant,
+        "call the roofer",
     )
 }
 
@@ -1051,8 +1057,27 @@ fn a_span_missing_the_zone_qualifier_is_rejected() {
         "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
         "tomorrow at 9 a.m.",
         "2026-10-09T09:00:00-04:00",
+        "join the call",
     );
     assert_rejected_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn a_span_missing_a_multiword_or_bracketed_zone_is_rejected() {
+    for text in [
+        "Remind me tomorrow at 9 a.m. New York time to join the call",
+        "Remind me tomorrow at 9 a.m. Los Angeles time to join the call",
+        "Remind me tomorrow at 9 a.m. (EST) to join the call",
+        "Remind me tomorrow at 9 a.m. in Tokyo to join the call",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "join the call",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
 }
 
 #[test]
@@ -1061,6 +1086,7 @@ fn a_span_missing_the_day_is_rejected() {
         "Remind me tomorrow at 5 p.m. to join the call",
         "at 5 p.m.",
         "2026-10-08T17:00:00-04:00",
+        "join the call",
     );
     assert_rejected_and_unscheduled(&fixture, disposition);
 }
@@ -1071,6 +1097,7 @@ fn the_full_span_still_schedules_and_trailing_words_are_not_truncation() {
         "Remind me tomorrow at 5 p.m. to join the call",
         "tomorrow at 5 p.m.",
         "2026-10-09T17:00:00-04:00",
+        "join the call",
     );
     assert_eq!(
         disposition,
