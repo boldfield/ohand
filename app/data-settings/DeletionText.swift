@@ -81,6 +81,10 @@ enum DeletionText {
         + "continue; it also resumes when the app opens."
     static let nativeWorkOwedText =
         "A reset has not finished cleaning up this device. Try again to continue; it also resumes when the app opens."
+    static let progressUnreadableResetText =
+        "Whether an earlier reset has finished could not be read. Try again to continue it; nothing new is deleted."
+    static let progressUnreadableItemText =
+        "Whether this deletion has finished could not be read. Check progress to try again."
     static let notStartedText = "Nothing was deleted. Try again."
     static let unavailableResetText = "The reset could not be read. Try again later."
 

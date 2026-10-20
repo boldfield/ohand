@@ -139,7 +139,10 @@ final class ResetSettingsModel: ObservableObject {
         } catch ResetControlError.notAuthenticated {
             lock()
         } catch {
-            // A failed read leaves the section as it was; the reset itself is unaffected.
+            // An earlier reset may be unfinished, so an unreadable state is never shown as a fresh start. Retry only
+            // finishes a pending reset; it starts none.
+            guard readScope() == .authenticated, phase == .idle || phase.isPending else { return }
+            phase = .pending(DeletionText.progressUnreadableResetText)
         }
     }
 

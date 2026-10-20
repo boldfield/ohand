@@ -141,7 +141,12 @@ final class ItemDeletionModel: ObservableObject {
             if progress != .notRequested { adopt(progress) }
         } catch {
             guard thisSession == session else { return }
-            if Self.isLocked(error) { lock() }
+            if Self.isLocked(error) { lock(); return }
+            // A tombstoned item cannot be read, so an unreadable progress is shown as such rather than as nothing.
+            if phase == .idle, revision == nil {
+                canRetryPending = true
+                phase = .pending(DeletionText.progressUnreadableItemText)
+            }
         }
     }
 
@@ -172,10 +177,19 @@ final class ItemDeletionModel: ObservableObject {
         while !Task.isCancelled && !isRecorded {
             try? await Task.sleep(nanoseconds: Self.recordedPollNanoseconds)
             guard !Task.isCancelled else { return }
-            if let progress = try? await controls.progress(itemID: itemID), progress != .notRequested {
+            if let progress = try? await controls.progress(itemID: itemID) {
+                if progress != .notRequested { isRecorded = true }
+            } else if await itemReadsAsDeleted() {
+                // The progress read is unavailable; the item's own read still shows the tombstone.
                 isRecorded = true
             }
         }
+    }
+
+    private func itemReadsAsDeleted() async -> Bool {
+        guard readScope() == .authenticated else { return false }
+        guard let detail = try? await reader.detail(itemID: itemID) else { return false }
+        return detail.lifecycleState == "deleted"
     }
 
     private func adopt(_ progress: ItemDeletionProgress, settled: Bool = true) {

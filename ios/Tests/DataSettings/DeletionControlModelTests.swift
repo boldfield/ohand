@@ -55,6 +55,8 @@ final class FakeItemDeletion: ItemDeletionControlling, @unchecked Sendable {
     var progressResults: [Result<ItemDeletionProgress, Error>] = []
     /// What a progress read answers once `progressResults` is used up.
     var progressFallback: ItemDeletionProgress = .notRequested
+    /// When set, every progress read fails with it.
+    var progressFailure: Error?
     var deleteGate: DeletionCallGate?
     private(set) var deleteCalls: [(itemID: String, revision: Int)] = []
     private(set) var progressCalls = 0
@@ -67,6 +69,7 @@ final class FakeItemDeletion: ItemDeletionControlling, @unchecked Sendable {
 
     func progress(itemID: String) async throws -> ItemDeletionProgress {
         progressCalls += 1
+        if let progressFailure { throw progressFailure }
         if progressResults.isEmpty { return progressFallback }
         return try progressResults.removeFirst().get()
     }
@@ -208,6 +211,38 @@ final class ItemDeletionModelTests: XCTestCase {
         controls.deleteGate?.open()
         await deleting.value
         XCTAssertEqual(model.phase, .complete)
+    }
+
+    func testTheDeletionIsReportedAsRecordedWhenOnlyTheItemReadShowsTheTombstone() async throws {
+        let controls = FakeItemDeletion()
+        controls.deleteGate = DeletionCallGate()
+        controls.progressFailure = ItemDeletionError.unreadable
+        controls.deleteResults = [.success(receipt(.complete, settled: true))]
+        let model = await preparedModel(controls)
+        model.requestDeletion()
+
+        let deleting = Task { await model.confirmDeletion() }
+        reader.lifecycleState = "deleted"
+        let deadline = Date().addingTimeInterval(5)
+        while !model.isRecorded && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+
+        XCTAssertTrue(model.isRecorded, "the source is dropped even when progress cannot be read")
+        XCTAssertEqual(model.phase, .deleting)
+        controls.deleteGate?.open()
+        await deleting.value
+    }
+
+    func testAnUnreadableProgressForAnUnreadableItemIsShownAndCanBeChecked() async {
+        let controls = FakeItemDeletion()
+        controls.progressFailure = ItemDeletionError.unreadable
+        reader.failure = ItemDetailError.notFound
+        let model = await preparedModel(controls)
+
+        await model.refreshProgress()
+
+        guard case .pending(let text) = model.phase else { return XCTFail("got \(model.phase)") }
+        XCTAssertTrue(text.contains("could not be read"))
+        XCTAssertTrue(model.canCheckProgress)
     }
 
     func testTerminallyFailedCleanupIsShownAndNotOfferedAsRetry() async {
@@ -412,6 +447,18 @@ final class ResetSettingsModelTests: XCTestCase {
 
         XCTAssertTrue(model.phase.isPending)
         XCTAssertTrue(model.canRetry, "a retry finishes the reset under its original choice")
+    }
+
+    func testAnUnreadableResetProgressIsNotShownAsAFreshStart() async {
+        let controls = FakeReset()
+        controls.progressResults = [.failure(CocoaError(.fileReadUnknown))]
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        guard case .pending(let text) = model.phase else { return XCTFail("got \(model.phase)") }
+        XCTAssertTrue(text.contains("could not be read"))
+        XCTAssertTrue(model.canRetry)
     }
 
     func testARestartShowsNativeCleanupThatTheCoreDoesNotReport() async {
