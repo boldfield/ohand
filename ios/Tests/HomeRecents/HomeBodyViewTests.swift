@@ -313,11 +313,27 @@ final class HomeBodyViewTests: XCTestCase {
 
         shownModel.captureDidSave(itemID: "new-1", interpretationIsResolved: false)
         await settle()
+        XCTAssertEqual(rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"]?.text, HomeBodyView.sortingLabel)
         tap(HomeBodyView.cardIdentifierPrefix + "new-1")
         XCTAssertEqual(openedItems, ["earlier-1", "new-1"])
     }
 
-    func testPlaceholderAndLockedStatesExposeNoTappableCard() async {
+    func testPlaceholderStateExposesNoTappableCard() async {
+        source.isQuietAttemptInFlight = true
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
+        await show()
+        XCTAssertNotNil(rendered[HomeBodyView.placeholderIdentifier])
+        XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier]?.tap)
+        for index in 0..<HomeBodyView.placeholderCount {
+            let identifier = HomeBodyView.placeholderCardIdentifierPrefix + String(index)
+            XCTAssertNotNil(rendered[identifier], "\(identifier) is drawn")
+            XCTAssertNil(rendered[identifier]?.tap, "\(identifier) is not tappable")
+        }
+        XCTAssertTrue(rendered.keys.filter { $0.hasPrefix(HomeBodyView.cardIdentifierPrefix) }.isEmpty)
+        XCTAssertTrue(openedItems.isEmpty)
+    }
+
+    func testLockedStateExposesNoTappableCard() async {
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
         await show()
         XCTAssertTrue(rendered.keys.filter { $0.hasPrefix(HomeBodyView.cardIdentifierPrefix) }.isEmpty)
