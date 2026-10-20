@@ -1081,6 +1081,57 @@ fn a_span_missing_a_multiword_or_bracketed_zone_is_rejected() {
 }
 
 #[test]
+fn a_span_followed_by_any_other_place_or_zone_text_is_rejected() {
+    for text in [
+        "Remind me tomorrow at 9 a.m. Tokyo to join the call",
+        "Remind me tomorrow at 9 a.m. Ho Chi Minh City time to join the call",
+        "Remind me tomorrow at 9 a.m. America/New_York to join the call",
+        "Remind me tomorrow at 9 a.m. Tokyo, Japan time to join the call",
+        "Remind me tomorrow at 9 a.m. (Tokyo) to join the call",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "join the call",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_span_missing_the_surrounding_date_is_rejected() {
+    for text in [
+        "Remind me at 3 p.m. on October 15 to join the call",
+        "Remind me on the 15th at 3 p.m. to join the call",
+        "Remind me in two days at 3 p.m. to join the call",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "at 3 p.m.",
+            "2026-10-08T15:00:00-04:00",
+            "join the call",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_bracketed_task_aside_after_the_time_still_schedules() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+        "call Sam about the quote",
+    );
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    assert_eq!(fixture.reminder_row().request_state, "resolved");
+}
+
+#[test]
 fn a_span_missing_the_day_is_rejected() {
     let (fixture, disposition) = apply_clock_proposal(
         "Remind me tomorrow at 5 p.m. to join the call",

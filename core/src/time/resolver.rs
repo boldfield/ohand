@@ -53,6 +53,12 @@ pub struct TimeContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AmbiguityKind {
     MissingHour,
+    /// A clock time with no day part that is not later today ("at 9 a.m." captured at 10:00).
+    MissingDay,
+    /// An hour with no a.m./p.m. ("Friday at 3").
+    MissingMeridiem,
+    /// Text after the clock this grammar does not understand, such as a zone ("9 a.m. EST").
+    UnsupportedQualifier,
     DstGap,
     DstFold,
     Past,
@@ -390,7 +396,7 @@ impl TimeResolver {
         let tokens: Vec<&str> = phrase_normalized.split_whitespace().collect();
         let (day, clock, rest) = Self::split_day_and_clock(&tokens, context, tz)?;
 
-        let ambiguous = |date: Option<NaiveDate>, reason: &str| {
+        let ambiguous = |date: Option<NaiveDate>, kind: AmbiguityKind, reason: &str| {
             let ref_date = context.reference_time.with_timezone(&tz).date_naive();
             ResolutionResult {
                 original_phrase: original_phrase.to_string(),
@@ -399,7 +405,7 @@ impl TimeResolver {
                 resolved_time: None,
                 candidates: vec![],
                 is_ambiguous: true,
-                ambiguity_kind: Some(AmbiguityKind::MissingHour),
+                ambiguity_kind: Some(kind),
                 ambiguity_reason: Some(reason.to_string()),
                 is_past: date.is_some_and(|date| date < ref_date),
                 context: context.clone(),
@@ -409,6 +415,7 @@ impl TimeResolver {
         if !rest.is_empty() {
             return Some(ambiguous(
                 day,
+                AmbiguityKind::UnsupportedQualifier,
                 "Time zone or unrecognized qualifier after the time is not supported yet",
             ));
         }
@@ -417,6 +424,7 @@ impl TimeResolver {
             ClockPart::MissingMeridiem => {
                 return Some(ambiguous(
                     day,
+                    AmbiguityKind::MissingMeridiem,
                     "Missing meridiem: say a.m. or p.m. for the hour",
                 ));
             }
@@ -439,6 +447,7 @@ impl TimeResolver {
             if !later_today {
                 return Some(ambiguous(
                     None,
+                    AmbiguityKind::MissingDay,
                     "Missing day: that time is not later today, so the day is unclear",
                 ));
             }

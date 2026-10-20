@@ -615,7 +615,7 @@ fn clock_without_day_is_today_only_when_later() {
             !result.is_past,
             "{phrase} is a missing day, not a past time"
         );
-        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingHour));
+        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingDay));
     }
 }
 
@@ -631,6 +631,12 @@ fn bare_hour_and_unsupported_clock_forms_are_ambiguous_or_rejected() {
         "tomorrow at 3:30",
     ] {
         assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingMeridiem),
+            "{phrase}"
+        );
     }
     let context = make_context(NY, NY_THURSDAY);
     for phrase in [
@@ -661,6 +667,12 @@ fn zone_qualifiers_never_resolve_in_the_capture_zone() {
         "9 a.m. tomorrow EST",
     ] {
         assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::UnsupportedQualifier),
+            "{phrase}"
+        );
     }
 }
 
