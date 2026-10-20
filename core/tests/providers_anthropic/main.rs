@@ -9,7 +9,7 @@ use ohand_core::providers::anthropic::fake::{FakeAnthropicStep, FakeAnthropicTra
 use ohand_core::providers::anthropic::{
     AnthropicAdapter, AnthropicSettings, HttpMethod, HttpRequest, SettingsError,
     ANTHROPIC_API_VERSION, ANTHROPIC_MESSAGES_ENDPOINT, CREDENTIAL_HEADER,
-    INTERPRETATION_TOOL_NAME,
+    DEFAULT_MAX_OUTPUT_TOKENS, INTERPRETATION_TOOL_NAME,
 };
 use ohand_core::providers::contracts::{
     dispatch, CancelToken, CapabilityMetadata, DispatchLimits, FailureKind, InterpretationOutput,
@@ -309,6 +309,41 @@ fn max_output_tokens_comes_from_settings() {
         AnthropicSettings::default().with_max_output_tokens(0),
         Err(SettingsError::InvalidMaxOutputTokens)
     );
+}
+
+#[test]
+fn default_output_cap_is_4096_and_only_max_tokens_differs_from_an_explicit_override() {
+    assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 4096);
+    assert_eq!(AnthropicSettings::default().max_output_tokens, 4096);
+    let default_harness = Harness::new(vec![ok_reply(valid_proposal())]);
+    default_harness.run().expect("valid reply");
+    let mut default_body = body_of(&default_harness.transport.calls()[0]);
+    assert_eq!(default_body["max_tokens"], 4096);
+
+    let tuned_harness = Harness::with(
+        profile(StructuredOutputMode::JsonSchema),
+        AnthropicSettings::default()
+            .with_max_output_tokens(256)
+            .expect("positive"),
+        vec![ok_reply(valid_proposal())],
+    );
+    tuned_harness.run().expect("valid reply");
+    let mut tuned_body = body_of(&tuned_harness.transport.calls()[0]);
+    assert_eq!(tuned_body["max_tokens"], 256);
+
+    default_body.as_object_mut().unwrap().remove("max_tokens");
+    tuned_body.as_object_mut().unwrap().remove("max_tokens");
+    // Each request carries freshly generated identifiers inside the user message; blank them so
+    // the complete remaining body can be compared.
+    for body in [&mut default_body, &mut tuned_body] {
+        let content = body["messages"][0]["content"].as_str().unwrap();
+        let mut user_message: serde_json::Value = serde_json::from_str(content).unwrap();
+        user_message["profile"]["profile_version"] = json!("normalized");
+        user_message["request"]["capture_id"] = json!("normalized");
+        user_message["request"]["request_version"] = json!("normalized");
+        body["messages"][0]["content"] = json!(user_message.to_string());
+    }
+    assert_eq!(default_body, tuned_body);
 }
 
 #[test]
