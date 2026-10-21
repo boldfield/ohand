@@ -188,7 +188,8 @@ final class HomeRecentsModel: ObservableObject {
         case .item(let itemID):
             let wasSorting = justSaved.removeValue(forKey: itemID) != nil
             guard let index = loadedItems.firstIndex(where: { $0.itemID == itemID }) else {
-                if wasSorting { reloadFirstPage() }
+                // A first page still being read may predate the change and hold the item.
+                if wasSorting || isLoadingFirstPage { reloadFirstPage() }
                 return
             }
             if index >= headCount {
