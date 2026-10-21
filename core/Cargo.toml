@@ -24,5 +24,9 @@ name = "capture_processing_resilience"
 path = "../tests/resilience/capture-processing/main.rs"
 
 [[test]]
+name = "outbound_privacy"
+path = "../tests/privacy/main.rs"
+
+[[test]]
 name = "live_providers"
 path = "tests/live_providers/main.rs"
