@@ -648,7 +648,8 @@ final class PrivacySettingsModel: ObservableObject {
                 }
                 try await controls.revokeProfile(profileVersion)
                 recordPreview(preview, profileVersion: profileVersion)
-                actionState = .changed(await readRetiredResult(profileVersion, versionLabel: versionLabel))
+                actionState = .changed(
+                    await readRetiredResult(profileVersion, versionLabel: versionLabel, preview: preview))
             case .repinWaitingWork(let routeID, let routeLabel):
                 let moved = try await controls.repinWaitingWork(routeID: routeID)
                 actionState = .changed(
@@ -683,14 +684,26 @@ final class PrivacySettingsModel: ObservableObject {
     /// Reads the core's durable listing of what the revocation retired and describes it. The listing, not any
     /// expectation, is the result: it has every job the revocation retired, and only those. A failed read says so;
     /// the core keeps the list, and the next refresh reads it again.
-    private func readRetiredResult(_ profileVersion: String, versionLabel: String) async -> String {
+    ///
+    /// Only the first page is read here, so the count of retired jobs whose request had already been sent is exact
+    /// for the jobs shown. For the rest, the result says what is known: with a complete preview, at most how many
+    /// of them the preview listed as running (one may have completed before the revocation, so it was not retired);
+    /// with a capped or unread preview, that more may have been sent. Each row says so for itself once shown.
+    private func readRetiredResult(
+        _ profileVersion: String, versionLabel: String, preview: JobConfigurationPinnedJobs?
+    ) async -> String {
         do {
             let retired = try await readRetiredPages(profileVersion, versionLabel: versionLabel, atLeast: 0)
             retiredWork.removeAll { $0.profileVersion == profileVersion }
             if retired.total > 0 { retiredWork.append(retired) }
+            let sentShown = retired.jobs.filter { $0.preview == .running }.count
+            var sentUnshown: Int?
+            if let preview, !preview.truncated {
+                sentUnshown = max(preview.jobs.filter { $0.status == "running" }.count - sentShown, 0)
+            }
             return PrivacySettingsText.profileRevoked(
-                versionLabel, retired: retired.total, alreadySent: retired.jobs.filter { $0.preview == .running }.count,
-                listed: retired.jobs.count)
+                versionLabel, retired: retired.total, listed: retired.jobs.count, sentShown: sentShown,
+                sentUnshown: sentUnshown)
         } catch {
             retiredWorkUnreadable = true
             return PrivacySettingsText.profileRevokedUnread(versionLabel)

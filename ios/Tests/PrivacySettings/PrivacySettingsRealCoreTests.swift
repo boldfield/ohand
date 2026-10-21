@@ -575,6 +575,67 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.retiredWork.first?.jobs.first { $0.jobID == jobID }?.requeuedTo, record.newJobID)
     }
 
+    func testASentRequestRetiredPastTheFirstPageIsBoundedInTheResultAndSaidOnItsRowOnceShown() async throws {
+        let model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+        // Twenty-three more queued jobs and one whose request is out, shaped like the real one. The core lists retired
+        // work in job ID order, so the sent one, last in that order, is past this screen's first page of twenty.
+        let copy = { (id: String, status: String) in
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, "
+                + "request_version, status, attempt_count, created_at) SELECT '\(id)', job_schema_version, item_id, "
+                + "job_type, source_revision, profile_version, request_version, '\(status)', 0, created_at FROM jobs "
+                + "WHERE job_id = '\(jobID)'"
+        }
+        let copies = (1...23).map { copy("synthetic-pending-\($0)", "queued") } + [copy("synthetic-running-1", "running")]
+        execute("BEGIN; " + copies.joined(separator: "; ") + "; COMMIT")
+        let listed = try await root.jobConfiguration.jobsPinned(toProfile: version)
+        XCTAssertEqual(listed.total, 25)
+        XCTAssertFalse(listed.truncated, "the preview is complete")
+        XCTAssertEqual(listed.jobs.filter { $0.status == "running" }.map(\.jobID), ["synthetic-running-1"])
+
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else {
+            return XCTFail("expected changed, got \(String(describing: model.actionState))")
+        }
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "25", "every job was retired")
+        XCTAssertEqual(
+            scalar("SELECT status || '/' || failure_reason FROM jobs WHERE job_id = 'synthetic-running-1'"),
+            "cancelled/profile_revoked", "the sent one was retired too; its reply, if it arrives, is not applied")
+        XCTAssertTrue(message.contains("The revocation retired 25 jobs"), message)
+        XCTAssertTrue(message.contains("20 of them are shown; the rest load from the list"), message)
+        XCTAssertFalse(message.contains("Of the 20 shown"), "none of the shown jobs had been sent: \(message)")
+        XCTAssertFalse(message.contains("of them had already been sent"), "no count claims to cover every retired job: \(message)")
+        XCTAssertTrue(
+            message.contains(
+                "Up to 1 of the 5 not shown yet had already been sent; a reply that arrives after the revocation is not "
+                    + "applied. Each row says so once shown."),
+            message)
+        let firstPage = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(firstPage.total, 25)
+        XCTAssertEqual(firstPage.jobs.count, PrivacySettingsModel.queuedJobLimit)
+        XCTAssertFalse(firstPage.jobs.contains { $0.preview == .running }, "the sent request is past the first page")
+
+        await model.loadMoreRetiredWork(profileVersion: version)
+        let all = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(all.jobs.count, 25)
+        XCTAssertNil(all.nextCursor)
+        let sent = try XCTUnwrap(all.jobs.first { $0.jobID == "synthetic-running-1" })
+        XCTAssertEqual(sent.preview, .running)
+        XCTAssertEqual(all.jobs.filter { $0.preview == .running }.count, 1)
+        XCTAssertTrue(
+            PrivacySettingsText.retiredJob(sent).contains(
+                "its request had already been sent, and a reply that arrives after the revocation is not applied"),
+            PrivacySettingsText.retiredJob(sent))
+        XCTAssertEqual(all.jobs.last?.jobID, "synthetic-running-1", "last in the core's job ID order")
+    }
+
     func testAJobThatCompletedBetweenThePreviewAndTheRevocationIsNotOnTheCoresRetiredListOrOfferedAMove() async throws {
         let held = PrivacyHeldReplySender(reply: try Self.interpretationReply())
         heldSender = held

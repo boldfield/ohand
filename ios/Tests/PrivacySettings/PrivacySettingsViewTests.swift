@@ -384,4 +384,50 @@ final class PrivacySettingsViewTests: XCTestCase {
             rendered[PrivacySettingsView.requeueOfferIdentifier("job-25", "private-v1")],
             "a job on a later page can be moved on purpose")
     }
+
+    func testTheShowMoreRowStaysOnScreenAndDisabledWhileThePageIsBeingRead() async throws {
+        let ids = (1...25).map { String(format: "job-%02d", $0) }
+        controls.retired["hosted-v1"] = ids.map { retiredJob($0) }
+        controls.listing = .success(
+            providerListing(
+                versions: [
+                    (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: true, supported: true),
+                    (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
+                ], defaultVersion: nil))
+        await reload([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")])
+        let more = PrivacySettingsView.retiredShowMoreIdentifier("hosted-v1")
+        XCTAssertEqual(rendered[more], "Show 5 more")
+
+        // The core holds the next page's read open while the row is tapped.
+        let hold = PrivacyReadHold()
+        let fake = controls!
+        fake.duringRetiredRead = { after in if after != nil { await hold.wait() } }
+        let readsBefore = fake.retiredReads.count
+        let ask = Task { await model.loadMoreRetiredWork(profileVersion: "hosted-v1") }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while fake.retiredReads.count == readsBefore, Date() < deadline { await Task.yield() }
+        XCTAssertEqual(fake.retiredReads.count, readsBefore + 1, "the tap is reading the next page")
+        settle()
+        XCTAssertEqual(rendered[more], "Show 5 more (disabled)", "the row stays on screen and waits for the read")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 25 retired jobs (showing 20)")
+        XCTAssertNil(rendered[PrivacySettingsView.retiredJobIdentifier("job-21")], "nothing is added until the read ends")
+
+        // Tapping the row again while it waits reads nothing and adds nothing.
+        await model.loadMoreRetiredWork(profileVersion: "hosted-v1")
+        settle()
+        XCTAssertEqual(fake.retiredReads.count, readsBefore + 1)
+        XCTAssertEqual(rendered[more], "Show 5 more (disabled)")
+
+        hold.release()
+        await ask.value
+        settle()
+        XCTAssertNil(rendered[more], "every retired job is now shown")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 25 retired jobs")
+        for id in ids { XCTAssertNotNil(rendered[PrivacySettingsView.retiredJobIdentifier(id)], id) }
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ids, "each job is listed exactly once")
+    }
 }

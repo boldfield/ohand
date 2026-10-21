@@ -209,8 +209,14 @@ enum PrivacySettingsText {
     }
 
     /// The result of a profile revocation, from the core's durable listing of what it retired: every job it retired,
-    /// and only those. `alreadySent` counts the retired jobs this screen had listed as running just before.
-    static func profileRevoked(_ versionLabel: String, retired: Int, alreadySent: Int, listed: Int) -> String {
+    /// and only those. `listed` is how many of them are shown (the first page). `sentShown` counts the shown jobs this
+    /// screen had listed as running just before, so it is exact for the jobs shown and claims nothing about the rest.
+    /// For the rest, `sentUnshown` is at most how many the preview listed as running when the preview was complete,
+    /// and nil when it was capped or could not be read, so the result never counts a request it did not see and never
+    /// omits that one may have been sent.
+    static func profileRevoked(
+        _ versionLabel: String, retired: Int, listed: Int, sentShown: Int, sentUnshown: Int?
+    ) -> String {
         var message = "Revoked \(versionLabel)."
         guard retired > 0 else { return message + " The core retired no work for it." }
         message += retired == 1
@@ -220,10 +226,22 @@ enum PrivacySettingsText {
                 + "each can be moved to another provider on purpose there."
         if listed < retired { message += " \(listed) of them are shown; the rest load from the list." }
         message += " Nothing was moved yet."
-        if alreadySent > 0 {
-            message += alreadySent == 1
-                ? " 1 of them had already been sent; a reply that arrives after the revocation is not applied."
-                : " \(alreadySent) of them had already been sent; a reply that arrives after the revocation is not applied."
+        let notApplied = "a reply that arrives after the revocation is not applied."
+        guard listed < retired else {
+            if sentShown > 0 { message += " \(sentShown) of them had already been sent; " + notApplied }
+            return message
+        }
+        if sentShown > 0 { message += " Of the \(listed) shown, \(sentShown) had already been sent; " + notApplied }
+        let rest = retired - listed
+        switch sentUnshown {
+        case .some(0):
+            message += " None of the \(rest) not shown yet was listed as sent just before the revocation."
+        case .some(let count):
+            message += " Up to \(count) of the \(rest) not shown yet had already been sent; " + notApplied
+                + " Each row says so once shown."
+        case .none:
+            message += " Among the \(rest) not shown yet, more may have been sent; each row says so once shown, "
+                + "where the job was listed just before the revocation."
         }
         return message
     }
