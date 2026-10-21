@@ -44,6 +44,8 @@ final class RetrievalSearchModel: ObservableObject {
     /// The result shown in the item pane beside the results. Only set while the session is authenticated and the row
     /// is on screen; a new search, a relock or leaving the screen drops it.
     @Published private(set) var selectedReference: RetrievalItemReference?
+    /// Raised each time the item shown in the pane changed, so the pane reads it again.
+    @Published private(set) var paneRefreshCount = 0
     /// Set by the screen while it has room to show an item beside the results (regular width with a pane).
     var presentsItemsInPane = false {
         didSet { if !presentsItemsInPane { selectedReference = nil } }
@@ -150,12 +152,13 @@ final class RetrievalSearchModel: ObservableObject {
         case .item(let itemID):
             let before = rows.count
             rows.removeAll { $0.reference.value == itemID.lowercased() }
+            if selectedReference?.value == itemID.lowercased() { paneRefreshCount += 1 }
             totalAccessible = max(0, totalAccessible - (before - rows.count))
         }
         if !isInDetail { runAgain() }
     }
 
-    /// Runs the last query again from its first result, keeping the item pane's selection if its row is still there.
+    /// Runs the last query again from its first result, keeping the item pane's selection.
     private func runAgain() {
         guard let request = lastRequest ?? (phase == .searching ? inFlightRequest : nil) else { return }
         resultsMayBeStale = false
@@ -210,7 +213,7 @@ final class RetrievalSearchModel: ObservableObject {
         generation += 1
         let thisGeneration = generation
         if !appending {
-            // A repeat of the query keeps the pane's item until the new results say whether it is still there.
+            // A repeat of the query keeps the pane's item; a new search drops it.
             if restoring == nil { selectedReference = nil }
             rows = []
             totalAccessible = 0
@@ -264,9 +267,8 @@ final class RetrievalSearchModel: ObservableObject {
             rows = appending ? rows + page.rows : page.rows
             canLoadMore = page.hasMore
             phase = rows.isEmpty ? .empty : .results
-            if !appending, restoring != nil {
-                selectedReference = rows.contains(where: { $0.reference == restoring }) ? restoring : nil
-            }
+            // The pane keeps its item even when the row is gone: a deleted item still shows its deletion result there,
+            // until the person selects another result or searches again.
         }
     }
 }

@@ -192,6 +192,11 @@ final class HomeRecentsModel: ObservableObject {
             let wasSorting = justSaved.removeValue(forKey: itemID) != nil
             if isLoadingFirstPage { changedDuringFirstRead.insert(itemID) }
             guard let index = loadedItems.firstIndex(where: { $0.itemID == itemID }) else {
+                if isLoadingMore {
+                    // The next page being read may hold the item in its old state; start over rather than append it.
+                    resetList()
+                    return
+                }
                 // A first page still being read may predate the change and hold the item.
                 if wasSorting || isLoadingFirstPage { reloadFirstPage() }
                 return

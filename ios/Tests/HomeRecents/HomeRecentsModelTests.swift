@@ -474,6 +474,46 @@ final class HomeRecentsModelTests: XCTestCase {
         XCTAssertTrue(model.entries.isEmpty)
     }
 
+    func testAChangeToAnItemOnAPageStillBeingReadNeverAppendsItsOldState() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: "second")
+        source.pages["second"] = CoreRecentItemsPage(items: [item("z", text: "old words")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.holdsReads = true
+        model.loadMore()
+        await settle()
+        XCTAssertEqual(source.readCursors, [nil, "second"], "the next page is being read")
+
+        source.publish(.item("z"))
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("z", text: "new words")], nextCursor: nil)
+        source.holdsReads = false
+        source.releaseHeldReads()
+        await settle()
+
+        XCTAssertEqual(model.entries.map(\.id), ["a", "z"])
+        XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "never the page read before the change")
+    }
+
+    func testADeletedItemOnAPageStillBeingReadNeverAppears() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: "second")
+        source.pages["second"] = CoreRecentItemsPage(items: [item("z")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.holdsReads = true
+        model.loadMore()
+        await settle()
+
+        source.publish(.item("z"))
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
+        source.holdsReads = false
+        source.releaseHeldReads()
+        await settle()
+
+        XCTAssertEqual(model.entries.map(\.id), ["a"])
+    }
+
     func testAChangeAfterShutdownDoesNothing() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)

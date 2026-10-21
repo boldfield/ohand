@@ -136,7 +136,7 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertEqual(model.rows.map(\.id), [Self.firstID])
     }
 
-    func testThePaneKeepsItsItemOnlyWhileTheResultsStillHoldIt() {
+    func testThePaneKeepsItsItemWhenTheChangedItemIsGoneFromTheResults() {
         model.presentsItemsInPane = true
         showResults([row(Self.firstID), row(Self.secondID)])
         model.select(model.rows[0])
@@ -145,9 +145,27 @@ final class RetrievalSearchModelTests: XCTestCase {
         deliver(.success(page([row(Self.firstID)])), at: 1)
         XCTAssertEqual(model.selectedReference?.value, Self.firstID)
 
+        let refreshesBefore = model.paneRefreshCount
         publish(.item(Self.firstID))
+        XCTAssertEqual(model.paneRefreshCount, refreshesBefore + 1, "the pane reads the changed item again")
+        XCTAssertFalse(model.rows.map(\.id).contains(Self.firstID), "the row is dropped at once")
         deliver(.success(page([])), at: 2)
-        XCTAssertNil(model.selectedReference)
+        XCTAssertEqual(
+            model.selectedReference?.value, Self.firstID,
+            "a deleted item stays selected so the pane still shows its deletion result")
+        XCTAssertTrue(model.rows.isEmpty)
+
+        model.search()
+        XCTAssertNil(model.selectedReference, "searching again drops it")
+    }
+
+    func testAChangeToAnotherItemDoesNotRefreshThePane() {
+        model.presentsItemsInPane = true
+        showResults([row(Self.firstID), row(Self.secondID)])
+        model.select(model.rows[0])
+        let refreshesBefore = model.paneRefreshCount
+        publish(.item(Self.secondID))
+        XCTAssertEqual(model.paneRefreshCount, refreshesBefore)
     }
 
     func testAllItemsEmptiesTheResultsAndAsksAgain() {

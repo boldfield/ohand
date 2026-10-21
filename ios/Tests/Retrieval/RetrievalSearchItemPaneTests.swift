@@ -131,6 +131,38 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         XCTAssertEqual(detail.failure, .locked)
     }
 
+    func testACorrectionMadeWhileThePaneIsOpenReloadsThePaneToTheNewText() throws {
+        let itemID = try saveCapture()
+        let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
+        searchModel.select(shown)
+        settle { detailModels.first?.content != nil }
+        XCTAssertEqual(detailModels.first?.content?.sections.map(\.text), ["synthetic capture in the pane"])
+
+        try correctText(itemID: itemID, to: "synthetic words after the correction")
+
+        settle { detailModels.first?.content?.sections.last?.text == "synthetic words after the correction" }
+        XCTAssertEqual(
+            detailModels.first?.content?.sections.last?.text, "synthetic words after the correction",
+            "the pane's own detail reads the item again")
+        XCTAssertEqual(searchModel.selectedReference, shown.reference)
+    }
+
+    func testADeletionMadeWhileThePaneIsOpenLeavesNoStaleTextAndKeepsThePaneSelected() throws {
+        let itemID = try saveCapture()
+        let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
+        searchModel.select(shown)
+        settle { detailModels.first?.content != nil }
+        searcher.page = RetrievalPage(totalAccessible: 0, rows: [], offset: 0)
+
+        try deleteItem(itemID: itemID)
+
+        settle { searchModel.rows.isEmpty && detailModels.first?.content == nil }
+        XCTAssertTrue(searchModel.rows.isEmpty, "the row is gone")
+        XCTAssertNil(detailModels.first?.content, "no deleted text stays in the pane")
+        XCTAssertEqual(searchModel.selectedReference, shown.reference, "the pane keeps the item it was showing")
+        XCTAssertNotNil(rendered[RetrievalSearchView.itemPaneIdentifier])
+    }
+
     func testAtCompactWidthAResultIsStillPushedAndNoPaneIsShown() throws {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 390, height: 844), sizeClass: .compact)
@@ -224,6 +256,19 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         Task {
             do { _ = try await root.itemCorrections.correctText(
                 commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision, text: text) }
+            catch { failure = error }
+            finished = true
+        }
+        settle { finished }
+        XCTAssertNil(failure)
+    }
+
+    private func deleteItem(itemID: String) throws {
+        let revision = try XCTUnwrap(Int(scalar("SELECT revision FROM items WHERE item_id = '\(itemID)'")))
+        var finished = false
+        var failure: Error?
+        Task {
+            do { _ = try await root.itemDeletion.delete(itemID: itemID, expectedRevision: revision) }
             catch { failure = error }
             finished = true
         }

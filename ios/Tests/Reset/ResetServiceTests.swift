@@ -1288,4 +1288,24 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.core.currentGeneration, 2, "the second call ran after the first finished, never interleaved with it")
         assertEverythingErased(world)
     }
+
+    // MARK: Change signal
+
+    func testOnlyACompletedResetPublishesAllItems() async throws {
+        let blocked = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(blocked)
+        blocked.faults.arm("fs.remove:cap-1.m4a")
+        let pendingPublisher = RecordingChangePublisher()
+
+        let pending = await blocked.makeService(changes: pendingPublisher).reset(credentialChoice: .keep)
+
+        XCTAssertEqual(pending.state, .pending)
+        XCTAssertTrue(pendingPublisher.changes.isEmpty, "a pending reset has not erased anything yet")
+
+        let completedPublisher = RecordingChangePublisher()
+        let completed = await blocked.makeService(changes: completedPublisher).resume()
+
+        XCTAssertEqual(completed.state, .completed)
+        XCTAssertEqual(completedPublisher.changes, [.allItems])
+    }
 }
