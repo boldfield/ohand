@@ -709,6 +709,6 @@ extension ProviderSettingsModel {
         ProviderSettingsModel(
             controls: root.providerConfiguration, credentials: root.providerCredentials,
             sweep: root.providerCredentialSweep, readScope: { [weak root] in root?.readScope ?? .captureOnly },
-            offersOwnServer: offersOwnServer)
+            offersOwnServer: offersOwnServer, captureRouteID: root.configuration.captureRouteID)
     }
 }

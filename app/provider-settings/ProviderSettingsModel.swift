@@ -201,6 +201,8 @@ final class ProviderSettingsModel: ObservableObject {
     @Published private(set) var connectionStates: [String: ProviderSettingsConnectionState] = [:]
     /// Whether the capture route allows sending to a cloud provider; nil when the policy could not be read.
     @Published private(set) var cloudSendingAllowed: Bool?
+    /// The route new captures are pinned to. Only a grant on this route counts; nil means it cannot be established.
+    private let captureRouteID: String?
     /// Set by the first Save attempt, after which every field's problem is shown.
     @Published private(set) var hasAttemptedSave = false
     /// The fields edited since the form was last empty; each shows its own problem once edited.
@@ -241,8 +243,9 @@ final class ProviderSettingsModel: ObservableObject {
     nonisolated init(
         controls: ProviderSettingsControlling, credentials: ProviderSettingsCredentialControlling,
         sweep: ProviderSettingsCredentialSweeping, readScope: @escaping () -> CompositionReadScope,
-        offersOwnServer: Bool = ProviderSettingsModel.ownServerOffered
+        offersOwnServer: Bool = ProviderSettingsModel.ownServerOffered, captureRouteID: String? = nil
     ) {
+        self.captureRouteID = captureRouteID
         self.offersOwnServer = offersOwnServer
         self.controls = controls
         self.credentials = credentials
@@ -355,10 +358,12 @@ final class ProviderSettingsModel: ObservableObject {
     }
 
     /// Whether the default is a cloud provider whose destination the person's captures are not yet allowed to reach,
-    /// so new notes are still handled on the phone only. False when the policy could not be read.
+    /// so new notes are still handled on the phone only. Only an exact positive on the capture route clears it: an
+    /// unreadable policy or an unknown route keeps the prompt. The existing read lists destination classes, not origins,
+    /// so a cloud grant made for another provider cannot be told apart from one for this default.
     var needsPrivacyAllowance: Bool {
         guard case .hosted = operatingMode else { return false }
-        return cloudSendingAllowed == false
+        return cloudSendingAllowed != true
     }
 
     /// Reads the stored profiles and defaults again. When the screen loads, it first sweeps secrets nothing owns.
@@ -393,9 +398,10 @@ final class ProviderSettingsModel: ObservableObject {
         guard thisGeneration == generation, readScope() == .authenticated else { return }
         cloudSendingAllowed = routes.map { routes in
             routes.contains { route in
-                route.grantedCapabilities.contains {
-                    $0.capability == Self.capability && $0.destinationClasses.contains("cloud")
-                }
+                route.routeID == captureRouteID
+                    && route.grantedCapabilities.contains {
+                        $0.capability == Self.capability && $0.destinationClasses.contains("cloud")
+                    }
             }
         }
     }

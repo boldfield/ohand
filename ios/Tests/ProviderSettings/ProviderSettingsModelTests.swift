@@ -187,14 +187,16 @@ final class ProviderSettingsModelTests: XCTestCase {
     private func makeModel(_ controls: FakeProviderSettingsControls, offersOwnServer: Bool = true) -> ProviderSettingsModel {
         ProviderSettingsModel(
             controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope },
-            offersOwnServer: offersOwnServer)
+            offersOwnServer: offersOwnServer, captureRouteID: "route-personal")
     }
 
-    private static func routes(granting grants: [(capability: String, classes: [String])]) -> [RoutePolicyRoute] {
+    private static func routes(
+        granting grants: [(capability: String, classes: [String])], routeID: String = "route-personal"
+    ) -> [RoutePolicyRoute] {
         let granted = grants.map {
             #"{"capability":"\#($0.capability)","destination_classes":[\#($0.classes.map { "\"\($0)\"" }.joined(separator: ","))]}"#
         }.joined(separator: ",")
-        let json = #"[{"route_id":"route-personal","route_name":"Local capture","scope":"personal","granted_capabilities":[\#(granted)]}]"#
+        let json = #"[{"route_id":"\#(routeID)","route_name":"Local capture","scope":"personal","granted_capabilities":[\#(granted)]}]"#
         return try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(json.utf8))
     }
 
@@ -297,7 +299,21 @@ final class ProviderSettingsModelTests: XCTestCase {
 
         controls.routePolicy = .failure(ProviderConfigurationError.unreadable)
         await model.refresh()
-        XCTAssertFalse(model.needsPrivacyAllowance, "an unreadable policy shows no claim")
+        XCTAssertTrue(model.needsPrivacyAllowance, "an unreadable policy keeps the prompt")
+
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])], routeID: "route-other"))
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "a grant on a different route does not allow this capture route")
+
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["private_server"])]))
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "a non-cloud grant does not allow a cloud default")
+
+        let unknownRoute = ProviderSettingsModel(
+            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        await unknownRoute.refresh()
+        XCTAssertTrue(unknownRoute.needsPrivacyAllowance, "without a known capture route nothing is proven")
 
         let none = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
         await none.refresh()

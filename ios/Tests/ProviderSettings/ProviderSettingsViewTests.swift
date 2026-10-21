@@ -46,7 +46,7 @@ final class ProviderSettingsViewTests: XCTestCase {
         navigation = ProviderSettingsNavigation()
         let model = ProviderSettingsModel(
             controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope },
-            offersOwnServer: offersOwnServer)
+            offersOwnServer: offersOwnServer, captureRouteID: "r")
         let hosting = UIHostingController(
             rootView: NavigationStack {
                 switch screen {
