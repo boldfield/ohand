@@ -137,6 +137,7 @@ final class AppRealServicesTests: XCTestCase {
 
         XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save itself asked for the drain")
         XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM reminders"), "0", "the offline grammar's reminder is recorded")
+        settleBackgroundWork(services)
     }
 
     func testASavedRecordingStartsAJobDrainWithNoLifecycleEvent() throws {
@@ -151,6 +152,14 @@ final class AppRealServicesTests: XCTestCase {
         wait { services.root.jobRunner.startedDrainCount > 0 }
 
         XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save started processing")
+        settleBackgroundWork(services)
+    }
+
+    /// Lets the drain and the reminder and completion passes it triggers finish, so teardown closes an idle core.
+    private func settleBackgroundWork(_ services: AppServices) {
+        wait(timeout: 30) { !services.root.jobRunner.isDraining }
+        let settled = Date().addingTimeInterval(1.5)
+        wait(timeout: 2) { Date() >= settled }
     }
 
     private func scalar(_ sql: String) -> String {
