@@ -23,7 +23,7 @@ struct AppRootView: View {
                 open: { navigation.open(entryID: $0) },
                 notice: navigation.notice,
                 homeBody: {
-                    homeRecents.map { AnyView(HomeBodyView(model: $0)) } ?? AnyView(Color.clear)
+                    homeRecents.map { AnyView(HomeBodyView(model: $0, openItem: { navigation.openItem(itemID: $0) })) } ?? AnyView(Color.clear)
                 })
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: String.self) { pathComponent in
