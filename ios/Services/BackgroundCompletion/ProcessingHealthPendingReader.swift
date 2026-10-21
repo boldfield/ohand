@@ -28,3 +28,18 @@ public struct ProcessingHealthPendingReader: PendingProcessingReading {
         return health.pendingJobs > 0 ? .pending(jobs: health.pendingJobs) : PendingProcessingStatus.none
     }
 }
+
+/// `PendingProcessingReading` over a health service that is looked up at each read, for an owner that gets the
+/// service from a module attached after this reader is made. With no service the read is `unknown`, never `none`.
+public struct LifecycleHealthPendingReader: PendingProcessingReading {
+    private let provider: @Sendable () -> ProcessingHealthService?
+
+    public init(provider: @escaping @Sendable () -> ProcessingHealthService?) {
+        self.provider = provider
+    }
+
+    public func read() async -> PendingProcessingStatus {
+        guard let service = provider() else { return .unknown }
+        return await ProcessingHealthPendingReader(service: service).read()
+    }
+}
