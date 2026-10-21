@@ -149,6 +149,41 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "1", "only the capture's own unpinned job exists")
     }
 
+    func testAJobQueuedBetweenAPreReadAndTheRevokeAppearsInThePostRevokeList() throws {
+        let root = try makeRoot(authenticated: true, sender: RecordingProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        let profileVersion = try createProfile(profileID: "profile-a")
+        let replacementVersion = try createProfile(profileID: "profile-b")
+        func insertJob(_ jobID: String, revision: Int) -> String {
+            """
+            INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
+            request_version, status, attempt_count, created_at) VALUES ('\(jobID)', 1, '\(itemID)', \
+            'interpret', \(revision), '\(profileVersion)', '\(Self.requestVersion)', 'queued', 0, \
+            '2026-10-08T09:30:0\(revision)Z')
+            """
+        }
+        try execute([insertJob("job-before", revision: 1)])
+        let jobConfiguration = root.jobConfiguration
+
+        let preRead = try run { try await jobConfiguration.jobsPinned(toProfile: profileVersion) }
+        XCTAssertEqual(preRead.jobs.map(\.jobID), ["job-before"])
+        try execute([insertJob("job-in-window", revision: 2)])
+        try run { try await jobConfiguration.revokeProfile(profileVersion) }
+        _ = try run {
+            try await jobConfiguration.requeue(
+                jobID: "job-in-window", newJobID: "job-replacement", toProfileVersion: replacementVersion)
+        }
+
+        let retired = try run { try await jobConfiguration.jobsRetired(byRevocationOf: profileVersion) }
+        XCTAssertEqual(retired.jobs.map(\.jobID), ["job-before", "job-in-window"])
+        XCTAssertEqual(retired.total, 2)
+        XCTAssertFalse(retired.truncated)
+        XCTAssertNil(retired.jobs[0].requeuedTo)
+        XCTAssertEqual(retired.jobs[1].requeuedTo, "job-replacement")
+        XCTAssertTrue(retired.jobs.allSatisfy { $0.itemID == itemID })
+    }
+
     func testACaptureOnlySessionCannotRepinAndNothingChanges() throws {
         let root = try makeRoot(authenticated: false, sender: RecordingProviderSender(reply: Data()))
         defer { root.shutDown() }

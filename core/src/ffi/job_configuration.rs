@@ -8,6 +8,14 @@
 //!   (`get_jobs_pinned_to_profile`), at most `limit` of them (default and ceiling
 //!   [`MAX_LISTED_JOBS`]). Each entry carries `job_id` (the handle the other commands address),
 //!   `item_id` and `status`, and nothing about the item's content. `total` is the full count.
+//! * `jobs_retired_by_revocation` (`profile_version`, optional `limit`, optional `after`) ->
+//!   `jobs`, `total`, `truncated`, `next_cursor`: the jobs pinned to a revoked version and retired
+//!   with failure reason `profile_revoked` (`jobs_retired_by_revocation`), ordered by `job_id`,
+//!   at most `limit` per page (default and ceiling [`MAX_LISTED_JOBS`]). Each entry carries
+//!   `job_id`, `item_id`, `retired_at` (the revocation time) and `requeued_to` (the replacement
+//!   job, or `null`). `after` is the previous page's `next_cursor`, which is `null` on the last
+//!   page. A version that is not revoked answers an empty list; an unknown one is `not_found`.
+//!   Read it after `revoke_profile`: the set is then final and survives a relaunch.
 //! * `requeue_job` (`job_id`, `new_job_id`, `new_profile_version`) -> `job_id`, `item_id`,
 //!   `status`, `profile_version` of the replacement (`requeue_job_to_new_profile`). `new_job_id`
 //!   is the immutable identity of the user action, reused unchanged by each retry: repeating the
@@ -35,8 +43,8 @@ use super::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::jobs::configuration::{
-    get_jobs_pinned_to_profile, get_profile_id, get_requeue_record, repin_waiting_interpretations,
-    requeue_job_to_new_profile, revoke_profile,
+    get_jobs_pinned_to_profile, get_profile_id, get_requeue_record, jobs_retired_by_revocation,
+    repin_waiting_interpretations, requeue_job_to_new_profile, revoke_profile,
 };
 use crate::jobs::queue::get_job;
 use crate::providers::contracts::ErrorClass;
@@ -50,7 +58,7 @@ use std::sync::Mutex;
 /// Longest identifier accepted in a command, in bytes.
 const MAX_IDENTIFIER_BYTES: usize = 512;
 /// Most jobs one listing returns.
-pub const MAX_LISTED_JOBS: usize = 100;
+pub const MAX_LISTED_JOBS: usize = crate::jobs::configuration::MAX_LISTED_JOBS;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -59,6 +67,13 @@ enum Command {
         profile_version: String,
         #[serde(default)]
         limit: Option<u32>,
+    },
+    JobsRetiredByRevocation {
+        profile_version: String,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        after: Option<String>,
     },
     RequeueJob {
         job_id: String,
@@ -85,6 +100,15 @@ impl Command {
                 profile_version,
                 limit,
             } => acceptable(profile_version) && limit.is_none_or(|limit| limit >= 1),
+            Command::JobsRetiredByRevocation {
+                profile_version,
+                limit,
+                after,
+            } => {
+                acceptable(profile_version)
+                    && limit.is_none_or(|limit| limit >= 1)
+                    && after.as_deref().is_none_or(acceptable)
+            }
             Command::RequeueJob {
                 job_id,
                 new_job_id,
@@ -163,6 +187,43 @@ fn jobs_pinned_to_profile(
     }))
 }
 
+fn retired_by_revocation(
+    database: &Database,
+    profile_version: &str,
+    limit: Option<u32>,
+    after: Option<&str>,
+) -> Result<Value, AbiFailure> {
+    let known = get_profile_id(database.conn(), profile_version)
+        .map_err(|error| store_failure(&error))?
+        .is_some();
+    if !known {
+        return Err(AbiFailure::NOT_FOUND);
+    }
+    let limit = limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .map_or(MAX_LISTED_JOBS, |limit| limit.min(MAX_LISTED_JOBS));
+    let page = jobs_retired_by_revocation(database.conn(), profile_version, limit, after)
+        .map_err(|error| store_failure(&error))?;
+    let jobs: Vec<Value> = page
+        .jobs
+        .iter()
+        .map(|job| {
+            json!({
+                "job_id": job.job_id,
+                "item_id": job.item_id,
+                "retired_at": job.retired_at,
+                "requeued_to": job.requeued_to,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "jobs": jobs,
+        "total": page.total,
+        "truncated": page.next_cursor.is_some(),
+        "next_cursor": page.next_cursor,
+    }))
+}
+
 fn requeue_job(
     database: &mut Database,
     job_id: &str,
@@ -227,6 +288,11 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
             profile_version,
             limit,
         } => jobs_pinned_to_profile(database, profile_version, *limit),
+        Command::JobsRetiredByRevocation {
+            profile_version,
+            limit,
+            after,
+        } => retired_by_revocation(database, profile_version, *limit, after.as_deref()),
         Command::RequeueJob {
             job_id,
             new_job_id,

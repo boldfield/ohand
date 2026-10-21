@@ -6,6 +6,9 @@ import OhandCoreC
 public enum JobConfigurationCommand: Equatable, Sendable {
     /// The queued or running jobs pinned to `profileVersion`: job, item and status only. `limit` is capped by the core.
     case jobsPinnedToProfile(profileVersion: String, limit: Int?)
+    /// The jobs a revocation of `profileVersion` retired (failure reason `profile_revoked`), in stable order, one page at a
+    /// time. `limit` is capped by the core; `after` is the previous page's `nextCursor`. Read it after the revoke.
+    case jobsRetiredByRevocation(profileVersion: String, limit: Int?, after: String?)
     /// Retires `jobID` and queues `newJobID` pinned to `newProfileVersion`. `newJobID` is the identity of the user's
     /// action and is reused unchanged by a retry, which then answers the existing replacement.
     case requeueJob(jobID: String, newJobID: String, newProfileVersion: String)
@@ -21,6 +24,9 @@ public enum JobConfigurationCommand: Equatable, Sendable {
         switch self {
         case .jobsPinnedToProfile(let profileVersion, let limit):
             return Request(command: "jobs_pinned_to_profile", profileVersion: profileVersion, limit: limit)
+        case .jobsRetiredByRevocation(let profileVersion, let limit, let after):
+            return Request(
+                command: "jobs_retired_by_revocation", profileVersion: profileVersion, limit: limit, after: after)
         case .requeueJob(let jobID, let newJobID, let newProfileVersion):
             return Request(
                 command: "requeue_job", jobID: jobID, newJobID: newJobID, newProfileVersion: newProfileVersion)
@@ -42,6 +48,7 @@ public enum JobConfigurationCommand: Equatable, Sendable {
         var newJobID: String?
         var newProfileVersion: String?
         var routeID: String?
+        var after: String?
 
         enum CodingKeys: String, CodingKey {
             case command
@@ -51,6 +58,7 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             case newJobID = "new_job_id"
             case newProfileVersion = "new_profile_version"
             case routeID = "route_id"
+            case after
         }
     }
 }
@@ -84,6 +92,49 @@ public struct JobConfigurationPinnedJobs: Decodable, Equatable, Sendable {
         self.jobs = jobs
         self.total = total
         self.truncated = truncated
+    }
+}
+
+/// One job a revocation retired. Carries no item content. `requeuedTo` is the replacement job, once requeued.
+public struct JobConfigurationRetiredJob: Decodable, Equatable, Sendable {
+    public let jobID: String
+    public let itemID: String
+    /// RFC 3339: when the profile was revoked.
+    public let retiredAt: String
+    public let requeuedTo: String?
+
+    public init(jobID: String, itemID: String, retiredAt: String, requeuedTo: String?) {
+        self.jobID = jobID
+        self.itemID = itemID
+        self.retiredAt = retiredAt
+        self.requeuedTo = requeuedTo
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case itemID = "item_id"
+        case retiredAt = "retired_at"
+        case requeuedTo = "requeued_to"
+    }
+}
+
+/// The answer to `jobsRetiredByRevocation`: one page, the full count, and the cursor of the next page (`nil` on the last).
+public struct JobConfigurationRetiredJobs: Decodable, Equatable, Sendable {
+    public let jobs: [JobConfigurationRetiredJob]
+    public let total: Int
+    public let truncated: Bool
+    public let nextCursor: String?
+
+    public init(jobs: [JobConfigurationRetiredJob], total: Int, truncated: Bool, nextCursor: String?) {
+        self.jobs = jobs
+        self.total = total
+        self.truncated = truncated
+        self.nextCursor = nextCursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case jobs, total, truncated
+        case nextCursor = "next_cursor"
     }
 }
 
@@ -141,6 +192,7 @@ public struct JobConfigurationRequeueRecord: Decodable, Equatable, Sendable {
 /// `not_found`; a change the core refuses is a failure with code `job_configuration_refused`.
 public enum JobConfigurationAnswer: Equatable, Sendable {
     case pinnedJobs(JobConfigurationPinnedJobs)
+    case retiredJobs(JobConfigurationRetiredJobs)
     case requeued(JobConfigurationRequeuedJob)
     case requeueRecord(JobConfigurationRequeueRecord?)
     case revoked(profileVersion: String)
@@ -166,6 +218,8 @@ public enum JobConfigurationAnswer: Equatable, Sendable {
         switch command {
         case .jobsPinnedToProfile:
             return .pinnedJobs(try decoder.decode(JobConfigurationPinnedJobs.self, from: data))
+        case .jobsRetiredByRevocation:
+            return .retiredJobs(try decoder.decode(JobConfigurationRetiredJobs.self, from: data))
         case .requeueJob:
             return .requeued(try decoder.decode(JobConfigurationRequeuedJob.self, from: data))
         case .requeueRecord:
