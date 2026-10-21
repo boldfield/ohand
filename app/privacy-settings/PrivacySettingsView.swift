@@ -278,7 +278,7 @@ struct PrivacySettingsView: View {
             }
             .reportPrivacyRendered(moreIdentifier, text: more)
             .accessibilityIdentifier(moreIdentifier)
-            .disabled(model.isWorking)
+            .disabled(model.isWorking || model.isLoadingRetiredWork(profileVersion: retired.profileVersion))
         }
     }
 

@@ -64,11 +64,15 @@ final class FakePrivacySettingsControls: PrivacySettingsControlling, @unchecked 
     var retired: [String: [JobConfigurationRetiredJob]] = [:]
     var retiredFailure: Error?
     private(set) var retiredReads: [[String?]] = []
+    /// Awaited in the middle of every retired-work read, with the cursor it reads from, so a test can hold a page
+    /// read open while the screen is asked for more.
+    var duringRetiredRead: ((String?) async -> Void)?
 
     func jobsRetired(byRevocationOf profileVersion: String, limit: Int?, after: String?) async throws
         -> JobConfigurationRetiredJobs
     {
         retiredReads.append([profileVersion, limit.map { String($0) }, after])
+        await duringRetiredRead?(after)
         if let retiredFailure { throw retiredFailure }
         let all = (retired[profileVersion] ?? []).sorted { $0.jobID < $1.jobID }
         let pageSize = min(limit ?? 100, 100)
@@ -110,6 +114,35 @@ final class FakePrivacySettingsControls: PrivacySettingsControlling, @unchecked 
         grants.append([routeID, capability, profileVersion])
         duringGrant?()
         return try grantResult.get()
+    }
+}
+
+/// Holds a fake read open until the test lets it go; every waiter is released at once, and later waiters pass through.
+final class PrivacyReadHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if released {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func release() {
+        lock.lock()
+        released = true
+        let waiting = waiters
+        waiters = []
+        lock.unlock()
+        for waiter in waiting { waiter.resume() }
     }
 }
 
@@ -779,6 +812,51 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ids)
         model.proposeRequeue(jobID: "job-45", toProfileVersion: "private-v1")
         XCTAssertNotNil(model.requeueProposal, "a job on a later page can be moved on purpose")
+    }
+
+    func testAskingForMoreRetiredWorkTwiceWhileOnePageIsBeingReadListsThatPageOnce() async throws {
+        let (model, controls) = makeModel()
+        let ids = (1...45).map { String(format: "job-%02d", $0) }
+        controls.retired["hosted-v1"] = ids.map { retiredJob($0) }
+        controls.listing = .success(listingWithHostedRevoked())
+        await model.refresh()
+        let first = try XCTUnwrap(model.retiredWork.first { $0.profileVersion == "hosted-v1" })
+        XCTAssertEqual(first.jobs.count, PrivacySettingsModel.queuedJobLimit)
+        let cursor = try XCTUnwrap(first.nextCursor)
+        XCTAssertFalse(model.isLoadingRetiredWork(profileVersion: "hosted-v1"))
+        let readsBefore = controls.retiredReads.count
+
+        // The core holds the second page's read open while the screen is asked for more twice over.
+        let hold = PrivacyReadHold()
+        controls.duringRetiredRead = { after in if after != nil { await hold.wait() } }
+        let firstAsk = Task { await model.loadMoreRetiredWork(profileVersion: "hosted-v1") }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while controls.retiredReads.count == readsBefore, Date() < deadline { await Task.yield() }
+        XCTAssertEqual(controls.retiredReads.count, readsBefore + 1, "the first ask is reading the next page")
+        XCTAssertEqual(controls.retiredReads.last?[2], cursor)
+        XCTAssertTrue(model.isLoadingRetiredWork(profileVersion: "hosted-v1"), "the row waits for the read")
+
+        await model.loadMoreRetiredWork(profileVersion: "hosted-v1")
+        XCTAssertEqual(controls.retiredReads.count, readsBefore + 1, "a second ask during the read reads nothing")
+        XCTAssertEqual(model.retiredWork.first { $0.profileVersion == "hosted-v1" }?.jobs.count, 20, "nothing was added yet")
+        XCTAssertFalse(model.retiredWorkUnreadable)
+
+        hold.release()
+        await firstAsk.value
+        XCTAssertFalse(model.isLoadingRetiredWork(profileVersion: "hosted-v1"))
+        let shown = try XCTUnwrap(model.retiredWork.first { $0.profileVersion == "hosted-v1" })
+        XCTAssertEqual(shown.jobs.map(\.jobID), Array(ids.prefix(40)), "the page was added once, each job listed once")
+        XCTAssertEqual(Set(shown.jobs.map(\.jobID)).count, shown.jobs.count)
+        XCTAssertEqual(shown.total, 45)
+        XCTAssertEqual(shown.remaining, 5)
+        XCTAssertEqual(PrivacySettingsText.retiredShowMore(shown), "Show 5 more")
+
+        // Once the read is over, asking again reads the page after it, once more.
+        await model.loadMoreRetiredWork(profileVersion: "hosted-v1")
+        XCTAssertEqual(controls.retiredReads.count, readsBefore + 2)
+        let all = try XCTUnwrap(model.retiredWork.first { $0.profileVersion == "hosted-v1" })
+        XCTAssertEqual(all.jobs.map(\.jobID), ids, "every retired job is listed exactly once")
+        XCTAssertNil(all.nextCursor)
     }
 
     func testTheResultIsExactlyWhatTheCoreRetiredNotWhatWasListedBefore() async throws {

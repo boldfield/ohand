@@ -288,6 +288,9 @@ final class PrivacySettingsModel: ObservableObject {
     @Published private(set) var retiredWork: [PrivacyRetiredVersion] = []
     /// Whether some retired work could not be read; a refresh reads it again. The core keeps the list either way.
     @Published private(set) var retiredWorkUnreadable = false
+    /// The revoked versions whose next page of retired work is being read now. One page is read at a time per
+    /// version, so a job is listed once however many times "Show more" is asked for while a read is under way.
+    @Published private(set) var retiredPageLoads: Set<String> = []
     /// The work that was pending when a route permission was last taken away, with what the core reports for each job
     /// now. Every refresh reads it again. It spans all routes, as the core's listing does, and claims nothing per route.
     @Published private(set) var followedWork: [PrivacyFollowedJob] = []
@@ -355,6 +358,7 @@ final class PrivacySettingsModel: ObservableObject {
         guard readScope() == .authenticated else { lock(); return }
         generation += 1
         let thisGeneration = generation
+        retiredPageLoads = []
         if phase != .loaded { phase = .loading }
         do {
             let freshRoutes = try await controls.listRoutePolicy()
@@ -500,20 +504,31 @@ final class PrivacySettingsModel: ObservableObject {
             jobID: job.jobID, itemID: job.itemID, retiredAt: job.retiredAt, requeuedTo: job.requeuedTo, preview: preview)
     }
 
+    /// Whether the next page of the version's retired work is being read; the "Show more" row waits for it.
+    func isLoadingRetiredWork(profileVersion: String) -> Bool { retiredPageLoads.contains(profileVersion) }
+
     /// Reads the next page of the jobs a revocation retired and adds it to what is shown. The core reports the full
-    /// count either way; a failed read leaves the pages already shown and says the rest could not be read.
+    /// count either way; a failed read leaves the pages already shown and says the rest could not be read. While
+    /// one page is being read for a version, another ask for the same version reads nothing: the page is added once.
     func loadMoreRetiredWork(profileVersion: String) async {
         guard readScope() == .authenticated else { lock(); return }
-        guard phase == .loaded, !isWorking,
-            let index = retiredWork.firstIndex(where: { $0.profileVersion == profileVersion }),
-            let cursor = retiredWork[index].nextCursor
+        guard phase == .loaded, !isWorking, !retiredPageLoads.contains(profileVersion),
+            let cursor = retiredWork.first(where: { $0.profileVersion == profileVersion })?.nextCursor
         else { return }
         let thisGeneration = generation
+        retiredPageLoads.insert(profileVersion)
+        // Whatever bumped the generation meanwhile cleared the set itself, and a later read may own the entry now.
+        defer { if thisGeneration == generation { retiredPageLoads.remove(profileVersion) } }
         do {
             let page = try await controls.jobsRetired(
                 byRevocationOf: profileVersion, limit: Self.queuedJobLimit, after: cursor)
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
+            // The page follows the cursor it was read from. If the shown list no longer ends at that cursor, the page
+            // belongs elsewhere and is dropped, so no job is listed twice.
+            guard let index = retiredWork.firstIndex(where: { $0.profileVersion == profileVersion }),
+                retiredWork[index].nextCursor == cursor
+            else { return }
             let shown = retiredWork[index]
             retiredWork[index] = PrivacyRetiredVersion(
                 profileVersion: shown.profileVersion, versionLabel: shown.versionLabel,
@@ -803,6 +818,7 @@ final class PrivacySettingsModel: ObservableObject {
         lastReplacementJobID = nil
         retiredWork = []
         retiredWorkUnreadable = false
+        retiredPageLoads = []
         retiredPreviews = [:]
         completePreviews = []
         followedWork = []
@@ -825,6 +841,7 @@ final class PrivacySettingsModel: ObservableObject {
         lastReplacementJobID = nil
         retiredWork = []
         retiredWorkUnreadable = false
+        retiredPageLoads = []
         retiredPreviews = [:]
         completePreviews = []
         followedWork = []
