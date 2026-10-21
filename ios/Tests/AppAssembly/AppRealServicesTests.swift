@@ -131,7 +131,7 @@ final class AppRealServicesTests: XCTestCase {
         created.append(services)
         XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0, "nothing has drained before the save")
 
-        services.captureEntry.textModel.updateText("remind me to water the ferns tomorrow")
+        services.captureEntry.textModel.updateText("remind me 2099-01-01 09:00:00 to call mom")
         services.captureEntry.saveText()
         wait { self.scalar("SELECT COUNT(*) FROM reminders") != "0" }
 
