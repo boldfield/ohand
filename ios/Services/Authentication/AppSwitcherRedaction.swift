@@ -1,7 +1,7 @@
 import UIKit
 
 /// Covers (and uncovers) everything the app shows. Called on the main thread.
-protocol RedactionPresenter: AnyObject {
+public protocol RedactionPresenter: AnyObject {
     func showRedaction()
     func hideRedaction()
 }
@@ -9,11 +9,11 @@ protocol RedactionPresenter: AnyObject {
 /// Puts an opaque window above every connected scene so the system's app-switcher snapshot, taken as the app resigns
 /// active, contains no stored content. The cover carries no text from the app. A simulator shows the cover but only a
 /// device shows the real snapshot; the physical check is device evidence (device evidence task T05, `docs/validation/m1-device-results.md`).
-final class WindowRedactionPresenter: RedactionPresenter {
+public final class WindowRedactionPresenter: RedactionPresenter {
     private let windowScenes: () -> [UIWindowScene]
     private var coverWindows: [UIWindow] = []
 
-    init(windowScenes: @escaping () -> [UIWindowScene] = {
+    public init(windowScenes: @escaping () -> [UIWindowScene] = {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     }) {
         self.windowScenes = windowScenes
@@ -45,7 +45,7 @@ final class WindowRedactionPresenter: RedactionPresenter {
         return label
     }
 
-    func showRedaction() {
+    public func showRedaction() {
         guard coverWindows.isEmpty else { return }
         for scene in windowScenes() {
             let window = UIWindow(windowScene: scene)
@@ -63,7 +63,7 @@ final class WindowRedactionPresenter: RedactionPresenter {
         }
     }
 
-    func hideRedaction() {
+    public func hideRedaction() {
         for window in coverWindows {
             window.isHidden = true
             window.rootViewController = nil
@@ -131,26 +131,26 @@ final class SessionLifecycleCoordinator {
 /// Covers a scene while it is inactive, and only the cover: the relock stays with the app's own lifecycle handling, so
 /// nothing relocks twice. The cover is raised when the scene will resign active, before the system takes its snapshot,
 /// and removed when the scene becomes active. A scene that becomes active without resigning never shows it.
-final class SceneCoverController {
+public final class SceneCoverController {
     private let presenter: RedactionPresenter
-    private(set) var isCovered = false
+    public private(set) var isCovered = false
 
-    init(presenter: RedactionPresenter) {
+    public init(presenter: RedactionPresenter) {
         self.presenter = presenter
     }
 
-    func sceneWillResignActive() {
+    public func sceneWillResignActive() {
         guard !isCovered else { return }
         isCovered = true
         presenter.showRedaction()
     }
 
-    func sceneDidBecomeActive() {
+    public func sceneDidBecomeActive() {
         removeCover()
     }
 
     /// A capture entry (Control, shortcut or URL) shows the capture surface, not the cover.
-    func captureEntryArrived() {
+    public func captureEntryArrived() {
         removeCover()
     }
 
