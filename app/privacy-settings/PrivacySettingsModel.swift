@@ -13,6 +13,9 @@ protocol PrivacySettingsControlling: AnyObject {
     func revoke(routeID: String, capability: String) async throws -> RoutePolicyChangeOutcome.Disposition
     func revokeProfile(_ profileVersion: String) async throws
     func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs
+    /// The core's durable listing of the jobs a revocation of `profileVersion` retired, one page at a time.
+    func jobsRetired(byRevocationOf profileVersion: String, limit: Int?, after: String?) async throws
+        -> JobConfigurationRetiredJobs
     func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws
         -> JobConfigurationRequeuedJob
     func requeueRecord(forJob jobID: String) async throws -> JobConfigurationRequeueRecord?
@@ -53,6 +56,12 @@ final class PrivacySettingsServices: PrivacySettingsControlling {
 
     func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs {
         try await jobs.jobsPinned(toProfile: profileVersion, limit: limit)
+    }
+
+    func jobsRetired(byRevocationOf profileVersion: String, limit: Int?, after: String?) async throws
+        -> JobConfigurationRetiredJobs
+    {
+        try await jobs.jobsRetired(byRevocationOf: profileVersion, limit: limit, after: after)
     }
 
     func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws
@@ -173,24 +182,47 @@ struct PrivacyQueuedVersion: Equatable {
     let jobs: JobConfigurationPinnedJobs
 }
 
-/// A job the core listed as queued or running just before a profile revocation and no longer lists afterwards. The
-/// revocation retired every job still pending when it ran; a job that ended in the moment between the two reads kept
-/// its own outcome. The listing does not say which, so the screen claims neither: it offers the move the core accepts
-/// only for a job it retired for the revocation, and shows the core's refusal otherwise.
-struct PrivacyUnlistedJob: Equatable {
+/// One job the core retired when a stored profile version was revoked, read from the core's durable listing of what
+/// that revocation retired. The core keeps that list, so it is the same after a relaunch, and a job on it can be moved
+/// to another version on purpose until it has been. `preview` adds only what this screen itself listed for the job
+/// just before the revocation; it never decides whether the job is on the list.
+struct PrivacyRetiredJob: Equatable {
+    enum PriorListing: Equatable {
+        /// Listed `running` just before the revocation: its request had already been sent.
+        case running
+        /// Listed `queued` just before the revocation. That says nothing about whether an earlier attempt was sent.
+        case queued
+        /// Absent from the screen's complete listing just before the revocation. The core retires only queued and
+        /// running work, so the job was pinned to the version in the moment between that listing and the revocation.
+        case notListed
+        /// The screen has no complete listing from just before the revocation: it failed, was capped, or the
+        /// revocation happened before this launch.
+        case unknown
+    }
+
     let jobID: String
     let itemID: String
-    /// Whether the core listed it as `running` (request already sent) just before the revocation.
-    let requestSent: Bool
+    /// RFC 3339: when the version was revoked, as the core records it.
+    let retiredAt: String
+    /// The replacement job the core queued when this job was moved, once it was.
+    let requeuedTo: String?
+    let preview: PriorListing
+
+    /// Whether the job can still be offered a move: the core has not recorded one for it yet.
+    var isMovable: Bool { requeuedTo == nil }
 }
 
-/// The work pending for one profile version just before its revocation and not listed afterwards, remembered from
-/// that moment so the user can still move it deliberately. The core lists only queued and running jobs, so this is the
-/// only place such work stays visible.
-struct PrivacyUnlistedVersion: Equatable {
+/// The work a revocation of one stored profile version retired, as the core lists it: the pages read so far, the full
+/// count, and the cursor of the next page while there is one.
+struct PrivacyRetiredVersion: Equatable {
     let profileVersion: String
     let versionLabel: String
-    let jobs: [PrivacyUnlistedJob]
+    let jobs: [PrivacyRetiredJob]
+    let total: Int
+    let nextCursor: String?
+
+    /// How many retired jobs the core holds beyond the pages read so far.
+    var remaining: Int { max(total - jobs.count, 0) }
 }
 
 enum PrivacySettingsPhase: Equatable {
@@ -251,9 +283,11 @@ final class PrivacySettingsModel: ObservableObject {
     @Published private(set) var lastRequeue: JobConfigurationRequeueRecord?
     /// Whether the record of the most recent requeue could not be read; `loadRequeueRecord` reads it again.
     @Published private(set) var requeueRecordUnreadable = false
-    /// Work pending just before a profile revocation in this session and not listed afterwards, each job still open to
-    /// an explicit move.
-    @Published private(set) var unlistedWork: [PrivacyUnlistedVersion] = []
+    /// The work each revoked stored version's revocation retired, as the core's durable listing reports it. Every
+    /// refresh reads it again, so it is the same after a relaunch; each job not yet moved is open to an explicit move.
+    @Published private(set) var retiredWork: [PrivacyRetiredVersion] = []
+    /// Whether some retired work could not be read; a refresh reads it again. The core keeps the list either way.
+    @Published private(set) var retiredWorkUnreadable = false
     /// The work that was pending when a route permission was last taken away, with what the core reports for each job
     /// now. Every refresh reads it again. It spans all routes, as the core's listing does, and claims nothing per route.
     @Published private(set) var followedWork: [PrivacyFollowedJob] = []
@@ -261,16 +295,17 @@ final class PrivacySettingsModel: ObservableObject {
     /// followed here. The core applies the same check to it.
     @Published private(set) var followedWorkIncomplete = false
     private var lastReplacementJobID: String?
+    /// What this screen listed for each job just before a profile revocation in this session, by job ID.
+    private var retiredPreviews: [String: PrivacyRetiredJob.PriorListing] = [:]
+    /// The versions whose listing just before their revocation in this session was read in full, so a retired job
+    /// absent from it is known to have been pinned in the moment before the revocation.
+    private var completePreviews: Set<String> = []
 
     /// The capabilities the core lets a user authorize for sending content.
     static let grantableCapabilities = ["text_interpretation", "review"]
 
-    /// How many queued jobs are listed per version; the core reports the full count either way.
+    /// How many queued or retired jobs are listed per version and per page; the core reports the full count either way.
     static let queuedJobLimit = 20
-
-    /// The most jobs the core lists for one version in any read. A version with more pending work than this cannot be
-    /// revoked from this screen, because the work beyond the listing could not be shown or moved afterwards.
-    static let listedJobLimit = 100
 
     /// The most waiting notes one repin moves; the core stops at this many, so a full batch may leave more waiting.
     static let repinBatchLimit = 100
@@ -332,11 +367,16 @@ final class PrivacySettingsModel: ObservableObject {
             let freshFollowed = try await readFollowedWork()
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
+            let freshRetired = try await readRetiredWork(freshListing)
+            guard thisGeneration == generation else { return }
+            guard readScope() == .authenticated else { lock(); return }
             routes = freshRoutes
             listing = freshListing
             queuedWork = freshQueued.versions
             queuedWorkUnreadable = freshQueued.unreadable
             followedWork = freshFollowed
+            retiredWork = freshRetired.versions
+            retiredWorkUnreadable = freshRetired.unreadable
             phase = .loaded
         } catch {
             guard thisGeneration == generation else { return }
@@ -409,6 +449,81 @@ final class PrivacySettingsModel: ObservableObject {
             }
         }
         return (versions, unreadable)
+    }
+
+    /// Reads, for every revoked stored version, the core's durable listing of what its revocation retired: at least as
+    /// many pages as were on screen before, so a refresh never hides a job the user had reached.
+    private func readRetiredWork(_ freshListing: ProviderProfileListAnswer) async throws
+        -> (versions: [PrivacyRetiredVersion], unreadable: Bool)
+    {
+        var versions: [PrivacyRetiredVersion] = []
+        var unreadable = false
+        for profile in freshListing.profiles {
+            for version in profile.versions where version.revoked {
+                let shown = retiredWork.first { $0.profileVersion == version.profileVersion }?.jobs.count ?? 0
+                do {
+                    let read = try await readRetiredPages(
+                        version.profileVersion,
+                        versionLabel: PrivacySettingsText.versionLabel(profileID: profile.profileID, version: version),
+                        atLeast: shown)
+                    if read.total > 0 { versions.append(read) }
+                } catch {
+                    if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
+                    unreadable = true
+                }
+            }
+        }
+        return (versions, unreadable)
+    }
+
+    /// Reads the first page of the jobs a revocation retired, then further pages until at least `count` are read or
+    /// the list ends.
+    private func readRetiredPages(_ profileVersion: String, versionLabel: String, atLeast count: Int) async throws
+        -> PrivacyRetiredVersion
+    {
+        var page = try await controls.jobsRetired(byRevocationOf: profileVersion, limit: Self.queuedJobLimit, after: nil)
+        var jobs = page.jobs.map { retiredJob($0, profileVersion: profileVersion) }
+        while let cursor = page.nextCursor, jobs.count < count {
+            page = try await controls.jobsRetired(byRevocationOf: profileVersion, limit: Self.queuedJobLimit, after: cursor)
+            jobs += page.jobs.map { retiredJob($0, profileVersion: profileVersion) }
+        }
+        return PrivacyRetiredVersion(
+            profileVersion: profileVersion, versionLabel: versionLabel, jobs: jobs, total: page.total,
+            nextCursor: page.nextCursor)
+    }
+
+    /// One retired job as the core lists it, with what this screen listed for it just before the revocation, if that
+    /// listing was read.
+    private func retiredJob(_ job: JobConfigurationRetiredJob, profileVersion: String) -> PrivacyRetiredJob {
+        let preview = retiredPreviews[job.jobID] ?? (completePreviews.contains(profileVersion) ? .notListed : .unknown)
+        return PrivacyRetiredJob(
+            jobID: job.jobID, itemID: job.itemID, retiredAt: job.retiredAt, requeuedTo: job.requeuedTo, preview: preview)
+    }
+
+    /// Reads the next page of the jobs a revocation retired and adds it to what is shown. The core reports the full
+    /// count either way; a failed read leaves the pages already shown and says the rest could not be read.
+    func loadMoreRetiredWork(profileVersion: String) async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard phase == .loaded, !isWorking,
+            let index = retiredWork.firstIndex(where: { $0.profileVersion == profileVersion }),
+            let cursor = retiredWork[index].nextCursor
+        else { return }
+        let thisGeneration = generation
+        do {
+            let page = try await controls.jobsRetired(
+                byRevocationOf: profileVersion, limit: Self.queuedJobLimit, after: cursor)
+            guard thisGeneration == generation else { return }
+            guard readScope() == .authenticated else { lock(); return }
+            let shown = retiredWork[index]
+            retiredWork[index] = PrivacyRetiredVersion(
+                profileVersion: shown.profileVersion, versionLabel: shown.versionLabel,
+                jobs: shown.jobs + page.jobs.map { retiredJob($0, profileVersion: profileVersion) },
+                total: page.total, nextCursor: page.nextCursor)
+        } catch {
+            guard thisGeneration == generation else { return }
+            if isNotAuthenticated(error) { lock(); return }
+            retiredWorkUnreadable = true
+        }
     }
 
     /// Opens the question for one capability, route and profile version. Nothing is granted.
@@ -506,27 +621,19 @@ final class PrivacySettingsModel: ObservableObject {
                 }
                 actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
             case .revokeProfileVersion(let profileVersion, let versionLabel):
-                // Read the work pinned to it before and after, so the message and the retry list come from the core.
-                // The read before is required and must be complete: the core lists only queued and running jobs, so
-                // a job it retires here can be offered for a move afterwards only if it was listed now. A failed or
-                // capped read stops here with nothing revoked.
-                let before: JobConfigurationPinnedJobs
+                // A preview of the work pinned to it just before, so the result can say which retired job's request
+                // had already been sent. It is only a preview: the result itself is the core's durable listing of
+                // what the revocation retired, which includes work pinned in the moment after the preview that no
+                // preview can see. A failed or capped preview holds nothing back; it only leaves that detail unknown.
+                var preview: JobConfigurationPinnedJobs?
                 do {
-                    before = try await controls.jobsPinned(toProfile: profileVersion, limit: nil)
+                    preview = try await controls.jobsPinned(toProfile: profileVersion, limit: nil)
                 } catch {
                     if isNotAuthenticated(error) { lock(); return }
-                    change = nil
-                    actionState = .failed(PrivacySettingsText.profileRevokeNotStarted(versionLabel))
-                    return
-                }
-                if before.truncated {
-                    change = nil
-                    actionState = .failed(PrivacySettingsText.profileRevokeNotListed(versionLabel, pending: before.total))
-                    return
                 }
                 try await controls.revokeProfile(profileVersion)
-                let after = try? await controls.jobsPinned(toProfile: profileVersion, limit: nil)
-                actionState = .changed(recordUnlisted(profileVersion, versionLabel: versionLabel, before: before, after: after))
+                recordPreview(preview, profileVersion: profileVersion)
+                actionState = .changed(await readRetiredResult(profileVersion, versionLabel: versionLabel))
             case .repinWaitingWork(let routeID, let routeLabel):
                 let moved = try await controls.repinWaitingWork(routeID: routeID)
                 actionState = .changed(
@@ -550,27 +657,29 @@ final class PrivacySettingsModel: ObservableObject {
         }
     }
 
-    /// Records the jobs listed just before a profile revocation and not afterwards, and describes what the core now
-    /// reports for the version. A job missing from the read after was retired by the revocation unless it ended in the
-    /// moment between the two reads; the listing does not say which, so neither does the screen.
-    private func recordUnlisted(
-        _ profileVersion: String, versionLabel: String, before: JobConfigurationPinnedJobs,
-        after: JobConfigurationPinnedJobs?
-    ) -> String {
-        // Without the read after, every job seen before is kept open to a move; the core accepts a move only for work
-        // it still holds or retired for the revocation, and refuses the rest.
-        let stillListed = Set(after?.jobs.map(\.jobID) ?? [])
-        let unlisted = before.jobs.filter { !stillListed.contains($0.jobID) }
-            .map { PrivacyUnlistedJob(jobID: $0.jobID, itemID: $0.itemID, requestSent: $0.status == "running") }
-        unlistedWork.removeAll { $0.profileVersion == profileVersion }
-        if !unlisted.isEmpty {
-            unlistedWork.append(
-                PrivacyUnlistedVersion(profileVersion: profileVersion, versionLabel: versionLabel, jobs: unlisted))
+    /// Keeps what the screen listed just before a profile revocation, per job, for the retired rows to show.
+    private func recordPreview(_ preview: JobConfigurationPinnedJobs?, profileVersion: String) {
+        completePreviews.remove(profileVersion)
+        guard let preview else { return }
+        for job in preview.jobs { retiredPreviews[job.jobID] = job.status == "running" ? .running : .queued }
+        if !preview.truncated { completePreviews.insert(profileVersion) }
+    }
+
+    /// Reads the core's durable listing of what the revocation retired and describes it. The listing, not any
+    /// expectation, is the result: it has every job the revocation retired, and only those. A failed read says so;
+    /// the core keeps the list, and the next refresh reads it again.
+    private func readRetiredResult(_ profileVersion: String, versionLabel: String) async -> String {
+        do {
+            let retired = try await readRetiredPages(profileVersion, versionLabel: versionLabel, atLeast: 0)
+            retiredWork.removeAll { $0.profileVersion == profileVersion }
+            if retired.total > 0 { retiredWork.append(retired) }
+            return PrivacySettingsText.profileRevoked(
+                versionLabel, retired: retired.total, alreadySent: retired.jobs.filter { $0.preview == .running }.count,
+                listed: retired.jobs.count)
+        } catch {
+            retiredWorkUnreadable = true
+            return PrivacySettingsText.profileRevokedUnread(versionLabel)
         }
-        guard let after else { return PrivacySettingsText.profileRevokedUnread(versionLabel, pendingBefore: before.total) }
-        return PrivacySettingsText.profileRevoked(
-            versionLabel, unlisted: unlisted.count, alreadySent: unlisted.filter(\.requestSent).count,
-            stillPending: after.total)
     }
 
     /// Opens the question for moving one queued job to another unrevoked stored version. Nothing is moved.
@@ -595,7 +704,8 @@ final class PrivacySettingsModel: ObservableObject {
         }
     }
 
-    /// The stored version a queued or running job, or one unlisted since a revocation, was pinned to, with its label.
+    /// The stored version a queued or running job, or one a revocation retired and the core has not yet seen moved,
+    /// was pinned to, with its label.
     private func pinnedOrigin(of jobID: String) -> (profileVersion: String, label: String)? {
         if let queued = queuedWork.first(where: { $0.jobs.jobs.contains { $0.jobID == jobID } }) {
             return (
@@ -603,8 +713,8 @@ final class PrivacySettingsModel: ObservableObject {
                 PrivacySettingsText.versionLabel(profileID: queued.profileID, version: queued.version)
             )
         }
-        if let unlisted = unlistedWork.first(where: { $0.jobs.contains { $0.jobID == jobID } }) {
-            return (unlisted.profileVersion, unlisted.versionLabel)
+        if let retired = retiredWork.first(where: { $0.jobs.contains { $0.jobID == jobID && $0.isMovable } }) {
+            return (retired.profileVersion, retired.versionLabel)
         }
         return nil
     }
@@ -619,14 +729,7 @@ final class PrivacySettingsModel: ObservableObject {
             let replacement = try await controls.requeue(
                 jobID: current.jobID, newJobID: current.newJobID, toProfileVersion: current.toProfileVersion)
             requeueProposal = nil
-            // The core accepted the move, so it held or had retired this job: it leaves the unlisted work.
-            unlistedWork = unlistedWork.compactMap { unlisted in
-                let remaining = unlisted.jobs.filter { $0.jobID != current.jobID }
-                return remaining.isEmpty
-                    ? nil
-                    : PrivacyUnlistedVersion(
-                        profileVersion: unlisted.profileVersion, versionLabel: unlisted.versionLabel, jobs: remaining)
-            }
+            // The core accepted the move; the refresh below reads its link back, so a retired job shows where it went.
             lastReplacementJobID = replacement.jobID
             lastRequeue = nil
             requeueRecordUnreadable = false
@@ -698,7 +801,10 @@ final class PrivacySettingsModel: ObservableObject {
         lastRequeue = nil
         requeueRecordUnreadable = false
         lastReplacementJobID = nil
-        unlistedWork = []
+        retiredWork = []
+        retiredWorkUnreadable = false
+        retiredPreviews = [:]
+        completePreviews = []
         followedWork = []
         followedWorkIncomplete = false
         queuedWork = []
@@ -717,7 +823,10 @@ final class PrivacySettingsModel: ObservableObject {
         lastRequeue = nil
         requeueRecordUnreadable = false
         lastReplacementJobID = nil
-        unlistedWork = []
+        retiredWork = []
+        retiredWorkUnreadable = false
+        retiredPreviews = [:]
+        completePreviews = []
         followedWork = []
         followedWorkIncomplete = false
         queuedWork = []

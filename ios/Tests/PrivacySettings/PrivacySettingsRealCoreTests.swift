@@ -62,7 +62,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
     /// When set, the root sends through this instead: it holds each request until released, then answers it validly.
     private var heldSender: PrivacyHeldReplySender?
     /// When set, the model's controls run this just before the core's profile revocation, so a test can put a real
-    /// completion in the moment between the screen's pre-read and the revocation.
+    /// completion or a real capture in the moment between the screen's preview and the revocation.
     private var beforeRevokeProfile: (@MainActor () async -> Void)?
     private var searchModule: RetrievalSearchModule!
 
@@ -414,12 +414,19 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.proposeRevokeProfile(profileVersion: version)
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
-        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
-        XCTAssertTrue(message.contains("1 had already been sent; a reply that arrives after the revocation is not applied"), message)
+        XCTAssertTrue(message.contains("The revocation retired 1 job"), message)
+        XCTAssertTrue(message.contains("1 of them had already been sent; a reply that arrives after the revocation is not applied"), message)
         XCTAssertEqual(jobStatus(), "cancelled")
         XCTAssertEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "profile_revoked")
-        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.jobID), [jobID], "the retired job stays open to an explicit move")
-        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.requestSent), [true])
+        let retired = try XCTUnwrap(model.retiredWork.first, "the core's list of what the revocation retired is shown")
+        XCTAssertEqual(retired.profileVersion, version)
+        XCTAssertEqual(retired.jobs.map(\.jobID), [jobID], "the retired job stays open to an explicit move")
+        XCTAssertEqual(retired.jobs.map(\.preview), [.running])
+        XCTAssertEqual(retired.jobs.map(\.requeuedTo), [nil])
+        XCTAssertEqual(
+            retired.jobs.first?.retiredAt,
+            scalar("SELECT revoked_at FROM provider_profiles WHERE profile_version = '\(version)'"),
+            "the retirement time is the core's revocation time")
         XCTAssertTrue(model.queuedWork.isEmpty)
 
         held.release()
@@ -429,6 +436,16 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(jobStatus(), "cancelled", "a late reply cannot bring the job back")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM proposals"), "0", "nothing was applied")
         XCTAssertNotEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
+
+        // The list is the core's, so it is the same after a relaunch; only this screen's preview of the moment just
+        // before the revocation is gone, and the row then claims nothing about it.
+        let relaunched = try await relaunch()
+        await relaunched.refresh()
+        XCTAssertEqual(relaunched.retiredWork.first?.jobs.map(\.jobID), [jobID])
+        XCTAssertEqual(relaunched.retiredWork.first?.jobs.map(\.preview), [.unknown])
+        XCTAssertEqual(
+            PrivacySettingsText.retiredJob(try XCTUnwrap(relaunched.retiredWork.first?.jobs.first)),
+            "Job \(jobID) · retired by the revocation.")
     }
 
     func testRetiredWorkIsMovedOnPurposeAndTheCoresLinkIsInspectableAndIdempotent() async throws {
@@ -446,9 +463,11 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.proposeRevokeProfile(profileVersion: version)
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
+        XCTAssertTrue(message.contains("The revocation retired 1 job"), message)
         XCTAssertEqual(scalar("SELECT failure_reason FROM jobs WHERE job_id = '\(jobID)'"), "profile_revoked")
         XCTAssertTrue(model.queuedWork.isEmpty)
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), [jobID])
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.preview), [.queued])
 
         model.proposeRequeue(jobID: jobID, toProfileVersion: other)
         let shown = try XCTUnwrap(model.requeueProposal, "the retired job can be moved on purpose")
@@ -464,15 +483,20 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
             scalar("SELECT old_job_id || '|' || new_job_id || '|' || from_profile_version || '|' || to_profile_version FROM job_requeues"),
             "\(jobID)|\(record.newJobID)|\(version)|\(other)", "the shown link is the core's stored row")
         XCTAssertEqual(scalar("SELECT profile_version FROM jobs WHERE job_id = '\(record.newJobID)'"), other)
+        XCTAssertEqual(
+            model.retiredWork.first?.jobs.map(\.requeuedTo), [record.newJobID], "the core's link is read back on the retired row")
+        model.proposeRequeue(jobID: jobID, toProfileVersion: other)
+        XCTAssertNil(model.requeueProposal, "a job the core has seen moved is not offered again")
 
         let repeated = try await root.jobConfiguration.requeue(jobID: jobID, newJobID: shown.newJobID, toProfileVersion: other)
         XCTAssertEqual(repeated.jobID, record.newJobID, "repeating the same action answers the same replacement")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "1")
     }
 
-    func testAVersionWithMorePendingWorkThanTheCoreListsIsNotRevokedFromTheScreen() async throws {
-        let model = try await makeModel()
+    func testAVersionWithMoreRetiredWorkThanOnePageIsRevokedAndEveryRetiredJobIsListedAcrossPagesAndARelaunch() async throws {
+        var model = try await makeModel()
         let version = try await createDispatchableDefault()
+        let other = try await createDispatchableProfile("other", makeDefault: false)
         await model.refresh()
         model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
         await model.confirm(try XCTUnwrap(model.proposal))
@@ -480,8 +504,8 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
         XCTAssertEqual(scalar("SELECT profile_version || '/' || status FROM jobs WHERE job_id = '\(jobID)'"), "\(version)/queued")
         // One hundred more queued jobs pinned to the same version, shaped like the real one: one past what the core
-        // lists in any read.
-        let copies = (1...PrivacySettingsModel.listedJobLimit).map { index in
+        // lists in any one read, and five pages of this screen.
+        let copies = (1...100).map { index in
             "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, "
                 + "request_version, status, attempt_count, created_at) SELECT 'synthetic-pending-\(index)', "
                 + "job_schema_version, item_id, job_type, source_revision, profile_version, request_version, 'queued', 0, "
@@ -489,49 +513,73 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         }
         execute("BEGIN; " + copies.joined(separator: "; ") + "; COMMIT")
         let listed = try await root.jobConfiguration.jobsPinned(toProfile: version)
-        XCTAssertEqual(listed.total, PrivacySettingsModel.listedJobLimit + 1)
-        XCTAssertTrue(listed.truncated, "the core's listing is capped below the pending work")
-        XCTAssertEqual(listed.jobs.count, PrivacySettingsModel.listedJobLimit)
+        XCTAssertEqual(listed.total, 101)
+        XCTAssertTrue(listed.truncated, "the core's pending listing is capped below the pending work")
+        let expected = Set([jobID] + (1...100).map { "synthetic-pending-\($0)" })
 
         await model.refresh()
         model.proposeRevokeProfile(profileVersion: version)
         await model.confirmChange(try XCTUnwrap(model.change))
-        guard case .failed(let message) = model.actionState else {
-            return XCTFail("expected failed, got \(String(describing: model.actionState))")
-        }
-        XCTAssertTrue(message.contains("101 jobs pending"), message)
-        XCTAssertTrue(message.contains("at most 100"), message)
-        XCTAssertTrue(message.contains("was not revoked"), message)
-        XCTAssertEqual(
-            scalar("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)' AND revoked_at IS NULL"), "1",
-            "the version is not revoked")
-        XCTAssertEqual(
-            scalar("SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND profile_version = '\(version)'"), "101",
-            "no job was retired")
-        XCTAssertTrue(model.unlistedWork.isEmpty)
-        XCTAssertNil(model.change)
-        XCTAssertEqual(model.phase, .loaded, "the app stays usable")
-        XCTAssertEqual(model.queuedWork.first?.jobs.total, 101, "the screen still shows the version's pending work")
-        XCTAssertEqual(try XCTUnwrap(model.listing?.profiles.first?.versions.first).revoked, false)
-
-        // Once the pending work fits the core's listing, the same revocation goes through and every job it retires is
-        // listed and stays movable.
-        execute("DELETE FROM jobs WHERE job_id LIKE 'synthetic-pending-%' AND job_id <> 'synthetic-pending-1'")
-        model.proposeRevokeProfile(profileVersion: version)
-        await model.confirmChange(try XCTUnwrap(model.change))
-        guard case .changed(let changed) = model.actionState else {
+        guard case .changed(let message) = model.actionState else {
             return XCTFail("expected changed, got \(String(describing: model.actionState))")
         }
-        XCTAssertTrue(changed.contains("2 jobs were pending just before and are no longer listed"), changed)
-        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "2")
-        XCTAssertEqual(Set(model.unlistedWork.first?.jobs.map(\.jobID) ?? []), [jobID, "synthetic-pending-1"])
+        XCTAssertTrue(message.contains("The revocation retired 101 jobs"), message)
+        XCTAssertTrue(message.contains("20 of them are shown; the rest load from the list"), message)
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)' AND revoked_at IS NOT NULL"), "1",
+            "the version is revoked")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "101", "every job was retired")
+        XCTAssertTrue(model.queuedWork.isEmpty)
+        XCTAssertEqual(model.phase, .loaded, "the app stays usable")
+        let firstPage = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(firstPage.total, 101, "the count is the core's")
+        XCTAssertEqual(firstPage.jobs.count, PrivacySettingsModel.queuedJobLimit)
+        XCTAssertNotNil(firstPage.nextCursor)
+        XCTAssertFalse(firstPage.jobs.contains { $0.preview == .notListed }, "a capped preview claims nothing about the moment before")
+
+        var reads = 0
+        while model.retiredWork.first?.nextCursor != nil, reads < 10 {
+            await model.loadMoreRetiredWork(profileVersion: version)
+            reads += 1
+        }
+        let all = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(all.jobs.count, 101, "every job the revocation retired is listed")
+        XCTAssertEqual(Set(all.jobs.map(\.jobID)), expected, "each exactly once")
+        XCTAssertNil(all.nextCursor)
+        model.proposeRequeue(jobID: "synthetic-pending-99", toProfileVersion: other)
+        XCTAssertNotNil(model.requeueProposal, "a job on a later page can be moved on purpose")
+        model.cancel()
+
+        // The move of one of them is accepted by the core and read back on its row.
+        model.proposeRequeue(jobID: jobID, toProfileVersion: other)
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal))
+        guard case .changed = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        let record = try XCTUnwrap(model.lastRequeue)
+        XCTAssertEqual(scalar("SELECT old_job_id FROM job_requeues"), jobID)
+        XCTAssertEqual(model.retiredWork.first?.jobs.count, 101, "a refresh keeps every page the user had reached")
+        XCTAssertEqual(model.retiredWork.first?.jobs.first { $0.jobID == jobID }?.requeuedTo, record.newJobID)
+
+        // The list is the core's: the same after a relaunch, page by page, with the recorded move.
+        model = try await relaunch()
+        await model.refresh()
+        let again = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(again.total, 101)
+        XCTAssertEqual(again.jobs.count, PrivacySettingsModel.queuedJobLimit)
+        XCTAssertEqual(again.jobs.map(\.preview), Array(repeating: PrivacyRetiredJob.PriorListing.unknown, count: PrivacySettingsModel.queuedJobLimit))
+        reads = 0
+        while model.retiredWork.first?.nextCursor != nil, reads < 10 {
+            await model.loadMoreRetiredWork(profileVersion: version)
+            reads += 1
+        }
+        XCTAssertEqual(Set(model.retiredWork.first?.jobs.map(\.jobID) ?? []), expected)
+        XCTAssertEqual(model.retiredWork.first?.jobs.first { $0.jobID == jobID }?.requeuedTo, record.newJobID)
     }
 
-    func testAJobThatCompletedBetweenTheTwoReadsIsNotCalledRetiredAndTheCoreRefusesItsMove() async throws {
+    func testAJobThatCompletedBetweenThePreviewAndTheRevocationIsNotOnTheCoresRetiredListOrOfferedAMove() async throws {
         let held = PrivacyHeldReplySender(reply: try Self.interpretationReply())
         heldSender = held
         defer { held.release() }
-        // In the moment between the screen's pre-read and the core's revocation, the held reply arrives and the core
+        // In the moment between the screen's preview and the core's revocation, the held reply arrives and the core
         // applies it: the job completes before the revocation runs.
         beforeRevokeProfile = { [unowned self] in
             held.release()
@@ -554,32 +602,84 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
         XCTAssertEqual(
             scalar("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)' AND revoked_at IS NOT NULL"), "1")
-        // The screen's two listings cannot tell a job the revocation retired from one that ended in that moment, and
-        // the screen says neither.
-        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
-        XCTAssertTrue(message.contains("keeps its own outcome"), message)
-        XCTAssertTrue(message.contains("1 had already been sent"), message)
-        XCTAssertFalse(message.contains("job retired"), "the screen does not call a completed job retired: \(message)")
-        XCTAssertFalse(message.contains("does not change the note"), "its reply did change the note: \(message)")
-        let unlisted = try XCTUnwrap(model.unlistedWork.first?.jobs.first)
-        XCTAssertEqual(unlisted.jobID, jobID)
-        XCTAssertTrue(unlisted.requestSent)
-        let row = PrivacySettingsText.unlistedJob(unlisted)
-        XCTAssertTrue(row.contains("was running (request already sent) just before the revocation and is no longer listed"), row)
-        XCTAssertTrue(row.contains("unless it ended in that moment"), row)
-        XCTAssertFalse(row.contains("retired (provider revoked)"), row)
-
-        // The core is the only authority on which it was: it refuses to move a job that had ended, and the screen
-        // shows that refusal instead of a move.
+        // The result is the core's list of what the revocation retired, which has no job, so the screen calls none
+        // retired, says nothing about a dropped reply, and offers no move the core would refuse.
+        XCTAssertTrue(message.contains("The core retired no work for it"), message)
+        XCTAssertFalse(message.contains("already been sent"), "its reply was applied: \(message)")
+        XCTAssertFalse(message.contains("retired 1 job"), "the screen does not call a completed job retired: \(message)")
+        XCTAssertTrue(model.retiredWork.isEmpty, "the core lists nothing as retired")
         model.proposeRequeue(jobID: jobID, toProfileVersion: other)
-        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal, "the unlisted job is offered a move"))
-        guard case .failed(let refusal) = model.actionState else {
-            return XCTFail("expected the core's refusal, got \(String(describing: model.actionState))")
-        }
-        XCTAssertTrue(refusal.contains("had already ended"), refusal)
+        XCTAssertNil(model.requeueProposal, "a job the core did not retire is not offered a move")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "0", "nothing was moved")
         XCTAssertEqual(jobStatus(), "completed")
-        XCTAssertNil(model.requeueProposal, "a refusal ends the question")
+    }
+
+    func testACaptureQueuedBetweenThePreviewAndTheRevocationIsOnTheCoresRetiredListAndCanBeMoved() async throws {
+        // In the moment between the screen's preview and the core's revocation, a real capture is saved. Its job is
+        // pinned to the version being revoked, and the core retires it with the rest.
+        beforeRevokeProfile = { [unowned self] in
+            do {
+                try await self.saveCapture("Remind me 2099-02-01 09:00:00 to send the synthetic quarterly figures")
+            } catch {
+                XCTFail("the capture in the moment before the revocation was saved: \(error)")
+            }
+        }
+        var model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        let other = try await createDispatchableProfile("other", makeDefault: false)
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        let first = scalar("SELECT job_id FROM jobs LIMIT 1")
+        await model.refresh()
+        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.jobID), [first], "the preview can see only this job")
+
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else {
+            return XCTFail("expected changed, got \(String(describing: model.actionState))")
+        }
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "2", "a second capture was queued in that moment")
+        let second = scalar("SELECT job_id FROM jobs WHERE job_id <> '\(first)'")
+        XCTAssertEqual(
+            scalar("SELECT profile_version || '/' || status || '/' || failure_reason FROM jobs WHERE job_id = '\(second)'"),
+            "\(version)/cancelled/profile_revoked", "the core pinned it to the version and retired it")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "2")
+        XCTAssertTrue(message.contains("The revocation retired 2 jobs"), message)
+        XCTAssertFalse(message.contains("already been sent"), message)
+        let retired = try XCTUnwrap(model.retiredWork.first, "the core's list is shown")
+        XCTAssertEqual(retired.total, 2)
+        XCTAssertEqual(Set(retired.jobs.map(\.jobID)), [first, second], "the job no preview could see is on the core's list")
+        XCTAssertEqual(retired.jobs.first { $0.jobID == first }?.preview, .queued)
+        XCTAssertEqual(retired.jobs.first { $0.jobID == second }?.preview, .notListed)
+        let row = PrivacySettingsText.retiredJob(try XCTUnwrap(retired.jobs.first { $0.jobID == second }))
+        XCTAssertEqual(row, "Job \(second) · retired by the revocation; it was pinned to the version in the moment before the revocation.")
+
+        // It can be moved on purpose like any other retired job, and the core's link is read back on its row.
+        model.proposeRequeue(jobID: second, toProfileVersion: other)
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal, "the job retired in that moment is offered a move"))
+        guard case .changed = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        let record = try XCTUnwrap(model.lastRequeue)
+        XCTAssertEqual(record.oldJobID, second)
+        XCTAssertEqual(record.fromProfileVersion, version)
+        XCTAssertEqual(record.toProfileVersion, other)
+        XCTAssertEqual(scalar("SELECT profile_version || '/' || status FROM jobs WHERE job_id = '\(record.newJobID)'"), "\(other)/queued")
+        XCTAssertEqual(model.retiredWork.first?.jobs.first { $0.jobID == second }?.requeuedTo, record.newJobID)
+        XCTAssertEqual(model.retiredWork.first?.jobs.first { $0.jobID == first }?.requeuedTo, nil)
+
+        // The list is the core's: after a relaunch both retired jobs and the recorded move are still shown, and the
+        // job not yet moved is still offered its move.
+        model = try await relaunch()
+        await model.refresh()
+        let again = try XCTUnwrap(model.retiredWork.first)
+        XCTAssertEqual(Set(again.jobs.map(\.jobID)), [first, second])
+        XCTAssertEqual(again.jobs.first { $0.jobID == second }?.requeuedTo, record.newJobID)
+        XCTAssertEqual(again.jobs.map(\.preview), [.unknown, .unknown])
+        model.proposeRequeue(jobID: first, toProfileVersion: other)
+        XCTAssertNotNil(model.requeueProposal)
+        model.proposeRequeue(jobID: second, toProfileVersion: other)
+        XCTAssertEqual(model.requeueProposal?.jobID, first, "the moved job is not offered again")
     }
 
     func testRepinMovesNothingWithoutAnApprovedProviderThenMovesWaitingWorkOnceOneIsSelected() async throws {
@@ -729,6 +829,12 @@ private final class PrivacyInterposedControls: PrivacySettingsControlling, @unch
 
     func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs {
         try await real.jobsPinned(toProfile: profileVersion, limit: limit)
+    }
+
+    func jobsRetired(byRevocationOf profileVersion: String, limit: Int?, after: String?) async throws
+        -> JobConfigurationRetiredJobs
+    {
+        try await real.jobsRetired(byRevocationOf: profileVersion, limit: limit, after: after)
     }
 
     func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws

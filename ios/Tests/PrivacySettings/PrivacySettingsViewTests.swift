@@ -274,7 +274,7 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertTrue(controls.requeues.isEmpty, "showing the question moves nothing")
     }
 
-    func testARevokedVersionsUnlistedJobsAndTheRequeueRecordAreShown() async throws {
+    func testARevokedVersionsRetiredJobsAndTheRequeueRecordAreShown() async throws {
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")], total: 1, truncated: false)
         controls.listing = .success(
@@ -284,10 +284,12 @@ final class PrivacySettingsViewTests: XCTestCase {
                     (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
                 ], defaultVersion: nil))
         await reload([grantedRoute()])
+        XCTAssertNil(rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")], "nothing is retired yet")
         model.proposeRevokeProfile(profileVersion: "hosted-v1")
         let fake = controls!
         fake.duringRevokeProfile = {
             fake.pinned["hosted-v1"] = nil
+            fake.retired["hosted-v1"] = [retiredJob("job-1")]
             fake.listing = .success(
                 providerListing(
                     versions: [
@@ -297,21 +299,29 @@ final class PrivacySettingsViewTests: XCTestCase {
         }
         await model.confirmChange(try XCTUnwrap(model.change))
         settle()
-        let row = try XCTUnwrap(rendered[PrivacySettingsView.unlistedJobIdentifier("job-1")])
         XCTAssertEqual(
-            row, PrivacySettingsText.unlistedJob(PrivacyUnlistedJob(jobID: "job-1", itemID: "item-1", requestSent: false)))
-        XCTAssertTrue(row.hasPrefix("Job job-1 · was queued just before the revocation and is no longer listed."), row)
-        XCTAssertTrue(row.contains("retired it unless it ended in that moment"), row)
+            rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 1 retired job")
+        let row = try XCTUnwrap(rendered[PrivacySettingsView.retiredJobIdentifier("job-1")])
+        XCTAssertEqual(row, "Job job-1 · retired by the revocation; it was listed queued just before.")
         let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
-        XCTAssertTrue(result.contains("1 job was pending just before and is no longer listed"), result)
-        XCTAssertFalse(result.contains("job retired"), result)
+        XCTAssertTrue(result.contains("The revocation retired 1 job"), result)
+        XCTAssertNil(rendered[PrivacySettingsView.retiredShowMoreIdentifier("hosted-v1")], "every retired job is shown")
+        XCTAssertNil(rendered[PrivacySettingsView.queuedJobIdentifier("job-1")], "the retired job is no longer queued")
+        XCTAssertNil(rendered[PrivacySettingsView.revokeProfileIdentifier("hosted-v1")], "a revoked version is not offered again")
         let offer = PrivacySettingsView.requeueOfferIdentifier("job-1", "private-v1")
-        XCTAssertNotNil(rendered[offer], "the unlisted job can be moved on purpose")
+        XCTAssertNotNil(rendered[offer], "the retired job can be moved on purpose")
 
+        // The core records the move and the screen reads it back: the row says where the job went and offers no move.
         controls.recordResult = .failure(JobConfigurationError.unreadable)
+        fake.retired["hosted-v1"] = [retiredJob("job-1", requeuedTo: "job-new")]
         model.proposeRequeue(jobID: "job-1", toProfileVersion: "private-v1")
         await model.confirmRequeue(try XCTUnwrap(model.requeueProposal))
         settle()
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.retiredJobIdentifier("job-1")],
+            "Job job-1 · retired by the revocation; it was listed queued just before. Moved to job job-new.")
+        XCTAssertNil(rendered[offer], "a job the core has seen moved is not offered again")
         XCTAssertEqual(
             rendered[PrivacySettingsView.requeueRecordUnreadableIdentifier], PrivacySettingsText.requeueRecordUnreadableNotice)
         XCTAssertEqual(rendered[PrivacySettingsView.requeueRecordRetryIdentifier], PrivacySettingsText.requeueRecordRetry)
@@ -327,27 +337,51 @@ final class PrivacySettingsViewTests: XCTestCase {
             rendered[PrivacySettingsView.requeueRecordIdentifier], PrivacySettingsText.requeueRecord(try XCTUnwrap(model.lastRequeue)))
     }
 
-    func testACappedPendingListingShowsTheVersionWasNotRevokedAndKeepsItsRow() async throws {
+    func testRetiredWorkBeyondOnePageShowsAShowMoreRowThatReadsTheNextPage() async throws {
+        let ids = (1...25).map { String(format: "job-%02d", $0) }
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
-            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")],
-            total: PrivacySettingsModel.listedJobLimit + 1, truncated: true)
+            jobs: [JobConfigurationPinnedJob(jobID: "job-01", itemID: "item-1", status: "queued")], total: 25, truncated: true)
         await reload([grantedRoute()])
         XCTAssertEqual(
             rendered[PrivacySettingsView.queuedVersionIdentifier("hosted-v1")],
-            "hosted · OpenAI · synthetic-model · 101 jobs (showing 1)")
+            "hosted · OpenAI · synthetic-model · 25 jobs (showing 1)")
 
         model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        let fake = controls!
+        fake.duringRevokeProfile = {
+            fake.pinned["hosted-v1"] = nil
+            fake.retired["hosted-v1"] = ids.map { retiredJob($0) }
+            fake.listing = .success(
+                providerListing(
+                    versions: [
+                        (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: true, supported: true),
+                        (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
+                    ], defaultVersion: nil))
+        }
         await model.confirmChange(try XCTUnwrap(model.change))
         settle()
-        XCTAssertTrue(controls.profileRevocations.isEmpty, "nothing was revoked")
+        XCTAssertEqual(controls.profileRevocations, ["hosted-v1"], "a capped preview no longer holds the revocation back")
         let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
-        XCTAssertTrue(result.contains("101 jobs pending"), result)
-        XCTAssertTrue(result.contains("was not revoked"), result)
-        XCTAssertNil(rendered[PrivacySettingsView.changeQuestionIdentifier])
-        XCTAssertNil(rendered[PrivacySettingsView.unlistedJobIdentifier("job-1")], "nothing is shown as unlisted")
-        XCTAssertEqual(rendered[PrivacySettingsView.queuedJobIdentifier("job-1")], "Job job-1 · queued")
+        XCTAssertTrue(result.contains("The revocation retired 25 jobs"), result)
+        XCTAssertTrue(result.contains("20 of them are shown"), result)
         XCTAssertEqual(
-            rendered[PrivacySettingsView.revokeProfileIdentifier("hosted-v1")]?.hasPrefix("Revoke hosted"), true,
-            "the version is still unrevoked and its row stays")
+            rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 25 retired jobs (showing 20)")
+        XCTAssertNotNil(rendered[PrivacySettingsView.retiredJobIdentifier("job-20")])
+        XCTAssertNil(rendered[PrivacySettingsView.retiredJobIdentifier("job-21")], "the next page is not read until asked")
+        XCTAssertEqual(rendered[PrivacySettingsView.retiredShowMoreIdentifier("hosted-v1")], "Show 5 more")
+        XCTAssertNil(rendered[PrivacySettingsView.queuedVersionIdentifier("hosted-v1")], "a revoked version has no queued work")
+        XCTAssertNil(rendered[PrivacySettingsView.changeQuestionIdentifier])
+
+        await model.loadMoreRetiredWork(profileVersion: "hosted-v1")
+        settle()
+        XCTAssertNotNil(rendered[PrivacySettingsView.retiredJobIdentifier("job-25")])
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 25 retired jobs")
+        XCTAssertNil(rendered[PrivacySettingsView.retiredShowMoreIdentifier("hosted-v1")], "every retired job is now shown")
+        XCTAssertNotNil(
+            rendered[PrivacySettingsView.requeueOfferIdentifier("job-25", "private-v1")],
+            "a job on a later page can be moved on purpose")
     }
 }

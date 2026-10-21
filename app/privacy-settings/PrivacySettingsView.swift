@@ -25,13 +25,16 @@ struct PrivacySettingsView: View {
     static let requeueRecordUnreadableIdentifier = "privacy-settings.requeue-record-unreadable"
     static let requeueRecordRetryIdentifier = "privacy-settings.requeue-record-retry"
     static let heldWorkIdentifier = "privacy-settings.held-work"
-    static let unlistedWorkIdentifier = "privacy-settings.unlisted-work"
+    static let retiredWorkIdentifier = "privacy-settings.retired-work"
+    static let retiredWorkUnreadableIdentifier = "privacy-settings.retired-work-unreadable"
     static let followedWorkIdentifier = "privacy-settings.followed-work"
     static let followedWorkIncompleteIdentifier = "privacy-settings.followed-work-incomplete"
     static let followedWorkCheckAgainIdentifier = "privacy-settings.followed-work-check-again"
     static func followedJobIdentifier(_ job: String) -> String { "privacy-settings.followed-job.\(job)" }
     static func queuedJobIdentifier(_ job: String) -> String { "privacy-settings.queued-job.\(job)" }
-    static func unlistedJobIdentifier(_ job: String) -> String { "privacy-settings.unlisted-job.\(job)" }
+    static func retiredJobIdentifier(_ job: String) -> String { "privacy-settings.retired-job.\(job)" }
+    static func retiredVersionIdentifier(_ version: String) -> String { "privacy-settings.retired.\(version)" }
+    static func retiredShowMoreIdentifier(_ version: String) -> String { "privacy-settings.retired-more.\(version)" }
     static func revokeIdentifier(_ route: String, _ capability: String) -> String {
         "privacy-settings.revoke.\(route).\(capability)"
     }
@@ -175,7 +178,8 @@ struct PrivacySettingsView: View {
     }
 
     /// Per unrevoked stored version: how much work waits behind it, the option to revoke it, and a deliberate move for
-    /// each listed job, and each job unlisted since a revocation, to each other unrevoked version.
+    /// each listed job, and each job a revocation retired and the core has not seen moved, to each other unrevoked
+    /// version.
     @ViewBuilder
     private var queuedWorkSection: some View {
         if model.queuedWorkUnreadable {
@@ -192,20 +196,14 @@ struct PrivacySettingsView: View {
         if !model.queuedWork.isEmpty, !model.routesHoldingWork.isEmpty {
             note(PrivacySettingsText.heldWork(model.routesHoldingWork), identifier: Self.heldWorkIdentifier)
         }
-        if !model.unlistedWork.isEmpty {
-            DSGroupedSection(title: PrivacySettingsText.unlistedWorkTitle) {
-                ForEach(model.unlistedWork, id: \.profileVersion) { unlisted in
-                    ForEach(unlisted.jobs, id: \.jobID) { job in
-                        let text = PrivacySettingsText.unlistedJob(job)
-                        let identifier = Self.unlistedJobIdentifier(job.jobID)
-                        DSRow(label: text, iconSystemName: "xmark.bin", showsChevron: false)
-                            .reportPrivacyRendered(identifier, text: text)
-                            .accessibilityIdentifier(identifier)
-                        moveOffers(jobID: job.jobID, from: unlisted.profileVersion)
-                    }
-                }
+        if model.retiredWorkUnreadable {
+            note(PrivacySettingsText.retiredWorkUnreadableNotice, identifier: Self.retiredWorkUnreadableIdentifier)
+        }
+        if !model.retiredWork.isEmpty {
+            DSGroupedSection(title: PrivacySettingsText.retiredWorkTitle) {
+                ForEach(model.retiredWork, id: \.profileVersion) { retired in retiredVersionRows(retired) }
             }
-            .accessibilityIdentifier(Self.unlistedWorkIdentifier)
+            .accessibilityIdentifier(Self.retiredWorkIdentifier)
         }
         followedWorkSection
         if let listing = model.listing {
@@ -253,6 +251,34 @@ struct PrivacySettingsView: View {
         }
         if model.followedWorkIncomplete {
             note(PrivacySettingsText.followedWorkIncompleteNotice, identifier: Self.followedWorkIncompleteIdentifier)
+        }
+    }
+
+    /// The core's durable list of what one version's revocation retired: a heading with the full count, the pages read
+    /// so far, a move offer for each job the core has not seen moved, and a row that reads the next page.
+    @ViewBuilder
+    private func retiredVersionRows(_ retired: PrivacyRetiredVersion) -> some View {
+        let heading = retired.versionLabel + " · " + PrivacySettingsText.retiredCount(retired)
+        let identifier = Self.retiredVersionIdentifier(retired.profileVersion)
+        DSRow(label: heading, iconSystemName: "xmark.bin", showsChevron: false)
+            .reportPrivacyRendered(identifier, text: heading)
+            .accessibilityIdentifier(identifier)
+        ForEach(retired.jobs, id: \.jobID) { job in
+            let text = PrivacySettingsText.retiredJob(job)
+            DSRow(label: text, iconSystemName: job.isMovable ? "clock.badge.xmark" : "arrow.right.circle", showsChevron: false)
+                .reportPrivacyRendered(Self.retiredJobIdentifier(job.jobID), text: text)
+                .accessibilityIdentifier(Self.retiredJobIdentifier(job.jobID))
+            if job.isMovable { moveOffers(jobID: job.jobID, from: retired.profileVersion) }
+        }
+        if retired.nextCursor != nil {
+            let more = PrivacySettingsText.retiredShowMore(retired)
+            let moreIdentifier = Self.retiredShowMoreIdentifier(retired.profileVersion)
+            DSRow(label: more, iconSystemName: "ellipsis", showsChevron: false) {
+                Task { await model.loadMoreRetiredWork(profileVersion: retired.profileVersion) }
+            }
+            .reportPrivacyRendered(moreIdentifier, text: more)
+            .accessibilityIdentifier(moreIdentifier)
+            .disabled(model.isWorking)
         }
     }
 
