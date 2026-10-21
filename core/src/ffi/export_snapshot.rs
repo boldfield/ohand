@@ -25,10 +25,10 @@ use super::capture::OHAND_CORE_MAX_CAPTURE_REQUEST_BYTES;
 use super::core_handle::exports::guarded;
 use super::core_handle::exports::{OhandCoreHandle, OhandCoreResult, OHAND_CORE_MAX_PATH_BYTES};
 use super::core_handle::failure::AbiFailure;
-use super::core_handle::instance::{self, lock, JobFn};
+use super::core_handle::instance::{self, current_job_cancelled, lock, DiscardFn, JobFn};
 use crate::export::{
-    read_core_snapshot, write_snapshot, AudioInclusion, ExportError, ExportRequest, ExportedAudio,
-    ReadAuthentication,
+    read_core_snapshot, write_snapshot_until, AudioInclusion, ExportError, ExportRequest,
+    ExportedAudio, ReadAuthentication,
 };
 use crate::providers::contracts::ErrorClass;
 use crate::store::events::ItemScope;
@@ -128,20 +128,30 @@ fn export_failure(error: ExportError) -> AbiFailure {
         }
         ExportError::Storage(error) => AbiFailure::from_store(&error, AbiFailure::STORAGE_ERROR),
         ExportError::Write(_) => write_failed(),
+        ExportError::Cancelled => AbiFailure::CANCELLED,
     }
 }
 
 fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFailure> {
+    if current_job_cancelled() {
+        return Err(AbiFailure::CANCELLED);
+    }
     let snapshot =
         read_core_snapshot(database, &export.request, Utc::now()).map_err(export_failure)?;
+    if current_job_cancelled() {
+        return Err(AbiFailure::CANCELLED);
+    }
 
     let file = create_exclusive(&export.output_path).map_err(|_| write_failed())?;
     let mut writer = BufWriter::new(file);
-    let written = write_snapshot(&snapshot, &mut writer)
+    let written = write_snapshot_until(&snapshot, &mut writer, &current_job_cancelled)
         .map_err(export_failure)
         .and_then(|summary| {
             let file = writer.into_inner().map_err(|_| write_failed())?;
             file.sync_all().map_err(|_| write_failed())?;
+            if current_job_cancelled() {
+                return Err(AbiFailure::CANCELLED);
+            }
             Ok(summary)
         });
     let summary = match written {
@@ -213,7 +223,15 @@ pub unsafe extern "C" fn ohand_core_start_export(
         let command: Command =
             serde_json::from_slice(bytes).map_err(|_| AbiFailure::INVALID_REQUEST)?;
         let export = command.validate()?;
-        core.submit(operation_id, export_job(export, operation_id))
+        let output_path = export.output_path.clone();
+        let discard: DiscardFn = Box::new(move || {
+            let _ = std::fs::remove_file(output_path);
+        });
+        core.submit_with_discard(
+            operation_id,
+            export_job(export, operation_id),
+            Some(discard),
+        )
     })
 }
 

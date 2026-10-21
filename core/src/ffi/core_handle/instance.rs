@@ -18,7 +18,7 @@
 
 use super::failure::{AbiFailure, OHAND_CORE_STATUS_OK};
 use crate::store::schema::{Database, SystemClock};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -40,9 +40,13 @@ pub type EventCallbackFn = unsafe extern "C" fn(
 
 pub type JobFn = Box<dyn FnOnce(&Mutex<Database>) -> Result<Vec<u8>, AbiFailure> + Send>;
 
+/// Removes whatever a job left behind when its outcome is discarded instead of delivered.
+pub type DiscardFn = Box<dyn FnOnce() + Send>;
+
 struct Job {
     operation_id: u64,
     run: JobFn,
+    discard: Option<DiscardFn>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +57,17 @@ struct Registration {
 
 thread_local! {
     static DELIVERING_FOR: Cell<Option<u64>> = const { Cell::new(None) };
+    static RUNNING_CANCELLATION: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// True when the core whose worker is running the calling job has been cancelled. Always false
+/// outside a worker job.
+pub(crate) fn current_job_cancelled() -> bool {
+    RUNNING_CANCELLATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    })
 }
 
 struct DeliveryScope;
@@ -82,7 +97,7 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Shared {
     handle: u64,
     database: Mutex<Database>,
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
     delivery: Mutex<Option<Registration>>,
 }
 
@@ -91,13 +106,14 @@ impl Shared {
         DELIVERING_FOR.with(|slot| slot.get()) == Some(self.handle)
     }
 
-    fn deliver(&self, operation_id: u64, outcome: Result<Vec<u8>, AbiFailure>) {
+    /// Delivers `outcome`; false when it was dropped because the core was cancelled.
+    fn deliver(&self, operation_id: u64, outcome: Result<Vec<u8>, AbiFailure>) -> bool {
         let registration_guard = lock(&self.delivery);
         if self.cancelled.load(Ordering::SeqCst) {
-            return;
+            return false;
         }
         let Some(registration) = *registration_guard else {
-            return;
+            return true;
         };
         let (status, payload) = match outcome {
             Ok(payload) => (OHAND_CORE_STATUS_OK, payload),
@@ -115,6 +131,7 @@ impl Shared {
                 payload.len(),
             );
         }
+        true
     }
 
     fn run_worker(&self, queue: Receiver<Job>) {
@@ -122,9 +139,15 @@ impl Shared {
             if self.cancelled.load(Ordering::SeqCst) {
                 continue;
             }
+            RUNNING_CANCELLATION
+                .with(|slot| *slot.borrow_mut() = Some(Arc::clone(&self.cancelled)));
             let outcome = catch_unwind(AssertUnwindSafe(|| (job.run)(&self.database)))
                 .unwrap_or(Err(AbiFailure::INTERNAL));
-            self.deliver(job.operation_id, outcome);
+            RUNNING_CANCELLATION.with(|slot| *slot.borrow_mut() = None);
+            let delivered = self.deliver(job.operation_id, outcome);
+            if let (false, Some(discard)) = (delivered, job.discard) {
+                discard();
+            }
         }
     }
 
@@ -168,7 +191,7 @@ pub fn open(path: &str) -> Result<u64, AbiFailure> {
     let shared = Arc::new(Shared {
         handle,
         database: Mutex::new(database),
-        cancelled: AtomicBool::new(false),
+        cancelled: Arc::new(AtomicBool::new(false)),
         delivery: Mutex::new(None),
     });
     let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
@@ -240,6 +263,17 @@ impl CoreInstance {
     }
 
     pub fn submit(&self, operation_id: u64, run: JobFn) -> Result<(), AbiFailure> {
+        self.submit_with_discard(operation_id, run, None)
+    }
+
+    /// Like `submit`; `discard` runs on the worker when the job's outcome is dropped because the
+    /// core was cancelled after the job finished, so the job can remove what it created.
+    pub fn submit_with_discard(
+        &self,
+        operation_id: u64,
+        run: JobFn,
+        discard: Option<DiscardFn>,
+    ) -> Result<(), AbiFailure> {
         if self.shared.cancelled.load(Ordering::SeqCst) {
             return Err(AbiFailure::CANCELLED);
         }
@@ -248,7 +282,11 @@ impl CoreInstance {
             return Err(AbiFailure::INVALID_HANDLE);
         };
         sender
-            .try_send(Job { operation_id, run })
+            .try_send(Job {
+                operation_id,
+                run,
+                discard,
+            })
             .map_err(|error| match error {
                 TrySendError::Full(_) => AbiFailure::QUEUE_FULL,
                 TrySendError::Disconnected(_) => AbiFailure::INTERNAL,

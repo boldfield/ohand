@@ -125,7 +125,7 @@ impl Database {
         let latest_version = steps.last().map_or(0, |step| step.target_version);
 
         let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")?;
         // Set a reasonable busy timeout to allow concurrent transactions to wait
         // rather than immediately fail. 5 seconds should be sufficient for most operations.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
