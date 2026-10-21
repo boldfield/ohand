@@ -283,8 +283,9 @@ final class DeletionViewTests: XCTestCase {
 
     /// The reset screen is entered from the Settings root's "Erase everything" card, and only from there. The root is
     /// hosted over real services so its other rows have models; the card's tap is the presentation the root opens on
-    /// appear, so the reset screen read here is the one the card pushes.
-    func testTheResetScreenIsReachedFromTheSettingsRootEraseCard() async throws {
+    /// appear, so the reset screen read here is the one the card pushes. The test is synchronous because building the
+    /// services turns the main run loop, which an async test on the main actor would hold.
+    func testTheResetScreenIsReachedFromTheSettingsRootEraseCard() throws {
         let storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("deletion-erase-card-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
@@ -302,22 +303,39 @@ final class DeletionViewTests: XCTestCase {
             try? FileManager.default.removeItem(at: storageRoot)
         }
         var rootRendered: [String: String] = [:]
-        func showRoot(resetSettings: ResetSettingsModel?, opensResetOnAppear: Bool) async {
+        func host<Content: View>(_ content: Content) {
             window?.isHidden = true
             rootRendered = [:]
-            let current = services.managementContext
-            let retention = RetentionSettingsModel(
+            rendered = [:]
+            let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
+            shown.rootViewController = UIHostingController(rootView: content)
+            shown.makeKeyAndVisible()
+            window = shown
+        }
+        func settle(until condition: () -> Bool) {
+            let deadline = Date(timeIntervalSinceNow: 10)
+            repeat {
+                window?.rootViewController?.view.layoutIfNeeded()
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+            } while !condition() && Date() < deadline
+        }
+        func retention(resetSettings: ResetSettingsModel?) -> RetentionSettingsModel {
+            RetentionSettingsModel(
                 controls: FakeRetentionControls(
                     status: RetentionStatus(
                         policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
                         storagePressure: .normal, unresolved: [])),
                 readScope: { .authenticated }, resetSettings: resetSettings)
+        }
+        func hostRoot(resetSettings: ResetSettingsModel?, opensResetOnAppear: Bool) {
+            let current = services.managementContext
             let context = ManagementContext(
-                voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
+                voiceRecovery: current.voiceRecovery, retrieval: current.retrieval,
+                retention: retention(resetSettings: resetSettings),
                 providerSettings: current.providerSettings, promptSettings: current.promptSettings,
                 sourceDetail: current.sourceDetail, suggestion: current.suggestion,
                 privacySettings: current.privacySettings)
-            await show(
+            host(
                 NavigationStack {
                     SettingsRootView(
                         sections: ManagementCatalog.settingsSections, context: context,
@@ -325,18 +343,14 @@ final class DeletionViewTests: XCTestCase {
                         resetRenderReporter: { [unowned self] in rendered = $0 })
                 })
         }
-        func waitUntil(_ condition: () -> Bool) async {
-            let deadline = Date(timeIntervalSinceNow: 10)
-            while !condition() && Date() < deadline { await self.settle() }
-        }
 
         let resetSettings = ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated })
-        await showRoot(resetSettings: resetSettings, opensResetOnAppear: false)
-        await waitUntil { rootRendered[SettingsRootView.eraseIdentifier] != nil }
+        hostRoot(resetSettings: resetSettings, opensResetOnAppear: false)
+        settle { rootRendered[SettingsRootView.eraseIdentifier] != nil }
         XCTAssertEqual(rootRendered[SettingsRootView.eraseIdentifier], "Erase everything")
 
-        await showRoot(resetSettings: resetSettings, opensResetOnAppear: true)
-        await waitUntil { rendered[ResetSettingsView.explanationIdentifier] != nil }
+        hostRoot(resetSettings: resetSettings, opensResetOnAppear: true)
+        settle { rendered[ResetSettingsView.explanationIdentifier] != nil && rendered[ResetSettingsView.continueIdentifier] != nil }
         XCTAssertEqual(text(ResetSettingsView.explanationIdentifier), DeletionText.resetExplanation)
         XCTAssertEqual(text(ResetSettingsView.limitsIdentifier), DeletionText.resetLimitsNote)
         XCTAssertEqual(text(ResetSettingsView.captureNoteIdentifier), DeletionText.resetCaptureNote)
@@ -345,21 +359,16 @@ final class DeletionViewTests: XCTestCase {
         assertTappable(ResetSettingsView.removeIdentifier)
         assertTappable(ResetSettingsView.continueIdentifier, enabled: false)
 
-        await showRoot(resetSettings: nil, opensResetOnAppear: false)
-        await waitUntil { rootRendered["audio-retention"] != nil }
+        hostRoot(resetSettings: nil, opensResetOnAppear: false)
+        settle { rootRendered["audio-retention"] != nil }
         XCTAssertNil(rootRendered[SettingsRootView.eraseIdentifier], "no reset model, no card")
 
-        let retention = RetentionSettingsModel(
-            controls: FakeRetentionControls(
-                status: RetentionStatus(
-                    policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true), storagePressure: .normal,
-                    unresolved: [])),
-            readScope: { .authenticated }, resetSettings: resetSettings)
-        window?.isHidden = true
-        await show(
+        host(
             NavigationStack {
-                RetentionSettingsView(model: retention, renderReporter: { [unowned self] in rendered = $0 })
+                RetentionSettingsView(
+                    model: retention(resetSettings: resetSettings), renderReporter: { [unowned self] in rendered = $0 })
             })
+        settle { !rendered.isEmpty }
         XCTAssertNil(rendered["data-settings.retention.reset-link"], "the Audio screen does not link to reset")
     }
 }
