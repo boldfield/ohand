@@ -103,6 +103,31 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(rendered[SettingsRootView.eraseIdentifier], "Erase everything")
     }
 
+    /// Walks the hosted view's accessibility tree (SwiftUI exposes its nodes through `accessibilityElements`).
+    private func accessibilityElement(identifier: String, in object: NSObject?, depth: Int = 0) -> NSObject? {
+        guard let object, depth < 40 else { return nil }
+        if (object as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier { return object }
+        var children: [NSObject] = (object.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = object as? UIView { children += view.subviews }
+        for child in children {
+            if let found = accessibilityElement(identifier: identifier, in: child, depth: depth + 1) { return found }
+        }
+        return nil
+    }
+
+    func testActivatingTheEraseCardOpensTheResetScreen() throws {
+        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }))
+        settle { rendered[SettingsRootView.eraseIdentifier] != nil }
+        let rootView = try XCTUnwrap(window?.rootViewController?.view)
+        XCTAssertNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView))
+
+        let card = try XCTUnwrap(accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView))
+        XCTAssertTrue(card.accessibilityActivate(), "the erase card can be activated")
+        settle { self.accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView) != nil }
+        XCTAssertNotNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView),
+                        "activating the card shows the reset screen")
+    }
+
     func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
         let ids = { (entries: [ManagementEntry]) in entries.map(\.id) }
         let catalog = ManagementCatalog.settingsSections
