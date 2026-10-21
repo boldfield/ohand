@@ -360,7 +360,7 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
         }
         XCTAssertTrue(pump(until: {
             window.rootViewController?.view.layoutIfNeeded()
-            return model.content != nil && model.deletion?.revision != nil
+            return MainActor.assumeIsolated { model.content != nil && model.deletion?.revision != nil }
         }), "the item loads and the delete control has read its revision")
         let deletion = try XCTUnwrap(model.deletion)
 
@@ -371,7 +371,7 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
 
         XCTAssertTrue(pump(until: {
             window.rootViewController?.view.layoutIfNeeded()
-            return deletion.isRecorded && model.failure == .notFound
+            return MainActor.assumeIsolated { deletion.isRecorded && model.failure == .notFound }
         }), "the screen reads the item again once the deletion is recorded")
         _ = pump(until: { false }, timeout: 0.3)
         XCTAssertNil(model.content)
