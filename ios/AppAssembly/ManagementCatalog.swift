@@ -167,7 +167,12 @@ struct SettingsRootView: View {
     let context: ManagementContext
     /// Lets a hosted test see each row's label and value; production leaves it unset.
     var renderReporter: (([String: String]) -> Void)?
+    /// Hosted tests cannot tap a SwiftUI control, so they ask the root to open the reset screen exactly as the card's
+    /// tap does and read the reset screen's own render report; production leaves both unset.
+    var opensResetOnAppear = false
+    var resetRenderReporter: (([String: RetentionRenderedElement]) -> Void)?
 
+    @State private var isResetShown = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -214,8 +219,8 @@ struct SettingsRootView: View {
                     group(secondGroup)
                 }
                 if let resetSettings = context.retention.resetSettings {
-                    NavigationLink {
-                        ResetSettingsView(model: resetSettings)
+                    Button {
+                        isResetShown = true
                     } label: {
                         DSCard {
                             Text("Erase everything")
@@ -226,6 +231,9 @@ struct SettingsRootView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier(Self.eraseIdentifier)
+                    .navigationDestination(isPresented: $isResetShown) {
+                        ResetSettingsView(model: resetSettings, renderReporter: resetRenderReporter)
+                    }
                     .preference(key: SettingsRootRenderedKey.self, value: [Self.eraseIdentifier: "Erase everything"])
                 }
                 Text(versionText)
@@ -242,6 +250,7 @@ struct SettingsRootView: View {
         .toolbar(.hidden, for: .navigationBar)
         .onPreferenceChange(SettingsRootRenderedKey.self) { renderReporter?($0) }
         .task { await loadValues() }
+        .onAppear { if opensResetOnAppear { isResetShown = true } }
     }
 
     /// Reads the current values the rows show. The models keep their own read-scope rules: a locked session leaves

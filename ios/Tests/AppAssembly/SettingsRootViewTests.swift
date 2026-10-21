@@ -43,7 +43,10 @@ final class SettingsRootViewTests: XCTestCase {
         try? FileManager.default.removeItem(at: storageRoot)
     }
 
-    private func host(resetSettings: ResetSettingsModel? = nil) {
+    private func host(
+        resetSettings: ResetSettingsModel? = nil, opensResetOnAppear: Bool = false,
+        resetRenderReporter: (([String: RetentionRenderedElement]) -> Void)? = nil
+    ) {
         let current = services.managementContext
         let status = RetentionStatus(
             policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
@@ -63,7 +66,8 @@ final class SettingsRootViewTests: XCTestCase {
         let root = NavigationStack {
             SettingsRootView(
                 sections: ManagementCatalog.settingsSections, context: context,
-                renderReporter: { [unowned self] in rendered = $0 })
+                renderReporter: { [unowned self] in rendered = $0 },
+                opensResetOnAppear: opensResetOnAppear, resetRenderReporter: resetRenderReporter)
         }
         let shown = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         shown.rootViewController = UIHostingController(rootView: root)
@@ -103,37 +107,14 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(rendered[SettingsRootView.eraseIdentifier], "Erase everything")
     }
 
-    /// Walks the hosted view's accessibility tree (SwiftUI exposes its nodes through `accessibilityElements`).
-    private func accessibilityElement(identifier: String, in object: NSObject?, depth: Int = 0) -> NSObject? {
-        guard let object, depth < 40 else { return nil }
-        if (object as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier { return object }
-        var children: [NSObject] = (object.accessibilityElements ?? []).compactMap { $0 as? NSObject }
-        if children.isEmpty, object.isAccessibilityElement == false {
-            let count = object.accessibilityElementCount()
-            if count != NSNotFound, count > 0 {
-                children = (0..<count).compactMap { object.accessibilityElement(at: $0) as? NSObject }
-            }
-        }
-        if let view = object as? UIView { children += view.subviews }
-        for child in children {
-            if let found = accessibilityElement(identifier: identifier, in: child, depth: depth + 1) { return found }
-        }
-        return nil
-    }
-
-    func testActivatingTheEraseCardOpensTheResetScreen() throws {
-        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }))
-        settle { rendered[SettingsRootView.eraseIdentifier] != nil }
-        let rootView = try XCTUnwrap(window?.rootViewController?.view)
-        XCTAssertNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView))
-
-        settle { self.accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView) != nil }
-        let card = try XCTUnwrap(accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView),
-                                 "the erase card is in the accessibility tree")
-        XCTAssertTrue(card.accessibilityActivate(), "the erase card can be activated")
-        settle { self.accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView) != nil }
-        XCTAssertNotNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView),
-                        "activating the card shows the reset screen")
+    /// The card's tap sets the same presentation state the root opens on appear; the real tap is covered end to end by
+    /// the walkthrough UI test, which taps `management.settings.erase` and waits for the reset screen.
+    func testTheEraseCardDestinationIsTheResetScreenOverTheContextsModel() {
+        var resetRendered: [String: RetentionRenderedElement] = [:]
+        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }),
+             opensResetOnAppear: true, resetRenderReporter: { resetRendered = $0 })
+        settle { resetRendered[ResetSettingsView.explanationIdentifier] != nil }
+        XCTAssertEqual(resetRendered[ResetSettingsView.explanationIdentifier]?.text, DeletionText.resetExplanation)
     }
 
     func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
