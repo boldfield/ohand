@@ -29,6 +29,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = (scene as? UIWindowScene), let launcher = launcher else { return }
         launcher.launch()
+
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UIHostingController(rootView: AppLauncherView(launcher: launcher))
         self.window = window
@@ -37,7 +38,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         for context in connectionOptions.urlContexts {
             launcher.services?.receive(url: context.url)
         }
-        if !connectionOptions.urlContexts.isEmpty { cover()?.captureEntryArrived() }
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
@@ -61,6 +61,5 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         for context in URLContexts {
             launcher?.services?.receive(url: context.url)
         }
-        cover()?.captureEntryArrived()
     }
 }

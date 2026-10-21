@@ -13,37 +13,47 @@ public final class WindowRedactionPresenter: RedactionPresenter {
     private let windowScenes: () -> [UIWindowScene]
     private var coverWindows: [UIWindow] = []
 
-    public init(windowScenes: @escaping () -> [UIWindowScene] = {
-        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    }) {
-        self.windowScenes = windowScenes
-    }
-
     var coverWindowCount: Int { coverWindows.count }
 
-    /// The design's `brand` indigo in light theme and the dark launch ground in dark theme.
-    static let brandBackground = UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0x0A / 255, green: 0x0B / 255, blue: 0x12 / 255, alpha: 1)
-            : UIColor(red: 0x1E / 255, green: 0x27 / 255, blue: 0x61 / 255, alpha: 1)
+    private let background: UIColor
+    private let markImage: UIImage?
+
+    /// Defaults to the shipped launch screen pair (`LaunchBackground`, `LaunchMark`), so the cover and the launch
+    /// screen are the same brand surface in both themes.
+    public convenience init(
+        windowScenes: @escaping () -> [UIWindowScene] = {
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        }
+    ) {
+        self.init(
+            windowScenes: windowScenes,
+            background: UIColor(named: "LaunchBackground") ?? .systemBackground,
+            markImage: UIImage(named: "LaunchMark"))
     }
 
-    /// The italic ampersand mark. A fixed glyph, never stored history.
-    private static func makeMark() -> UIView {
-        let label = UILabel()
-        let baseFont = UIFont(descriptor: UIFontDescriptor.preferredFontDescriptor(withTextStyle: .largeTitle)
-            .withDesign(.serif) ?? UIFontDescriptor(), size: 120)
-        let italic = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic)
-            .map { UIFont(descriptor: $0, size: 120) } ?? baseFont
-        label.font = italic
-        label.text = "&"
-        label.textColor = .white
-        label.isAccessibilityElement = false
-        label.sizeToFit()
-        label.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
-        label.translatesAutoresizingMaskIntoConstraints = true
-        return label
+    public init(windowScenes: @escaping () -> [UIWindowScene], background: UIColor, markImage: UIImage?) {
+        self.windowScenes = windowScenes
+        self.background = background
+        self.markImage = markImage
     }
+
+    /// The cover window's content view: the background with the mark centred. A fixed image, never stored history.
+    func makeCoverView() -> UIView {
+        let view = UIView()
+        view.backgroundColor = background
+        view.accessibilityIgnoresInvertColors = true
+        if let markImage = markImage {
+            let mark = UIImageView(image: markImage)
+            mark.isAccessibilityElement = false
+            mark.contentMode = .center
+            mark.frame = view.bounds
+            mark.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(mark)
+        }
+        return view
+    }
+
+    var coverViews: [UIView] { coverWindows.compactMap { $0.rootViewController?.view } }
 
     public func showRedaction() {
         guard coverWindows.isEmpty else { return }
@@ -51,13 +61,8 @@ public final class WindowRedactionPresenter: RedactionPresenter {
             let window = UIWindow(windowScene: scene)
             window.windowLevel = UIWindow.Level.alert + 1
             let controller = UIViewController()
-            controller.view.backgroundColor = Self.brandBackground
-            controller.view.addSubview(Self.makeMark())
-            controller.view.accessibilityIgnoresInvertColors = true
+            controller.view = makeCoverView()
             window.rootViewController = controller
-            controller.view.subviews.first.map { mark in
-                mark.center = CGPoint(x: scene.coordinateSpace.bounds.midX, y: scene.coordinateSpace.bounds.midY)
-            }
             window.isHidden = false
             coverWindows.append(window)
         }
@@ -158,15 +163,16 @@ extension ServiceCompositionRoot: ReadLockState {
 /// Covers a scene while it is not active and reads are unlocked, and only the cover: the relock stays with the app's
 /// own lifecycle handling, so nothing relocks twice. While locked nothing stored is on screen, so the app's own Face ID
 /// prompt (which resigns the scene) never shows the cover. The cover is raised when the scene will resign active or
-/// enters the background, before the system takes its snapshot, and removed when the scene becomes active. Reads that
-/// unlock while the scene is inactive raise it until the scene is active. A scene that becomes active without resigning
-/// never shows it. Called on the main thread.
+/// enters the background, before the system takes its snapshot, or when reads unlock while the scene is inactive. The
+/// lock state decides only whether it is raised: once raised, only the scene becoming active removes it, so a relock
+/// (which runs after `sceneDidEnterBackground` and before the snapshot), a scope change or a URL never does. Every
+/// capture entry (URL, Control, shortcut, App Intent) makes the scene active, which removes the cover and shows the
+/// capture surface. A scene that becomes active without resigning never shows it. Called on the main thread.
 public final class SceneCoverController {
     private let presenter: RedactionPresenter
     private let readLock: ReadLockState
     private var registration: AnyObject?
     private var isInactive = false
-    private var captureEntryShowing = false
     public private(set) var isCovered = false
 
     public init(presenter: RedactionPresenter, readLock: ReadLockState) {
@@ -174,40 +180,33 @@ public final class SceneCoverController {
         self.readLock = readLock
         registration = readLock.observeReadScopeChanges { [weak self] in
             if Thread.isMainThread {
-                self?.refresh()
+                self?.raiseIfNeeded()
             } else {
-                DispatchQueue.main.async { self?.refresh() }
+                DispatchQueue.main.async { self?.raiseIfNeeded() }
             }
         }
     }
 
     public func sceneWillResignActive() {
         isInactive = true
-        captureEntryShowing = false
-        refresh()
+        raiseIfNeeded()
     }
 
     public func sceneDidEnterBackground() {
         isInactive = true
-        refresh()
+        raiseIfNeeded()
     }
 
     public func sceneDidBecomeActive() {
         isInactive = false
-        captureEntryShowing = false
-        refresh()
+        guard isCovered else { return }
+        isCovered = false
+        presenter.hideRedaction()
     }
 
-    /// A capture entry (Control, shortcut or URL) shows the capture surface, not the cover, until the scene is next active.
-    public func captureEntryArrived() {
-        captureEntryShowing = true
-        refresh()
-    }
-
-    private func refresh() {
-        let shouldCover = isInactive && !captureEntryShowing && readLock.readsAreUnlocked
-        guard shouldCover != isCovered else { return }
-        isCovered = shouldCover
-        if shouldCover { presenter.showRedaction() } else { presenter.hideRedaction() }
+    private func raiseIfNeeded() {
+        guard isInactive, !isCovered, readLock.readsAreUnlocked else { return }
+        isCovered = true
+        presenter.showRedaction()
     }
 }
