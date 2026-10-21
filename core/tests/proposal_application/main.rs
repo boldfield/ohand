@@ -1272,15 +1272,122 @@ fn a_span_followed_by_a_self_correction_or_zone_aside_after_a_comma_is_rejected(
 }
 
 #[test]
-fn a_commentary_clause_after_the_time_still_schedules() {
+fn a_clause_or_aside_after_the_time_is_rejected_whether_or_not_it_names_a_place() {
     for text in [
-        "Remind me Friday at 3 p.m., I don't want to miss it, to call the roofer",
-        "Remind me Friday at 3 p.m., sorry, I forgot the two quotes, to call the roofer",
+        "Remind me tomorrow at 9 a.m., I will be in Tokyo, to call the roofer",
+        "Remind me tomorrow at 9 a.m., I\u{2019}ll be in Tokyo, to call the roofer",
+        "Remind me tomorrow at 9 a.m. (I'll be in Lisbon) to call the roofer",
+        "Remind me tomorrow at 9 a.m. - I'll be in Lisbon - to call the roofer",
+        "Remind me tomorrow at 9 a.m., after the meeting, to call the roofer",
+        "Remind me tomorrow at 9 a.m., I don't want to miss it, to call the roofer",
+        "Remind me tomorrow at 9 a.m., sorry, I forgot the two quotes, to call the roofer",
+        "Remind me tomorrow at 9 a.m. Tokyo time, to call the roofer",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "call the roofer",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_self_correction_to_a_relative_time_or_a_possessive_zone_is_rejected() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m., sorry, the day after, to call the roofer",
             "Friday at 3 p.m.",
             "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m., I mean later, to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m., oh, make it earlier, to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m., I mean their time, to call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. my time to call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m. their time to call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_list_after_the_time_needs_correction_but_the_same_list_before_it_schedules() {
+    for text in [
+        "Remind me tomorrow at 9 a.m., buy eggs, milk and bread",
+        "Remind me tomorrow at 9 a.m. to buy eggs, milk and bread",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "buy eggs",
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+    // With the time last, the span guard covers the time (see the unit table in
+    // `core/src/time/expression.rs`). End to end the comma-separated list stops earlier: the
+    // explicit-intent check (I05) treats the comma between "remind me" and the time as a clause
+    // break, which is outside F28. The same list without commas schedules.
+    let text = "Remind me to buy eggs, milk and bread tomorrow at 9 a.m.";
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+        "buy eggs",
+    );
+    assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+    assert_eq!(fixture.reminder_effects(), None, "{text}");
+    let text = "Remind me to buy eggs and milk and bread tomorrow at 9 a.m.";
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+        "buy eggs",
+    );
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+        "{text}"
+    );
+    assert_eq!(fixture.reminder_row().request_state, "resolved", "{text}");
+}
+
+#[test]
+fn the_allowed_boundaries_around_the_time_still_schedule() {
+    for text in [
+        "Remind me tomorrow at 9 a.m. to call the roofer",
+        "Remind me tomorrow at 9 a.m., to call the roofer",
+        "Remind me to call the roofer tomorrow at 9 a.m.",
+        "Remind me to call the roofer tomorrow at 9 a.m., thanks",
+        "Remind me to call the roofer tomorrow at 9 a.m.!",
+        "Remind me tomorrow at 9 a.m. to call the roofer. Thanks",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
             "call the roofer",
         );
         assert_eq!(
@@ -1297,6 +1404,7 @@ fn a_day_naming_span_after_a_relative_modifier_is_rejected() {
     for text in [
         "Remind me before Friday at 3 p.m. to call the roofer",
         "Remind me after Friday at 3 p.m. to call the roofer",
+        "Remind me prior to Friday at 3 p.m. to call the roofer",
         "Remind me sometime Friday at 3 p.m. to call the roofer",
         "Remind me by Friday at 3 p.m. to call the roofer",
         "Remind me to call the roofer by Friday at 3 p.m.",
@@ -1470,33 +1578,25 @@ fn a_dayless_span_after_only_request_words_still_schedules() {
 }
 
 #[test]
-fn a_connector_into_the_task_still_schedules() {
-    let (fixture, disposition) = apply_clock_proposal(
-        "Remind me Friday at 3 p.m. and call the roofer",
-        "Friday at 3 p.m.",
-        "2026-10-09T15:00:00-04:00",
-        "call the roofer",
-    );
-    assert_eq!(
-        disposition,
-        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
-    );
-    assert_eq!(fixture.reminder_row().request_state, "resolved");
-}
-
-#[test]
-fn a_bracketed_task_aside_after_the_time_still_schedules() {
-    let (fixture, disposition) = apply_clock_proposal(
-        "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
-        "tomorrow at 9 a.m.",
-        "2026-10-09T09:00:00-04:00",
-        "call Sam about the quote",
-    );
-    assert_eq!(
-        disposition,
-        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
-    );
-    assert_eq!(fixture.reminder_row().request_state, "resolved");
+fn a_connector_or_bracketed_aside_after_the_time_is_rejected() {
+    for (text, item_span) in [
+        (
+            "Remind me tomorrow at 9 a.m. and call the roofer",
+            "call the roofer",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
+            "call Sam about the quote",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            item_span,
+        );
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
 }
 
 #[test]
@@ -2027,6 +2127,7 @@ const CORPUS_TIME_PHRASE: &str = "2026-01-16 09:00:00";
 enum CorpusExpectation {
     Unscheduled,
     Scheduled,
+    Recognised,
 }
 
 /// Parse `<expectation> | <capture text>` lines; `{time}` becomes the quoted time phrase.
@@ -2042,6 +2143,7 @@ fn withdrawal_corpus() -> Vec<(CorpusExpectation, String)> {
             let expectation = match expectation {
                 "unscheduled" => CorpusExpectation::Unscheduled,
                 "scheduled" => CorpusExpectation::Scheduled,
+                "recognised" => CorpusExpectation::Recognised,
                 other => panic!("unknown corpus expectation {other:?} in: {line}"),
             };
             (expectation, text.replace("{time}", CORPUS_TIME_PHRASE))
@@ -2067,9 +2169,17 @@ fn the_withdrawal_corpus_decides_which_reminder_requests_schedule() {
         .iter()
         .filter(|(expectation, _)| *expectation == CorpusExpectation::Unscheduled)
         .count();
-    let controls = corpus.len() - withdrawals;
-    assert!(withdrawals > 0 && controls > 0, "corpus needs both kinds");
+    let scheduled = corpus
+        .iter()
+        .filter(|(expectation, _)| *expectation == CorpusExpectation::Scheduled)
+        .count();
+    let recognised = corpus.len() - withdrawals - scheduled;
+    assert!(
+        withdrawals > 0 && scheduled > 0,
+        "corpus needs withdrawals and scheduled controls"
+    );
 
+    let mut mismatches: Vec<String> = Vec::new();
     for (expectation, text) in &corpus {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -2078,42 +2188,54 @@ fn the_withdrawal_corpus_decides_which_reminder_requests_schedule() {
             TimeResolutionQuality::Explicit,
             ItemType::Action,
         );
+        let durable = fixture.durable();
+        assert_eq!(durable.item_type.as_deref(), Some("action"), "{text}");
+        assert_eq!(durable.processing_state, "processed", "{text}");
+        assert_eq!(
+            source_text_of(&fixture),
+            *text,
+            "the source record stays intact: {text}"
+        );
 
-        match expectation {
+        let matched = match expectation {
             CorpusExpectation::Unscheduled => {
-                assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
-                assert_eq!(fixture.reminder_effects(), None, "{text}");
-                let durable = fixture.durable();
-                assert_eq!(durable.item_type.as_deref(), Some("action"), "{text}");
-                assert_eq!(durable.processing_state, "processed", "{text}");
-                assert_eq!(durable.reminders, 0, "{text}");
-                assert_eq!(
-                    source_text_of(&fixture),
-                    *text,
-                    "the source record stays intact: {text}"
-                );
+                disposition == ReminderDisposition::NoExplicitIntent
+                    && fixture.reminder_effects().is_none()
+                    && durable.reminders == 0
+            }
+            // Not a withdrawal, but the clause after the time keeps the timing ambiguous under
+            // the F28 content boundary: rejected as a candidate, never scheduled.
+            CorpusExpectation::Recognised => {
+                matches!(disposition, ReminderDisposition::CandidateRejected(_))
+                    && fixture.reminder_effects().is_none()
+                    && durable.reminders == 0
             }
             CorpusExpectation::Scheduled => {
-                assert_eq!(
-                    disposition,
-                    ReminderDisposition::Recorded(ReminderRequestState::Resolved),
-                    "{text}"
-                );
-                let (_, _, operations, _) = fixture
-                    .reminder_effects()
-                    .unwrap_or_else(|| panic!("no reminder recorded for: {text}"));
-                assert_eq!(operations, vec![OperationType::Schedule], "{text}");
-                assert_eq!(fixture.durable().reminders, 1, "{text}");
-                assert_eq!(
-                    fixture.reminder_row().resolved_instant.as_deref(),
-                    Some("2026-01-16T09:00:00Z"),
-                    "{text}"
-                );
+                disposition == ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+                    && fixture
+                        .reminder_effects()
+                        .is_some_and(|(_, _, operations, _)| {
+                            operations == vec![OperationType::Schedule]
+                        })
+                    && durable.reminders == 1
+                    && fixture.reminder_row().resolved_instant.as_deref()
+                        == Some("2026-01-16T09:00:00Z")
             }
+        };
+        if !matched {
+            mismatches.push(format!(
+                "{expectation:?} expected, got {disposition:?}: {text}"
+            ));
         }
     }
+    assert!(
+        mismatches.is_empty(),
+        "{} corpus lines did not match:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
     println!(
-        "withdrawal corpus: {withdrawals} withdrawals stayed unscheduled, {controls} controls scheduled"
+        "withdrawal corpus: {withdrawals} withdrawals stayed unscheduled, {scheduled} controls scheduled, {recognised} controls were recognised but held for correction"
     );
 }
 
