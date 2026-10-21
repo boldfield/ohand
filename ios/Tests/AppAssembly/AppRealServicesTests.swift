@@ -118,7 +118,7 @@ final class AppRealServicesTests: XCTestCase {
         }
     }
 
-    private struct UnreachableProviderSender: ProviderRequestSender {
+    private final class UnreachableProviderSender: ProviderRequestSender, @unchecked Sendable {
         func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
             throw URLError(.notConnectedToInternet)
         }
