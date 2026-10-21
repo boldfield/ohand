@@ -59,10 +59,12 @@ public struct ReminderControlReceipt: Equatable, Sendable {
 public final class ReminderControlService: @unchecked Sendable {
     private let core: ReminderControlCore
     private let session: ReadAuthenticationSession
+    private let changes: ItemChangePublishing?
 
-    init(core: ReminderControlCore, session: ReadAuthenticationSession) {
+    init(core: ReminderControlCore, session: ReadAuthenticationSession, changes: ItemChangePublishing? = nil) {
         self.core = core
         self.session = session
+        self.changes = changes
     }
 
     /// The item's revision and its reminder (`nil` when it has none), with the states the item status reports.
@@ -115,7 +117,9 @@ public final class ReminderControlService: @unchecked Sendable {
             (continuation: CheckedContinuation<Result<ReminderControlAnswer, CoreFailure>, Never>) in
             core.submit(command) { continuation.resume(returning: $0) }
         }
-        return try Self.receipt(from: Self.value(of: result))
+        let receipt = try Self.receipt(from: Self.value(of: result))
+        changes?.publish(.item(receipt.itemID))
+        return receipt
     }
 
     private static func value<Answer>(of result: Result<Answer, CoreFailure>) throws -> Answer {

@@ -48,10 +48,12 @@ public enum ItemCorrectionError: Error, Equatable, Sendable {
 public final class ItemCorrectionService: @unchecked Sendable {
     private let core: ItemCorrectionCore
     private let session: ReadAuthenticationSession
+    private let changes: ItemChangePublishing?
 
-    init(core: ItemCorrectionCore, session: ReadAuthenticationSession) {
+    init(core: ItemCorrectionCore, session: ReadAuthenticationSession, changes: ItemChangePublishing? = nil) {
         self.core = core
         self.session = session
+        self.changes = changes
     }
 
     public func correctText(
@@ -97,7 +99,9 @@ public final class ItemCorrectionService: @unchecked Sendable {
             default: throw ItemCorrectionError.core(failure)
             }
         }
-        return try Self.receipt(from: answer)
+        let receipt = try Self.receipt(from: answer)
+        changes?.publish(.item(receipt.itemID))
+        return receipt
     }
 
     private static func receipt(from answer: ItemCorrectionAnswer) throws -> ItemCorrectionReceipt {

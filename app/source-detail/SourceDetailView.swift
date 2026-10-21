@@ -50,6 +50,10 @@ struct SourceDetailView: View {
     /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
     @Environment(\.isInItemPane) private var isInItemPane
 
+    /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
+    /// never sets it, so it still says "Not here".
+    @State private var deletedHere = false
+
     private var sideMargin: CGFloat { isInItemPane ? 0 : DSSpacing.sideMargin(for: horizontalSizeClass) }
 
     var body: some View {
@@ -63,9 +67,12 @@ struct SourceDetailView: View {
                         history(content)
                         if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
                     } else if let failure = model.failure {
-                        emptyState(
-                            title: Self.title(for: failure), message: Self.text(for: failure),
-                            identifier: Self.identifier(for: failure))
+                        // Once the person has deleted this item, the deletion result below is the whole answer.
+                        if !deletedHere {
+                            emptyState(
+                                title: Self.title(for: failure), message: Self.text(for: failure),
+                                identifier: Self.identifier(for: failure))
+                        }
                     } else {
                         ProgressView()
                             .tint(DSColor.accent.color)
@@ -75,7 +82,8 @@ struct SourceDetailView: View {
                             .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
                     }
                     if let deletion = model.deletion {
-                        ItemDeletionSection(model: deletion, onRecorded: { Task { await model.load() } })
+                        DeletionWatchingSection(
+                            model: deletion, deletedHere: $deletedHere, onRecorded: { Task { await model.load() } })
                     }
                 }
                 .padding(.bottom, DSSpacing.lg)
@@ -280,6 +288,21 @@ struct SourceDetailView: View {
                 }
             }
         }
+    }
+}
+
+/// The delete control, which also tells the screen when the person has deleted an item that was live when it opened.
+private struct DeletionWatchingSection: View {
+    @ObservedObject var model: ItemDeletionModel
+    @Binding var deletedHere: Bool
+    var onRecorded: () -> Void
+    /// Latched once the item was offered for deletion, i.e. it was live when the control read it.
+    @State private var wasLive = false
+
+    var body: some View {
+        ItemDeletionSection(model: model, onRecorded: onRecorded)
+            .onReceive(model.$revision) { if $0 != nil { wasLive = true } }
+            .onReceive(model.$isRecorded) { if $0, wasLive { deletedHere = true } }
     }
 }
 

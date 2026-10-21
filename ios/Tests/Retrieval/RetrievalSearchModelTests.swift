@@ -28,6 +28,7 @@ final class RetrievalSearchModelTests: XCTestCase {
     private var selected: [RetrievalItemReference] = []
     private var searcher = FakeRetrievalSearcher()
     private var model: RetrievalSearchModel!
+    private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
     override func setUp() {
         super.setUp()
@@ -37,7 +38,16 @@ final class RetrievalSearchModelTests: XCTestCase {
         model = RetrievalSearchModel(
             searcher: searcher,
             readScope: { [unowned self] in self.scope },
-            onSelect: { [unowned self] in self.selected.append($0) })
+            onSelect: { [unowned self] in self.selected.append($0) },
+            observeItemChanges: { [unowned self] handler in
+                self.changeHandlers.append(handler)
+                return {}
+            })
+        changeHandlers = []
+    }
+
+    private func publish(_ change: ItemChange) {
+        changeHandlers.forEach { $0(change) }
     }
 
     private func row(_ itemID: String, text: String = "synthetic words") -> RetrievalResultRow {
@@ -60,6 +70,97 @@ final class RetrievalSearchModelTests: XCTestCase {
     private func deliver(_ result: Result<RetrievalPage, RetrievalSearchFailure>, at index: Int = 0) {
         searcher.answer(at: index, result)
         settle()
+    }
+
+    // MARK: Item changes
+
+    private func showResults(_ rows: [RetrievalResultRow]) {
+        model.query = "roofer"
+        model.search()
+        deliver(.success(page(rows)), at: searcher.requests.count - 1)
+    }
+
+    func testReturningFromDetailAfterADeletionRunsTheSameQueryAgainWithoutTheDeletedItem() {
+        showResults([row(Self.firstID), row(Self.secondID)])
+        model.select(model.rows[0])
+        model.screenDidDisappear()
+        publish(.item(Self.firstID))
+        XCTAssertEqual(searcher.requests.count, 1, "waits for the person to come back")
+
+        model.revalidate()
+        XCTAssertEqual(searcher.requests.count, 2)
+        XCTAssertEqual(searcher.requests[1], searcher.requests[0])
+        XCTAssertFalse(model.rows.map(\.id).contains(Self.firstID), "never shown while the query runs")
+        deliver(.success(page([row(Self.secondID)])), at: 1)
+        XCTAssertEqual(model.rows.map(\.id), [Self.secondID])
+        XCTAssertEqual(model.phase, .results)
+    }
+
+    func testReturningFromDetailAfterACorrectionShowsTheCurrentText() {
+        showResults([row(Self.firstID, text: "old words")])
+        model.select(model.rows[0])
+        model.screenDidDisappear()
+        publish(.item(Self.firstID))
+        model.revalidate()
+        deliver(.success(page([row(Self.firstID, text: "new words")])), at: 1)
+        XCTAssertEqual(model.rows.map(\.text), ["new words"])
+    }
+
+    func testReturningWithNothingChangedKeepsTheResultsWithoutANewQuery() {
+        showResults([row(Self.firstID)])
+        model.select(model.rows[0])
+        model.screenDidDisappear()
+        model.revalidate()
+        XCTAssertEqual(searcher.requests.count, 1)
+        XCTAssertEqual(model.rows.map(\.id), [Self.firstID])
+    }
+
+    func testAnAnswerThatWasAskedBeforeTheChangeIsNotShown() {
+        model.query = "roofer"
+        model.search()
+        publish(.item(Self.firstID))
+        XCTAssertEqual(searcher.requests.count, 2)
+        deliver(.success(page([row(Self.firstID)])), at: 0)
+        XCTAssertTrue(model.rows.isEmpty, "the older answer is dropped")
+        deliver(.success(page([])), at: 1)
+        XCTAssertEqual(model.phase, .empty)
+    }
+
+    func testAChangeWithTheResultsOnScreenRunsTheQueryAtOnce() {
+        showResults([row(Self.firstID), row(Self.secondID)])
+        publish(.item(Self.secondID))
+        XCTAssertEqual(searcher.requests.count, 2)
+        XCTAssertEqual(model.phase, .searching)
+        XCTAssertFalse(model.rows.map(\.id).contains(Self.secondID))
+        deliver(.success(page([row(Self.firstID)])), at: 1)
+        XCTAssertEqual(model.rows.map(\.id), [Self.firstID])
+    }
+
+    func testThePaneKeepsItsItemOnlyWhileTheResultsStillHoldIt() {
+        model.presentsItemsInPane = true
+        showResults([row(Self.firstID), row(Self.secondID)])
+        model.select(model.rows[0])
+        XCTAssertEqual(model.selectedReference?.value, Self.firstID)
+        publish(.item(Self.secondID))
+        deliver(.success(page([row(Self.firstID)])), at: 1)
+        XCTAssertEqual(model.selectedReference?.value, Self.firstID)
+
+        publish(.item(Self.firstID))
+        deliver(.success(page([])), at: 2)
+        XCTAssertNil(model.selectedReference)
+    }
+
+    func testAllItemsEmptiesTheResultsAndAsksAgain() {
+        showResults([row(Self.firstID)])
+        publish(.allItems)
+        XCTAssertTrue(model.rows.isEmpty)
+        XCTAssertEqual(searcher.requests.count, 2)
+    }
+
+    func testAChangeBeforeAnySearchDoesNothing() {
+        publish(.item(Self.firstID))
+        publish(.allItems)
+        XCTAssertTrue(searcher.requests.isEmpty)
     }
 
     func testASearchWithNothingToLookForAsksInsteadOfListingEverything() {

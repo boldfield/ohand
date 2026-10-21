@@ -18,6 +18,7 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
     var holdsReads = false
     private var heldReads: [CheckedContinuation<Void, Never>] = []
     private var handlers: [@Sendable () -> Void] = []
+    private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
     func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
         readCursors.append(cursor)
@@ -45,6 +46,15 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
     func observeAccess(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
         handlers.append(handler)
         return {}
+    }
+
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void {
+        changeHandlers.append(handler)
+        return {}
+    }
+
+    func publish(_ change: ItemChange) {
+        changeHandlers.forEach { $0(change) }
     }
 
     /// Changes the session the way the real one does: the state first, then every observer.
@@ -386,6 +396,93 @@ final class HomeRecentsModelTests: XCTestCase {
         await settle()
         XCTAssertTrue(model.loadFailed)
         XCTAssertEqual(model.bodyState, .unlocked)
+    }
+
+    // MARK: Item changes
+
+    func testADeletedItemLeavesTheListAtOnceAndTheFirstPageIsReadAgain() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.pages[nil] = CoreRecentItemsPage(items: [item("b")], nextCursor: nil)
+        source.publish(.item("a"))
+        XCTAssertEqual(model.entries.map(\.id), ["b"], "gone before the read returns")
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 2)
+        XCTAssertEqual(model.entries.map(\.id), ["b"])
+    }
+
+    func testAChangedItemComesBackWithItsCurrentText() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "old words")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "new words")], nextCursor: nil)
+        source.publish(.item("a"))
+        await settle()
+        XCTAssertEqual(model.entries.map(\.text), ["new words"])
+    }
+
+    func testAChangeToAnItemTheListDoesNotShowReadsNothing() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.publish(.item("elsewhere"))
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 1)
+        XCTAssertEqual(model.entries.map(\.id), ["a"])
+    }
+
+    func testAChangeWhileLockedLoadsNothing() async {
+        let model = makeModel()
+        source.publish(.item("a"))
+        source.publish(.allItems)
+        await settle()
+        XCTAssertTrue(source.readCursors.isEmpty)
+        XCTAssertTrue(model.entries.isEmpty)
+        XCTAssertEqual(model.bodyState, .locked)
+    }
+
+    func testAllItemsClearsTheListAndReadsTheFirstPageAgain() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: "next")
+        let model = makeModel()
+        await settle()
+        source.pages[nil] = CoreRecentItemsPage(items: [], nextCursor: nil)
+        source.publish(.allItems)
+        XCTAssertTrue(model.entries.isEmpty)
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 2)
+        XCTAssertTrue(model.entries.isEmpty)
+        XCTAssertFalse(model.canLoadMore)
+    }
+
+    func testAChangeDuringTheFirstReadReadsAgainSoAnOutdatedPageDoesNotStay() async {
+        source.isAuthenticated = true
+        source.holdsReads = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        source.publish(.item("a"))
+        source.pages[nil] = CoreRecentItemsPage(items: [], nextCursor: nil)
+        source.holdsReads = false
+        source.releaseHeldReads()
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 2)
+        XCTAssertTrue(model.entries.isEmpty)
+    }
+
+    func testAChangeAfterShutdownDoesNothing() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
+        let model = makeModel()
+        await settle()
+        model.shutDown()
+        source.publish(.allItems)
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 1)
     }
 
     func testWordingDoesNotLeakIntoTheLockedCard() {

@@ -1,5 +1,6 @@
 import Foundation
 import OhAndCoreBridge
+import OhAndServices
 
 /// What the home needs from the read session and the recent-captures read. Every read goes through the private read
 /// gate, so a capture-only session is refused there as well; the model still never asks.
@@ -15,6 +16,13 @@ protocol HomeRecentsSource: AnyObject {
     /// Calls the handler after every scope change and every change of the quiet-attempt flag, on any thread. Returns the
     /// closure that removes the registration.
     func observeAccess(_ handler: @escaping @Sendable () -> Void) -> () -> Void
+    /// Calls the handler on the main thread after an item changed (see `ItemChange`). Returns the closure that removes
+    /// the registration.
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void
+}
+
+extension HomeRecentsSource {
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void { {} }
 }
 
 /// The three states of the home body. Only `unlocked` ever holds anything derived from stored history.
@@ -61,6 +69,11 @@ final class HomeRecentsModel: ObservableObject {
     /// Raised at every loss of access, so a page that arrives afterwards is dropped.
     private var generation = 0
     private var removeObserver: (() -> Void)?
+    private var removeChangeObserver: (() -> Void)?
+    /// How many items the last first-page read returned: the head of the list that a reload replaces.
+    private var headCount = 0
+    /// Set when an item changed while the first page was being read, so that read may predate the change.
+    private var reloadFirstPageWhenDone = false
 
     /// Waits before the given poll attempt; tests replace it so no real time passes.
     private let pause: (TimeInterval) async -> Void
@@ -88,12 +101,20 @@ final class HomeRecentsModel: ObservableObject {
                 DispatchQueue.main.async { self?.accessDidChange() }
             }
         }
+        removeChangeObserver = source.observeItemChanges { [weak self] change in
+            if Thread.isMainThread {
+                self?.itemsDidChange(change)
+            } else {
+                DispatchQueue.main.async { self?.itemsDidChange(change) }
+            }
+        }
         if bodyState == .unlocked { loadFirstPage() }
     }
 
     deinit {
         cancelReads()
         removeObserver?()
+        removeChangeObserver?()
     }
 
     /// Ends the model: no read starts afterwards, every read in flight is cancelled and the observer is removed. Called
@@ -102,6 +123,8 @@ final class HomeRecentsModel: ObservableObject {
         isShutDown = true
         removeObserver?()
         removeObserver = nil
+        removeChangeObserver?()
+        removeChangeObserver = nil
         dropHistory()
     }
 
@@ -147,6 +170,48 @@ final class HomeRecentsModel: ObservableObject {
         isLoadingFirstPage = false
         isLoadingMore = false
         loadFailed = false
+        headCount = 0
+        reloadFirstPageWhenDone = false
+    }
+
+    // MARK: Item changes
+
+    /// An item was deleted, corrected, completed, cancelled or had its reminder changed (or a reset removed them all).
+    /// A locked home holds nothing, so it loads nothing; the unlock reads the list afresh. An item the list does not show
+    /// needs nothing. A shown one is dropped at once, so a deleted item is gone before the read returns, and the first
+    /// page is read again so a changed one comes back current.
+    func itemsDidChange(_ change: ItemChange) {
+        guard !isShutDown, bodyState == .unlocked else { return }
+        switch change {
+        case .allItems:
+            resetList()
+        case .item(let itemID):
+            let wasSorting = justSaved.removeValue(forKey: itemID) != nil
+            guard let index = loadedItems.firstIndex(where: { $0.itemID == itemID }) else {
+                if wasSorting { reloadFirstPage() }
+                return
+            }
+            if index >= headCount {
+                // Past the head, a reload of the first page would not bring the item back.
+                resetList()
+                return
+            }
+            loadedItems.remove(at: index)
+            reloadFirstPage()
+        }
+    }
+
+    private func resetList() {
+        dropHistory()
+        loadFirstPage()
+    }
+
+    private func reloadFirstPage() {
+        if isLoadingFirstPage {
+            reloadFirstPageWhenDone = true
+        } else {
+            loadFirstPage()
+        }
     }
 
     // MARK: Entries
@@ -237,6 +302,10 @@ final class HomeRecentsModel: ObservableObject {
             handleFailure(error, startedIn: startedIn)
             if startedIn == generation { isLoadingFirstPage = false }
         }
+        if startedIn == generation, reloadFirstPageWhenDone {
+            reloadFirstPageWhenDone = false
+            loadFirstPage()
+        }
     }
 
     /// Asks for the next page when the card that just appeared is among the last few.
@@ -283,6 +352,7 @@ final class HomeRecentsModel: ObservableObject {
 
     /// Replaces the head of the list with a fresh first page, keeping the pages already scrolled to.
     private func merge(firstPage page: CoreRecentItemsPage) {
+        headCount = page.items.count
         if loadedItems.isEmpty {
             loadedItems = page.items
             nextCursor = page.nextCursor

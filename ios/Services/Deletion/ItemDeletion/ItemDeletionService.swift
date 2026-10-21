@@ -80,10 +80,12 @@ public final class ItemDeletionService: @unchecked Sendable {
     private let lock = NSLock()
     private var cleanupProvider: (@Sendable () -> ItemDeletionCleanup?)?
     private var intentObserver: (@Sendable (String) -> Void)?
+    private let changes: ItemChangePublishing?
 
-    init(core: ItemDeletionCore, session: ReadAuthenticationSession) {
+    init(core: ItemDeletionCore, session: ReadAuthenticationSession, changes: ItemChangePublishing? = nil) {
         self.core = core
         self.session = session
+        self.changes = changes
     }
 
     /// Sets where the cleanup service comes from. It is resolved at each call, because the lifecycle coordinator that
@@ -120,6 +122,7 @@ public final class ItemDeletionService: @unchecked Sendable {
         let observer = intentObserver
         lock.unlock()
         observer?(recorded.itemID)
+        changes?.publish(.item(recorded.itemID))
 
         var cleanupSettled = false
         if let cleanup {
