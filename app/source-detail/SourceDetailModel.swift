@@ -388,7 +388,13 @@ final class SourceDetailModel: ObservableObject {
         let model = SourceDetailModel(
             itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
         model.itemControls = ItemControlsModel.assembled(
-            itemID: itemID, root: root, onCorrected: { [weak model] in Task { await model?.load() } })
+            itemID: itemID, root: root, onCorrected: { [weak model] in
+                Task {
+                    await model?.load()
+                    // The type or lifecycle may have changed what the reminder section should say.
+                    await model?.reminderEditor?.load()
+                }
+            })
         model.reminderEditor = .assembled(itemID: itemID, root: root)
         model.deletion = .assembled(itemID: itemID, root: root)
         return model
