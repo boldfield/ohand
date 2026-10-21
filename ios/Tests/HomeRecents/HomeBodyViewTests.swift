@@ -22,11 +22,13 @@ final class HomeBodyViewTests: XCTestCase {
     private var model: HomeRecentsModel?
     private var rendered: [String: HomeRenderedElement] = [:]
     private var window: UIWindow?
+    private var openedItems: [String] = []
 
     override func setUp() {
         super.setUp()
         source = FakeHomeRecentsSource()
         rendered = [:]
+        openedItems = []
     }
 
     override func tearDown() {
@@ -58,7 +60,7 @@ final class HomeBodyViewTests: XCTestCase {
         let shownModel = HomeRecentsModel(
             source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
         model = shownModel
-        let root = HomeBodyView(model: shownModel, renderReporter: { [unowned self] in rendered = $0 })
+        let root = HomeBodyView(model: shownModel, openItem: { [unowned self] in openedItems.append($0) }, renderReporter: { [unowned self] in rendered = $0 })
             .environment(\.horizontalSizeClass, sizeClass)
         let shown = UIWindow(frame: CGRect(origin: .zero, size: size))
         shown.rootViewController = UIHostingController(rootView: root)
@@ -297,5 +299,60 @@ final class HomeBodyViewTests: XCTestCase {
         XCTAssertNotNil(rendered[HomeBodyView.lockedCardIdentifier], "the locked card replaces the list")
         XCTAssertNotNil(rendered[HomeBodyView.unlockButtonIdentifier]?.tap)
         XCTAssertEqual(source.readCursors.count, readsAtRelock, "no read after the relock")
+    }
+
+    // MARK: Opening an item
+
+    func testTappingACardOpensThatItemAndASortingCardOpensTheSameWay() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem, earlierItem], nextCursor: nil)
+        let shownModel = await show()
+
+        tap(HomeBodyView.cardIdentifierPrefix + "earlier-1")
+        XCTAssertEqual(openedItems, ["earlier-1"])
+
+        shownModel.captureDidSave(itemID: "new-1", interpretationIsResolved: false)
+        await settle()
+        XCTAssertEqual(rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"]?.text, HomeBodyView.sortingLabel)
+        tap(HomeBodyView.cardIdentifierPrefix + "new-1")
+        XCTAssertEqual(openedItems, ["earlier-1", "new-1"])
+    }
+
+    func testPlaceholderStateExposesNoTappableCard() async {
+        source.isQuietAttemptInFlight = true
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
+        await show()
+        XCTAssertNotNil(rendered[HomeBodyView.placeholderIdentifier])
+        XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier]?.tap)
+        for index in 0..<HomeBodyView.placeholderCount {
+            let identifier = HomeBodyView.placeholderCardIdentifierPrefix + String(index)
+            XCTAssertNotNil(rendered[identifier], "\(identifier) is drawn")
+            XCTAssertNil(rendered[identifier]?.tap, "\(identifier) is not tappable")
+        }
+        XCTAssertTrue(rendered.keys.filter { $0.hasPrefix(HomeBodyView.cardIdentifierPrefix) }.isEmpty)
+        XCTAssertTrue(openedItems.isEmpty)
+    }
+
+    func testLockedStateExposesNoTappableCard() async {
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
+        await show()
+        XCTAssertTrue(rendered.keys.filter { $0.hasPrefix(HomeBodyView.cardIdentifierPrefix) }.isEmpty)
+        for (identifier, element) in rendered where identifier != HomeBodyView.unlockButtonIdentifier {
+            XCTAssertNil(element.tap, "\(identifier) is not tappable")
+        }
+        XCTAssertTrue(openedItems.isEmpty)
+    }
+
+    func testACardDoesNotOpenAfterARelockClearedTheList() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
+        await show()
+        let staleOpen = rendered[HomeBodyView.cardIdentifierPrefix + "today-1"]?.tap
+        XCTAssertNotNil(staleOpen)
+
+        source.setAccess(authenticated: false)
+        await settle()
+        staleOpen?()
+        XCTAssertTrue(openedItems.isEmpty, "a relock wins over a stale card action")
     }
 }
