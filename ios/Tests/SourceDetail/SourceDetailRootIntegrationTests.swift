@@ -270,7 +270,9 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
             await model.itemControls?.applyType()
         }
 
-        XCTAssertTrue(pump(until: { model.reminderEditor?.isShown == true }), "the section follows the new type")
+        XCTAssertTrue(
+            pump(until: { model.reminderEditor?.isShown == true && model.reminderEditor?.isLoading == false }),
+            "the section follows the new type")
         XCTAssertEqual(model.reminderEditor?.canSave, true)
     }
 
