@@ -97,6 +97,7 @@ final class SettingsRootViewTests: XCTestCase {
         settle { rendered["audio-retention"] != nil }
         XCTAssertNil(rendered[SettingsRootView.eraseIdentifier])
 
+        window?.isHidden = true
         host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }))
         settle { rendered[SettingsRootView.eraseIdentifier] != nil }
         XCTAssertEqual(rendered[SettingsRootView.eraseIdentifier], "Erase everything")
