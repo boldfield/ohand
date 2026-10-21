@@ -168,7 +168,7 @@ struct ReminderHistoryList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.xs) {
-            Text("History")
+            Text("Reminder history")
                 .font(DSFont.body)
                 .foregroundColor(DSColor.ink.color)
                 .accessibilityAddTraits(.isHeader)

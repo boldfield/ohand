@@ -270,7 +270,7 @@ struct SourceDetailView: View {
     @ViewBuilder private func history(_ content: SourceDetailContent) -> some View {
         if !content.history.isEmpty {
             DSGroupedSection(
-                title: "History", footer: content.historyTruncated ? "Older changes are not shown." : nil
+                title: "Item history", footer: content.historyTruncated ? "Older changes are not shown." : nil
             ) {
                 ForEach(content.history) { row in
                     DSRow(

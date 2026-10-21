@@ -44,6 +44,8 @@ final class ReminderEditModel: ObservableObject {
     @Published private(set) var reminder: ReminderRecordAnswer?
     @Published private(set) var unavailable: ReminderEditUnavailable?
     @Published private(set) var isLoading = false
+    /// A read has said this item is an action, so the section has something true to show.
+    @Published private(set) var hasRead = false
     @Published private(set) var isWorking = false
     /// The item is completed or cancelled. The core refuses every edit to it, so none is offered.
     @Published private(set) var isClosed = false
@@ -90,7 +92,8 @@ final class ReminderEditModel: ObservableObject {
     var standing: ReminderStanding { .of(reminder, permission: permission, now: now()) }
     var canSave: Bool { unavailable == nil && !isClosed && !isLoading && !isWorking }
     var canCancel: Bool { canSave && standing.offersCancel }
-    var isShown: Bool { unavailable != .notAnAction }
+    /// Nothing is shown until the read says the item can carry a reminder; locked and unreadable answers are shown.
+    var isShown: Bool { unavailable.map { $0 != .notAnAction } ?? hasRead }
     /// The last edit's outcome, or the standing closed notice when the item can no longer carry a change.
     var shownMessage: ReminderEditMessage? { message ?? (isClosed ? .itemClosed : nil) }
 
@@ -132,6 +135,7 @@ final class ReminderEditModel: ObservableObject {
             return
         }
         unavailable = nil
+        hasRead = true
         itemRevision = answer.itemRevision
         isClosed = answer.lifecycleState != "active"
         reminder = answer.reminder
@@ -148,6 +152,7 @@ final class ReminderEditModel: ObservableObject {
     }
 
     @MainActor private func clear() {
+        hasRead = false
         reminder = nil
         message = nil
         permission = nil
