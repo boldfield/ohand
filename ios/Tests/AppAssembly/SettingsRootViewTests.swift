@@ -43,14 +43,17 @@ final class SettingsRootViewTests: XCTestCase {
         try? FileManager.default.removeItem(at: storageRoot)
     }
 
-    private func host() {
+    private func host(
+        resetSettings: ResetSettingsModel? = nil, opensResetOnAppear: Bool = false,
+        resetRenderReporter: (([String: RetentionRenderedElement]) -> Void)? = nil
+    ) {
         let current = services.managementContext
         let status = RetentionStatus(
             policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
             storagePressure: .normal, unresolved: [])
         let retention = RetentionSettingsModel(
             controls: FakeRetentionControls(status: status), readScope: { .authenticated },
-            exportSettings: current.retention.exportSettings)
+            exportSettings: current.retention.exportSettings, resetSettings: resetSettings)
         let providers = ProviderSettingsModel(
             controls: FakeProviderSettingsControls(listing: providerListing(versions: [], defaultVersion: nil)),
             credentials: FakeProviderSettingsCredentials(), sweep: FakeProviderSettingsSweep(),
@@ -63,7 +66,8 @@ final class SettingsRootViewTests: XCTestCase {
         let root = NavigationStack {
             SettingsRootView(
                 sections: ManagementCatalog.settingsSections, context: context,
-                renderReporter: { [unowned self] in rendered = $0 })
+                renderReporter: { [unowned self] in rendered = $0 },
+                opensResetOnAppear: opensResetOnAppear, resetRenderReporter: resetRenderReporter)
         }
         let shown = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         shown.rootViewController = UIHostingController(rootView: root)
@@ -90,6 +94,27 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(rendered["provider-settings"], "Processing: On this phone")
         XCTAssertEqual(rendered["audio-retention"], "Audio: 7 days")
         XCTAssertEqual(rendered[SettingsRootView.exportEntryID], "Export")
+    }
+
+    func testEraseCardIsShownOnlyWhenAResetModelIsPresent() {
+        host()
+        settle { rendered["audio-retention"] != nil }
+        XCTAssertNil(rendered[SettingsRootView.eraseIdentifier])
+
+        window?.isHidden = true
+        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }))
+        settle { rendered[SettingsRootView.eraseIdentifier] != nil }
+        XCTAssertEqual(rendered[SettingsRootView.eraseIdentifier], "Erase everything")
+    }
+
+    /// The card's tap sets the same presentation state the root opens on appear; the real tap is covered end to end by
+    /// the walkthrough UI test, which taps `management.settings.erase` and waits for the reset screen.
+    func testTheEraseCardDestinationIsTheResetScreenOverTheContextsModel() {
+        var resetRendered: [String: RetentionRenderedElement] = [:]
+        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }),
+             opensResetOnAppear: true, resetRenderReporter: { resetRendered = $0 })
+        settle { resetRendered[ResetSettingsView.explanationIdentifier] != nil }
+        XCTAssertEqual(resetRendered[ResetSettingsView.explanationIdentifier]?.text, DeletionText.resetExplanation)
     }
 
     func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
