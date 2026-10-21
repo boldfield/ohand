@@ -3360,6 +3360,13 @@ Acceptance:
 - The app's own Face ID prompt, shown while locked, never shows the cover. Do not change the walkthrough; it must pass unchanged on the exact head.
 - Tests add: resign-active while locked shows no cover; unlocking while inactive shows it; entering the background while unlocked shows it.
 
+**Once raised, the cover stays up until the scene is active (coordinator, 2026-10-21, after PR #327 round 1).** The amendment above gates *raising* the cover, not removing it. The relock runs on `didEnterBackgroundNotification`, after `sceneDidEnterBackground` and before the snapshot. If the cover follows the lock state, it comes down at exactly the moment it exists for. Rules:
+
+- Lock state decides only whether the cover is raised. Once raised, only `sceneDidBecomeActive` removes it. A relock, a scope change or any URL never removes it. Replace `testRelockingWhileCoveredRemovesTheCover` with a test that a relock while covered keeps the cover and become-active removes it.
+- Remove the early dismissal on URL contexts (`captureEntryArrived`). Every capture entry (URL, Control, shortcut or App Intent) makes the scene active, and becoming active removes the cover. Acceptance 2 is met by that path. Prove it with tests: a capture URL entry and a `CaptureEntryHandoff` announcement, each followed by become-active, end uncovered. An unrelated URL while covered leaves the cover up. Do not edit the intent or handoff code.
+- The cover reuses the shipped launch assets (`LaunchBackground` colour and `LaunchMark` image, the same pair as the launch screen) or `DSMark`. It does not redraw the mark with a system font or hard-coded colours. A test checks that the presenter uses those assets.
+- The acceptance 3 proxy: a hosted test raises the cover on the simulator and attaches its rendered window as an `XCTAttachment` (kept in `OhAndTests.xcresult`). The PR names the attachment and links the exact-head run.
+
 ### F37
 
 Record delivered notifications, unlock for a locked notification tap, and refresh home when processing lands
