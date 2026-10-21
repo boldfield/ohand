@@ -2261,6 +2261,8 @@ Source pointers (baseline above): `docs/architecture/m1-contracts.md:139`, `AGEN
 
 **Amended (coordinator, 2026-10-20, after PR #317 round 1).** U06b now also depends on F30. Revocation must not trust a pre-read: a capture committed between the pre-read and the revoke is retired without ever being shown (review thread r4326522427). After the revoke, the screen shows the jobs that F30's `jobs_retired_by_revocation` lists for that version, and offers requeue from that list. The list is durable, so it is the same after a relaunch, and it pages instead of refusing more than 100 jobs. The pre-read may stay as a preview before the person confirms, but the result shown afterwards comes from the durable list. Add a real-core regression that queues a capture in the existing `beforeRevokeProfile` seam and shows that job in the result. U06b's owned paths do not change.
 
+**Sent counts (coordinator, 2026-10-21, after PR #317 round 4).** Both reviewers found the same defect: `sentShown` and `sentUnshown` come from the preview, which is read before `revokeProfile`, and the runner keeps dispatching in between (since F35, as soon as a capture is saved). "Of the 20 shown, N had already been sent" reads as exact and "Up to N … had already been sent" as an upper bound, and both can be too low. F30's `RetiredJob` does not record whether a job had been dispatched, and U06b does not own core, so no authoritative count exists. Do not show a number of sent requests derived from the preview. Say plainly that requests already being sent when the change took effect may have reached the provider and that their results are discarded. Per-row states may still show what the preview saw, labelled as seen before the change. Add the real-core regression both reviewers asked for: in the `beforeRevokeProfile` seam, move a job the preview listed as queued to running, and assert that the result screen makes no exact or upper-bound claim about sent requests that the stored state contradicts. U06b's owned paths do not change.
+
 Contributes to original U06 criteria: 1, 2.
 
 ### L05a
@@ -3200,6 +3202,12 @@ Acceptance:
 - **Accepted limits.** Two cases are out of this guard's reach and are left to the model: context in other sentences that contains no temporal token (a place, a person), and unpunctuated asides. Reviewers may not block on either.
 - **Reviewers.** A blocking finding must be a capture that the rule, as written here, lets schedule. If a later round finds a class this rule does not cover, the coordinator splits F28 instead of extending it again.
 - Tests add both round-9 cases and the accepted-cost case.
+
+**Boundary and number words as written (coordinator, 2026-10-21, after PR #323 round 4).** Both findings are places where the code does not follow the rule above, not new classes, so F28 is not split.
+
+- **Sentence boundary.** `.` followed by whitespace ends a sentence, with two exceptions only: the dots of a meridiem (`a.m.`, `p.m.`) and any dot inside the quoted span itself. A dotted day, month or unit abbreviation outside the span ("call Jan. Actually…", "in from the sun. Make it…") ends the sentence. Remove the abbreviation exception in `ends_sentence` / `is_dotted_abbreviation` outside the span. If a dotted abbreviation in the span's own sentence but outside the span now splits a capture that used to resolve, that is the accepted cost.
+- **Number words.** "Any number word" is the complete cardinal set: zero to nineteen, the tens, hundred, thousand, million, billion and dozen. Add them to `NUMBERS` (it currently lacks zero).
+- **Tests.** Add proposal-application regressions for the three abbreviation captures in review thread r4341624478 and the "make it zero" capture in r4341132123, each held for correction. Keep the "call the roofer" control.
 
 ### F29
 
