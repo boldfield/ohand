@@ -1117,7 +1117,7 @@ public final class ServiceCompositionRoot {
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     /// Adapts the job runner for B04's completion service so its drain-idle observer does not displace the root's.
-    private let completionDrain: JobRunnerCompletionDrain
+    let completionDrain: JobRunnerCompletionDrain
     /// Built on first use on the main queue; `nil` when the platform supplies no background-execution grant.
     private var backgroundCompletion: BackgroundCompletionService?
     private let stateLock = NSLock()

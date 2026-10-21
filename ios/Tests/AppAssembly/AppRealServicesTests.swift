@@ -2,6 +2,7 @@ import SQLite3
 import XCTest
 import OhAndCoreBridge
 @testable import OhAndServices
+import UIKit
 import UserNotifications
 @testable import OhAnd
 
@@ -65,6 +66,62 @@ final class AppRealServicesTests: XCTestCase {
             isProtectedDataAvailable: { true })
         created.append(services)
         return services
+    }
+
+    /// The production assembly over a fresh store with only the platform adapters replaced: the background-time
+    /// grant, the notification center, the lifecycle notification center, the recognizer and the voice engine.
+    private func makeInjectedServices(
+        grant: BackgroundExecutionGrant?,
+        center: FakeNotificationCenter,
+        lifecycleCenter: NotificationCenter,
+        recognizer: OnDeviceRecognizing?
+    ) throws -> AppServices {
+        let lifecycle = LifecycleCoordinator()
+        let root = try ServiceCompositionRoot(
+            testing: CompositionConfiguration(
+                storageRootPath: storageRoot.path, captureRouteID: "route-personal", jobRetryDelaySeconds: 3600),
+            environment: CompositionEnvironment(
+                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+            adapters: .injectedForTests(
+                sender: UnreachableProviderSender(),
+                readSession: ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary()),
+                notificationCenter: center, reachability: FakeReachability(reachable: false),
+                backgroundGrant: grant, lifecycleNotifications: lifecycleCenter, recognizer: recognizer),
+            modules: [lifecycle])
+        var environment = VoiceRecordingEnvironment.live(protectRecordingFile: { _ in })
+        environment.isForeground = { true }
+        let manualPoller = poller
+        environment.schedulePoll = { interval, handler in manualPoller.schedule(interval: interval, handler: handler) }
+        let voice = VoiceCaptureServices(
+            root: root, engine: engine, permission: permission, environment: environment,
+            notificationCenter: NotificationCenter())
+        let services = AppServices(
+            root: root, lifecycle: lifecycle, handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
+            voice: voice, notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: lifecycleCenter, isProtectedDataAvailable: { true })
+        created.append(services)
+        return services
+    }
+
+    private final class LockedCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+        func increment() {
+            lock.lock()
+            value += 1
+            lock.unlock()
+        }
+    }
+
+    private struct UnreachableProviderSender: ProviderRequestSender {
+        func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+            throw URLError(.notConnectedToInternet)
+        }
     }
 
     private func wait(timeout: TimeInterval = 30, until condition: () -> Bool) {
@@ -140,19 +197,98 @@ final class AppRealServicesTests: XCTestCase {
         settleBackgroundWork(services)
     }
 
-    func testASavedRecordingStartsAJobDrainWithNoLifecycleEvent() throws {
-        let services = try makeServices()
+    func testASavedRecordingStartsTranscriptionWithNoLifecycleEvent() throws {
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "water the plants", confidence: nil))
+        let services = try makeInjectedServices(
+            grant: nil, center: FakeNotificationCenter(), lifecycleCenter: NotificationCenter(), recognizer: recognizer)
         XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0)
+        XCTAssertEqual(recognizer.callCount, 0)
 
         services.captureEntry.startRecording()
         wait { if case .recording = services.captureEntry.recorderState { return true } else { return false } }
         services.captureEntry.stopRecording()
         wait { services.captureEntry.acknowledgment?.savedItemID != nil }
         XCTAssertNotNil(services.captureEntry.acknowledgment?.savedItemID)
-        wait { services.root.jobRunner.startedDrainCount > 0 }
+        wait { recognizer.callCount > 0 }
 
+        XCTAssertGreaterThan(recognizer.callCount, 0, "the recognizer was asked to transcribe the saved audio")
         XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save started processing")
         settleBackgroundWork(services)
+    }
+
+    func testASaveOpensACompletionWindowArmsTheAlertAndActivationDisarmsIt() throws {
+        let grant = FakeBackgroundGrant()
+        let center = FakeNotificationCenter()
+        let lifecycleCenter = NotificationCenter()
+        let services = try makeInjectedServices(
+            grant: grant, center: center, lifecycleCenter: lifecycleCenter, recognizer: nil)
+        services.start(isActive: false)
+        let alertID = PendingProcessingAlert.identifier
+        func alertAdds() -> Int { center.addedRequests.filter { $0.identifier == alertID }.count }
+        func alertRemovals() -> Int { center.removedIdentifiers.filter { $0 == alertID }.count }
+
+        var saved = false
+        services.root.saveText(captureID: UUID().uuidString, text: "buy some milk", capturedAt: Date()) { outcome in
+            if case .saved = outcome { saved = true }
+        }
+        wait { saved }
+        XCTAssertTrue(saved)
+        wait { grant.beginCount == 1 && grant.endedTokenList.count == 1 && alertAdds() > 0 }
+
+        XCTAssertEqual(grant.beginCount, 1, "the save took background time once")
+        XCTAssertEqual(grant.endedTokenList.count, 1, "and gave it back once")
+        XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the window drained the queue")
+        XCTAssertGreaterThan(alertAdds(), 0, "the capture still waits on the network, so the alert is armed")
+
+        let removalsBeforeActivation = alertRemovals()
+        lifecycleCenter.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        wait { alertRemovals() > removalsBeforeActivation }
+        XCTAssertGreaterThan(alertRemovals(), removalsBeforeActivation, "activation disarms the alert")
+        settleBackgroundWork(services)
+    }
+
+    func testBothDrainIdleObserversRunAfterADrainThroughTheProductionRoot() throws {
+        let center = FakeNotificationCenter()
+        let services = try makeInjectedServices(
+            grant: nil, center: center, lifecycleCenter: NotificationCenter(), recognizer: nil)
+        let completionObserverRuns = LockedCounter()
+        services.root.completionDrain.setDrainIdleObserver { completionObserverRuns.increment() }
+
+        var saved = false
+        services.root.saveText(
+            captureID: UUID().uuidString, text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
+        ) { outcome in
+            if case .saved = outcome { saved = true }
+        }
+        wait { saved }
+        func reminderScheduled() -> Bool {
+            center.addedRequests.contains { $0.identifier != PendingProcessingAlert.identifier }
+        }
+        wait { completionObserverRuns.count > 0 && reminderScheduled() }
+
+        XCTAssertGreaterThan(completionObserverRuns.count, 0, "the completion observer ran after the drain")
+        XCTAssertTrue(reminderScheduled(), "the reminder pass ran after the same drain")
+        settleBackgroundWork(services)
+    }
+
+    func testASaveThatFailsRequestsNoDrainAndTakesNoBackgroundTime() throws {
+        let grant = FakeBackgroundGrant()
+        let services = try makeInjectedServices(
+            grant: grant, center: FakeNotificationCenter(), lifecycleCenter: NotificationCenter(), recognizer: nil)
+        let handoff = CompositionRecordingHandoff(
+            captureID: UUID().uuidString, inProgressFileName: "missing-in-progress.wav",
+            finalizedFileName: "missing-finalized.wav", startedAt: Date())
+
+        var outcome: CompositionRecordingOutcome?
+        services.root.saveRecording(handoff) { outcome = $0 }
+        wait { outcome != nil }
+        let quiet = Date().addingTimeInterval(0.5)
+        wait(timeout: 2) { Date() >= quiet }
+
+        let result = try XCTUnwrap(outcome)
+        if case .saved = result { XCTFail("a recording with no audio must not be saved: \(result)") }
+        XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0, "a failed save requests no drain")
+        XCTAssertEqual(grant.beginCount, 0, "and takes no background time")
     }
 
     /// Lets the drain and the reminder and completion passes it triggers finish, so teardown closes an idle core.
