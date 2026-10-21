@@ -3,6 +3,23 @@ import OhAndCoreBridge
 @testable import OhAndServices
 @testable import OhAnd
 
+private final class TimeChangePassLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(step: LifecycleStep, triggers: Set<LifecycleTrigger>)] = []
+
+    var entries: [(step: LifecycleStep, triggers: Set<LifecycleTrigger>)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(step: LifecycleStep, triggers: Set<LifecycleTrigger>) {
+        lock.lock()
+        recorded.append((step, triggers))
+        lock.unlock()
+    }
+}
+
 final class AppServicesTests: XCTestCase {
     private var storageRoot: URL!
     private var baselineHandles = 0
@@ -126,14 +143,28 @@ final class AppServicesTests: XCTestCase {
         let time = ManualTime(wall: Date(), zone: TimeZone(identifier: "America/New_York")!)
         let services = try makeServices(notificationCenter: callbacks, timeSources: time.sources)
         services.start(isActive: false)
+        // This test checks the wiring from the callback to one `.systemTimeChange` pass. Starting connects the real
+        // effectful steps (reset resume, the notification adapter, prompt eligibility), so recording actions replace them
+        // afterwards and the pass does not depend on runner speed. `TimeChangeRealCoreTests` and
+        // `LifecycleCoordinatorTests` cover the real steps.
+        let passLog = TimeChangePassLog()
+        for step in [LifecycleStep.reset, .reminders, .promptEligibility] {
+            services.lifecycle.setAction({ triggers in
+                passLog.record(step: step, triggers: triggers)
+                return .completed
+            }, for: step)
+        }
         XCTAssertEqual(services.lifecycle.finishedPassCount, 0, "starting inactive runs no pass")
 
         // A callback that finds nothing changed requests nothing.
+        let evaluationsBefore = services.timeChange.evaluationsPerformed
         callbacks.post(name: .NSSystemTimeZoneDidChange, object: nil)
         let heldNoChange = await timeChangeWaitUntil { time.sleeperCount == 1 }
         XCTAssertTrue(heldNoChange)
         time.releaseTimers()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        let compared = await timeChangeWaitUntil { services.timeChange.evaluationsPerformed > evaluationsBefore }
+        XCTAssertTrue(compared, "the settled reading was compared before the absence of a pass is asserted")
+        XCTAssertEqual(services.timeChange.reportedChangeCount, 0)
         XCTAssertEqual(services.lifecycle.finishedPassCount, 0, "no change, no pass")
 
         // The person lands in another zone and the system repeats the callback.
@@ -146,6 +177,10 @@ final class AppServicesTests: XCTestCase {
         XCTAssertTrue(reconciled)
         XCTAssertEqual(services.lifecycle.lastReport?.triggers, [.systemTimeChange])
         XCTAssertEqual(services.timeChange.reportedChangeCount, 1)
+        XCTAssertEqual(
+            passLog.entries.map(\.step.rawValue).sorted(), ["promptEligibility", "reminders", "reset"],
+            "each recorded step ran once; the reminders step waits on the reset resume, so it runs too")
+        XCTAssertTrue(passLog.entries.allSatisfy { $0.triggers == [.systemTimeChange] })
     }
 
     // MARK: entries
