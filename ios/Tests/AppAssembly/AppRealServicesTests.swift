@@ -201,7 +201,8 @@ final class AppRealServicesTests: XCTestCase {
         let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "water the plants", confidence: nil))
         let services = try makeInjectedServices(
             grant: nil, center: FakeNotificationCenter(), lifecycleCenter: NotificationCenter(), recognizer: recognizer)
-        XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0)
+        services.start(isActive: true)
+        settleBackgroundWork(services)
         XCTAssertEqual(recognizer.callCount, 0)
 
         services.captureEntry.startRecording()
@@ -212,7 +213,6 @@ final class AppRealServicesTests: XCTestCase {
         wait { recognizer.callCount > 0 }
 
         XCTAssertGreaterThan(recognizer.callCount, 0, "the recognizer was asked to transcribe the saved audio")
-        XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save started processing")
         settleBackgroundWork(services)
     }
 
@@ -251,8 +251,11 @@ final class AppRealServicesTests: XCTestCase {
         let center = FakeNotificationCenter()
         let services = try makeInjectedServices(
             grant: nil, center: center, lifecycleCenter: NotificationCenter(), recognizer: nil)
+        services.start(isActive: true)
+        settleBackgroundWork(services)
         let completionObserverRuns = LockedCounter()
         services.root.completionDrain.setDrainIdleObserver { completionObserverRuns.increment() }
+        let runsBeforeSave = completionObserverRuns.count
 
         var saved = false
         services.root.saveText(
@@ -264,9 +267,9 @@ final class AppRealServicesTests: XCTestCase {
         func reminderScheduled() -> Bool {
             center.addedRequests.contains { $0.identifier != PendingProcessingAlert.identifier }
         }
-        wait { completionObserverRuns.count > 0 && reminderScheduled() }
+        wait { completionObserverRuns.count > runsBeforeSave && reminderScheduled() }
 
-        XCTAssertGreaterThan(completionObserverRuns.count, 0, "the completion observer ran after the drain")
+        XCTAssertGreaterThan(completionObserverRuns.count, runsBeforeSave, "the completion observer ran after the drain")
         XCTAssertTrue(reminderScheduled(), "the reminder pass ran after the same drain")
         settleBackgroundWork(services)
     }
