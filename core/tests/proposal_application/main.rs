@@ -1796,6 +1796,59 @@ fn a_temporal_token_in_another_sentence_is_held_for_correction() {
     assert_eq!(fixture.durable().reminders, 0, "{text}");
 }
 
+/// A dotted abbreviation outside the span ends its sentence like any other word: "Jan" and "sun"
+/// are also a name and an ordinary word, and the sentence after them is checked. Every number
+/// word counts, "zero" included.
+#[test]
+fn a_correction_after_a_dotted_abbreviation_or_a_number_word_is_held_for_correction() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m. to call Jan. Actually make it Saturday at 4 p.m.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to bring the cushions in from the sun. Make it Saturday instead.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m. to call Jan. That's Tokyo time.",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, make it zero.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+    ] {
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let item_span = if text.contains("cushions") {
+            "bring the cushions in from the sun"
+        } else if text.contains("Jan") {
+            "call Jan"
+        } else {
+            "call the roofer"
+        };
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, item_span);
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // The control: a name with a dot that is followed by a sentence with no temporal token
+    // still schedules.
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me Friday at 3 p.m. to call Jan. Thanks",
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Jan",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-10-09T15:00:00-04:00");
+}
+
 /// Context in another sentence that holds no temporal token (a filler, a person, a place) is
 /// outside the guard's reach and still schedules.
 #[test]

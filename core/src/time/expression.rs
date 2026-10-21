@@ -44,9 +44,12 @@
 // with no temporal token (a place, a person) and an aside with no punctuation inside task
 // content are out of this guard's reach.
 //
-// Sentence ends: a line break, or a word ending in `!`, `?` or a single `.`. The dot of "a.m."
-// or "p.m." and of a day, month or unit abbreviation ("Tues.", "Sept.", "hrs.") is not a sentence
-// end, and an ellipsis ("..." or "…") is a clause mark, never a sentence end.
+// Sentence ends: a line break, or a word ending in `!`, `?` or a single `.`. The only dots that
+// do not end a sentence are a meridiem's own ("a.m.", "p.m.") and any dot inside the span
+// itself, which is never tokenized. A dotted abbreviation outside the span ("call Jan. Actually
+// …", "in from the sun. Make it …") ends its sentence like any other word, as many
+// abbreviations are also names or ordinary words that would otherwise hide the sentence after
+// them. An ellipsis ("..." or "…") is a clause mark, never a sentence end.
 
 /// Characters that may close a word after its sentence-ending punctuation, or close a quote or
 /// bracket wrapped around the span.
@@ -97,8 +100,7 @@ const DAY_NAMES: &[&str] = &[
     "yesterday",
 ];
 
-/// Spoken and typed abbreviations of a day; written with a trailing dot they do not end a
-/// sentence.
+/// Spoken and typed abbreviations of a day.
 const DAY_ABBREVIATIONS: &[&str] = &[
     "mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs", "fri", "sat", "sun", "tmrw",
     "tmr", "tmw", "tmro", "tomo", "tdy", "tonite", "wknd",
@@ -145,7 +147,7 @@ const TIMES_OF_DAY: &[&str] = &[
     "oclock",
 ];
 
-/// Units of time, including the abbreviations that do not end a sentence when dotted.
+/// Units of time, including their abbreviations.
 const UNITS: &[&str] = &[
     "minute",
     "min",
@@ -168,7 +170,10 @@ const UNITS: &[&str] = &[
     "decade",
 ];
 
+/// Number words: the complete cardinal set (zero to nineteen, the tens, hundred, thousand,
+/// million, billion and dozen) and the vague quantities that count time ("half", "a few").
 const NUMBERS: &[&str] = &[
+    "zero",
     "one",
     "two",
     "three",
@@ -197,6 +202,10 @@ const NUMBERS: &[&str] = &[
     "eighty",
     "ninety",
     "hundred",
+    "thousand",
+    "million",
+    "billion",
+    "dozen",
     "half",
     "quarter",
     "couple",
@@ -520,7 +529,7 @@ struct Word {
 }
 
 /// The words of `text` in order. A line break ends a sentence, as does a word ending in `!`, `?`
-/// or a single `.` that is not a meridiem's or an abbreviation's dot.
+/// or a single `.` that is not a meridiem's dot.
 fn words(text: &str) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut lines = text.split('\n').peekable();
@@ -604,7 +613,9 @@ fn is_hedge(word: &str) -> bool {
     )
 }
 
-/// Whether a raw whitespace-delimited token ends its sentence.
+/// Whether a raw whitespace-delimited token ends its sentence: it ends in `!`, `?` or a single
+/// `.` that is not a meridiem's own. A dotted abbreviation ("Jan.", "Tues.", "hrs.") ends the
+/// sentence like any other word: outside the span, the rule makes no exception for it.
 fn ends_sentence(raw: &str) -> bool {
     let trimmed = raw.trim_end_matches(|c: char| CLOSERS.contains(c));
     if trimmed.ends_with(['!', '?']) {
@@ -616,19 +627,7 @@ fn ends_sentence(raw: &str) -> bool {
     if !trimmed.ends_with('.') {
         return false;
     }
-    let word = normalized_word(raw);
-    !(DOTTED_MERIDIEMS.contains(&word.as_str()) || is_dotted_abbreviation(&word))
-}
-
-/// Day, month and unit abbreviations that are written with a trailing dot ("Tues.", "Sept.",
-/// "hrs.").
-fn is_dotted_abbreviation(word: &str) -> bool {
-    let singular = word.strip_suffix('s').unwrap_or(word);
-    [word, singular].iter().any(|form| {
-        DAY_ABBREVIATIONS.contains(form)
-            || MONTH_ABBREVIATIONS.contains(form)
-            || matches!(*form, "min" | "hr" | "sec" | "wk" | "mo" | "yr" | "approx")
-    })
+    !DOTTED_MERIDIEMS.contains(&normalized_word(raw).as_str())
 }
 
 /// The words of earlier sentences and the words of the sentence holding the span.
@@ -993,6 +992,10 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. to call the roofer. He is in Tokyo",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call Jan. Thanks",
                 "Friday at 3 p.m.",
             ),
             (
@@ -1418,8 +1421,8 @@ mod tests {
             ("Remind me at 9 a.m. tomorrow", "tomorrow"),
             ("Remind me in 3 hours at 5 p.m.", "at 5 p.m."),
             ("Remind me to call Sam at noon", "at noon"),
-            // ... or anywhere else in the capture: earlier sentences, pauses and abbreviations
-            // included, or the task text after it.
+            // ... or anywhere else in the capture: earlier sentences, pauses and dotted
+            // abbreviations included, or the task text after it.
             (
                 "Friday, remind me at 3 p.m. to call the roofer",
                 "at 3 p.m.",
@@ -1490,6 +1493,49 @@ mod tests {
             (
                 "Remind me at 5 p.m. to call Sam. Tomorrow is busy",
                 "at 5 p.m.",
+            ),
+            // A dotted abbreviation outside the span ends its sentence like any other word, so
+            // the sentence after it is checked: "Jan" and "sun" are also a name and a word.
+            (
+                "Remind me Friday at 3 p.m. to call Jan. Actually make it Saturday at 4 p.m.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to bring the cushions in from the sun. Make it Saturday instead.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me tomorrow at 9 a.m. to call Jan. That's Tokyo time.",
+                "tomorrow at 9 a.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call Jan. Make it 4.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to wait a min. Actually, make it Saturday.",
+                "Friday at 3 p.m.",
+            ),
+            // Any number word in another sentence: the complete cardinal set.
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Actually, make it zero.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Make it a dozen.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. A thousand thanks.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. It's a million to one.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Billions, he said.",
+                "Friday at 3 p.m.",
             ),
             (
                 "Remind me at 5 p.m. to call Sam\nTomorrow: dentist",
