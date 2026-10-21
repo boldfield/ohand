@@ -923,7 +923,9 @@ fn candidate_agreement(
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|instant| instant.with_timezone(&Utc));
     if claimed != Some(resolved) {
-        return Agreement::Contradicts("the proposed instant is not what the source phrase resolves to");
+        return Agreement::Contradicts(
+            "the proposed instant is not what the source phrase resolves to",
+        );
     }
     if candidate.timezone_id.as_deref() != Some(time_context.timezone.as_str()) {
         return Agreement::Contradicts("the proposed timezone differs from the capture's timezone");

@@ -76,10 +76,10 @@ const CONNECTORS: &[&str] = &["or", "and", "then", "nor", "but"];
 /// "west", "sat") are left out; an offset ("UTC+9", "-05:00") and an IANA name
 /// ("America/New_York") are caught by their digits, `+` or `/`.
 const ZONE_WORDS: &[&str] = &[
-    "time", "timezone", "tz", "utc", "gmt", "zulu", "est", "edt", "et", "cst", "cdt", "ct",
-    "mst", "mdt", "mt", "pst", "pdt", "pt", "akst", "akdt", "akt", "hst", "hdt", "ast", "adt",
-    "nst", "ndt", "bst", "ist", "cet", "cest", "wet", "eet", "eest", "msk", "jst", "kst", "hkt",
-    "sgt", "aest", "aedt", "acst", "acdt", "awst", "nzst", "nzdt", "sast", "pacific", "eastern",
+    "time", "timezone", "tz", "utc", "gmt", "zulu", "est", "edt", "et", "cst", "cdt", "ct", "mst",
+    "mdt", "mt", "pst", "pdt", "pt", "akst", "akdt", "akt", "hst", "hdt", "ast", "adt", "nst",
+    "ndt", "bst", "ist", "cet", "cest", "wet", "eet", "eest", "msk", "jst", "kst", "hkt", "sgt",
+    "aest", "aedt", "acst", "acdt", "awst", "nzst", "nzdt", "sast", "pacific", "eastern",
     "central", "mountain", "atlantic",
 ];
 
@@ -323,7 +323,8 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
     // The sentence before the span: a request prefix, or task content.
     let request_prefix = prefix.iter().all(is_request_prefix_token);
     if names_day(&span_text) {
-        if prefix.iter().any(|word| is_temporal_token(&word.text)) || made_inexact_by_modifier(prefix)
+        if prefix.iter().any(|word| is_temporal_token(&word.text))
+            || made_inexact_by_modifier(prefix)
         {
             return false;
         }
@@ -345,7 +346,9 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         .collect();
     if !request_prefix {
         // Task first: only the sentence end or a filler may follow the time.
-        return content.iter().all(|word| FILLERS.contains(&word.text.as_str()));
+        return content
+            .iter()
+            .all(|word| FILLERS.contains(&word.text.as_str()));
     }
     let separators = content
         .iter()
@@ -356,9 +359,10 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         if continues_time(task) {
             return false;
         }
-    } else if task.first().is_some_and(|word| {
-        is_temporal_token(&word.text) || is_relative_time_word(&word.text)
-    }) {
+    } else if task
+        .first()
+        .is_some_and(|word| is_temporal_token(&word.text) || is_relative_time_word(&word.text))
+    {
         return false;
     }
     names_day(&span_text) || !task.iter().any(|word| is_temporal_token(&word.text))
@@ -367,8 +371,9 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
 /// Whether task content that sits directly against the clock continues the time instead: the
 /// run of words up to the first `to` or filler opens with a time or relative word ("tomorrow",
 /// "in Tokyo"), holds a time, number or zone word ("Tokyo time", "my time", "EST", "call me
-/// next time"), or opens with a connector that leads to one anywhere in the content ("or
-/// Saturday", "or at lunch", "but Saturday works too").
+/// next time") or a clock qualifier ("sharp", "ish", "or so", "maybe"), or opens with a
+/// connector that leads to a time anywhere in the content ("or Saturday", "or at lunch", "but
+/// Saturday works too").
 fn continues_time(task: &[&Word]) -> bool {
     let run = task
         .iter()
@@ -377,6 +382,8 @@ fn continues_time(task: &[&Word]) -> bool {
     for (index, word) in run.enumerate() {
         let text = word.text.as_str();
         if is_temporal_token(text)
+            || is_clock_qualifier(text)
+            || after_connector && text == "so"
             || is_relative_time_word(text)
                 && (index == 0 || after_connector || !is_plain_preposition(text))
         {
@@ -390,6 +397,28 @@ fn continues_time(task: &[&Word]) -> bool {
             is_temporal_token(&word.text)
                 || is_relative_time_word(&word.text) && !is_plain_preposition(&word.text)
         })
+}
+
+/// Words that qualify the clock they follow ("9 a.m. sharp", "9 a.m. ish", "9 a.m. roughly",
+/// "9 a.m. maybe"): part of the time expression, so a span that stops before them is narrower
+/// than it. "about" and "like" are not here, as they open ordinary task content ("9 a.m. about
+/// the dentist").
+fn is_clock_qualifier(word: &str) -> bool {
+    matches!(
+        word,
+        "ish"
+            | "sharp"
+            | "thereabouts"
+            | "approximately"
+            | "approx"
+            | "roughly"
+            | "exactly"
+            | "precisely"
+            | "maybe"
+            | "perhaps"
+            | "possibly"
+            | "probably"
+    )
 }
 
 /// The text before the span without an opening quote or bracket wrapped around the span, and
@@ -1081,6 +1110,21 @@ mod tests {
                 "tomorrow at 5 p.m.",
             ),
             ("Remind me Friday at 3 p.m... I mean it", "Friday at 3 p.m."),
+            // A qualifier of the clock is part of the expression.
+            (
+                "Remind me tomorrow at 9 a.m. or so to call Sam",
+                "tomorrow at 9 a.m.",
+            ),
+            ("Remind me tomorrow at 9 a.m. ish", "tomorrow at 9 a.m."),
+            (
+                "Remind me tomorrow at 9 a.m. sharp to call Sam",
+                "tomorrow at 9 a.m.",
+            ),
+            ("Remind me Friday at 3 p.m. maybe", "Friday at 3 p.m."),
+            (
+                "Remind me Friday at 3 p.m., roughly, to call Sam",
+                "Friday at 3 p.m.",
+            ),
             // `to` followed by a time word is a range or a shift, not the task.
             (
                 "Remind me Friday at 3 p.m. to 4 p.m. to call Sam",

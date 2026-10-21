@@ -21,12 +21,12 @@ use ohand_core::privacy::routing::{DenialReason, JOB_TYPE_INTERPRET};
 use ohand_core::providers::contracts::{FailureKind, ProviderFailure};
 use ohand_core::reminders::state::{get_reminder, list_operations, OperationType};
 use ohand_core::retrieval::index::search_source_direct;
-use ohand_core::time::span_covers_time_expression;
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType, ItemScope, ItemType,
 };
 use ohand_core::store::schema::{Clock, Database};
 use ohand_core::suggestions::eligibility::{check_eligibility_with_scope, EligibilityReason};
+use ohand_core::time::span_covers_time_expression;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1079,7 +1079,11 @@ fn assert_scheduled_at(fixture: &Fixture, disposition: ReminderDisposition, inst
     assert_eq!(reminder.request_state, "resolved", "{text}");
     let stored = DateTime::parse_from_rfc3339(reminder.resolved_instant.as_deref().unwrap())
         .expect("stored instant is RFC 3339");
-    assert_eq!(stored, DateTime::parse_from_rfc3339(instant).unwrap(), "{text}");
+    assert_eq!(
+        stored,
+        DateTime::parse_from_rfc3339(instant).unwrap(),
+        "{text}"
+    );
 }
 
 fn assert_rejected_and_unscheduled_for(
@@ -1696,7 +1700,10 @@ fn a_clause_mark_in_the_content_before_the_time_is_held_for_correction() {
         "Remind me to call the roofer: Friday at 3 p.m.",
     ] {
         let span = span_of(text, "Friday at 3 p.m.");
-        assert!(!span_covers_time_expression(text, span.start, span.end), "{text}");
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
         let (fixture, disposition) = apply_clock_proposal(
             text,
             "Friday at 3 p.m.",
@@ -1775,7 +1782,10 @@ fn a_temporal_token_in_another_sentence_is_held_for_correction() {
     // outside F28. The guard holds it on its own, so it stays covered if that check changes.
     let text = "Remind me to call the roofer tomorrow at 9 a.m. No wait, 10 a.m.";
     let span = span_of(text, "tomorrow at 9 a.m.");
-    assert!(!span_covers_time_expression(text, span.start, span.end), "{text}");
+    assert!(
+        !span_covers_time_expression(text, span.start, span.end),
+        "{text}"
+    );
     let (fixture, disposition) = apply_clock_proposal(
         text,
         "tomorrow at 9 a.m.",
