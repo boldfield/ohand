@@ -303,9 +303,15 @@ final class PrivacySettingsViewTests: XCTestCase {
             rendered[PrivacySettingsView.retiredVersionIdentifier("hosted-v1")],
             "hosted · OpenAI · synthetic-model · 1 retired job")
         let row = try XCTUnwrap(rendered[PrivacySettingsView.retiredJobIdentifier("job-1")])
-        XCTAssertEqual(row, "Job job-1 · retired by the revocation; it was listed queued just before.")
+        XCTAssertEqual(
+            row,
+            "Job job-1 · retired by the revocation; it was listed queued just before the revocation and may have been "
+                + "sent after that; a reply is not applied.")
         let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
         XCTAssertTrue(result.contains("The revocation retired 1 job"), result)
+        XCTAssertFalse(result.contains("had already been sent"), "the shown result counts no sent requests: \(result)")
+        XCTAssertFalse(result.contains("Up to"), result)
+        XCTAssertTrue(result.hasSuffix(PrivacySettingsText.lateReplyDiscarded), result)
         XCTAssertNil(rendered[PrivacySettingsView.retiredShowMoreIdentifier("hosted-v1")], "every retired job is shown")
         XCTAssertNil(rendered[PrivacySettingsView.queuedJobIdentifier("job-1")], "the retired job is no longer queued")
         XCTAssertNil(rendered[PrivacySettingsView.revokeProfileIdentifier("hosted-v1")], "a revoked version is not offered again")
@@ -320,7 +326,8 @@ final class PrivacySettingsViewTests: XCTestCase {
         settle()
         XCTAssertEqual(
             rendered[PrivacySettingsView.retiredJobIdentifier("job-1")],
-            "Job job-1 · retired by the revocation; it was listed queued just before. Moved to job job-new.")
+            "Job job-1 · retired by the revocation; it was listed queued just before the revocation and may have been "
+                + "sent after that; a reply is not applied. Moved to job job-new.")
         XCTAssertNil(rendered[offer], "a job the core has seen moved is not offered again")
         XCTAssertEqual(
             rendered[PrivacySettingsView.requeueRecordUnreadableIdentifier], PrivacySettingsText.requeueRecordUnreadableNotice)

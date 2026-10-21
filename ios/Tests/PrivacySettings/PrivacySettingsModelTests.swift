@@ -508,9 +508,8 @@ final class PrivacySettingsModelTests: XCTestCase {
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
         XCTAssertTrue(message.contains("The revocation retired 2 jobs"), message)
-        XCTAssertTrue(
-            message.contains("1 of them had already been sent; a reply that arrives after the revocation is not applied"),
-            message)
+        XCTAssertFalse(message.contains("had already been sent"), "the result counts no sent requests: \(message)")
+        XCTAssertTrue(message.hasSuffix(PrivacySettingsText.lateReplyDiscarded), message)
         XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1", "job-2"])
         XCTAssertEqual(model.retiredWork.first?.jobs.map(\.preview), [.queued, .running])
 
@@ -891,55 +890,44 @@ final class PrivacySettingsModelTests: XCTestCase {
         return message
     }
 
-    func testTheSentCountIsExactForTheJobsShownAndAnUpperBoundForTheRest() async throws {
+    /// The preview is read before the revocation, and the runner keeps dispatching in between, so no count of sent
+    /// requests taken from it can be trusted as exact or as an upper bound.
+    private func assertCountsNoSentRequests(_ message: String) {
+        XCTAssertFalse(message.contains("had already been sent"), "no exact count of sent requests: \(message)")
+        XCTAssertFalse(message.contains("Up to"), "no upper bound on sent requests: \(message)")
+        XCTAssertFalse(message.contains("None of"), "no claim that none was sent: \(message)")
+        XCTAssertFalse(message.contains("not sent"), message)
+        XCTAssertTrue(message.hasSuffix(PrivacySettingsText.lateReplyDiscarded), message)
+    }
+
+    func testTheResultCountsNoSentRequestsWhateverThePreviewListedAndEachRowSaysWhatItSawLabelledAsBefore() async throws {
         let (model, controls) = makeModel()
         let message = try await revokeTwentyFive(model, controls, running: ["job-05", "job-25"])
-        XCTAssertTrue(
-            message.contains("Of the 20 shown, 1 had already been sent; a reply that arrives after the revocation is not applied."),
-            message)
-        XCTAssertTrue(
-            message.contains(
-                "Up to 1 of the 5 not shown yet had already been sent; a reply that arrives after the revocation is not "
-                    + "applied. Each row says so once shown."),
-            message)
+        assertCountsNoSentRequests(message)
 
-        // The next page shows the second sent request on its own row.
+        // The rows show what the preview listed, labelled as seen just before, on this page and the next.
         await model.loadMoreRetiredWork(profileVersion: "hosted-v1")
         let all = try XCTUnwrap(model.retiredWork.first { $0.profileVersion == "hosted-v1" })
         XCTAssertEqual(all.jobs.filter { $0.preview == .running }.map(\.jobID), ["job-05", "job-25"])
         XCTAssertTrue(
-            PrivacySettingsText.retiredJob(all.jobs[24]).contains("its request had already been sent"),
+            PrivacySettingsText.retiredJob(all.jobs[24]).contains(
+                "its request had already been sent, and a reply that arrives after the revocation is not applied"),
             PrivacySettingsText.retiredJob(all.jobs[24]))
+        let queued = PrivacySettingsText.retiredJob(all.jobs[0])
+        XCTAssertEqual(
+            queued,
+            "Job job-01 · retired by the revocation; it was listed queued just before the revocation and may have been "
+                + "sent after that; a reply is not applied.")
     }
 
-    func testSentRequestsOnlyPastTheFirstPageAreStillWarnedAboutInTheResult() async throws {
-        let (model, controls) = makeModel()
-        let message = try await revokeTwentyFive(model, controls, running: ["job-23", "job-25"])
-        XCTAssertFalse(message.contains("Of the 20 shown"), "none of the shown jobs had been sent: \(message)")
-        XCTAssertTrue(
-            message.contains("Up to 2 of the 5 not shown yet had already been sent; a reply that arrives after the revocation is not applied."),
-            message)
-    }
-
-    func testTheResultSaysWhenNoneOfTheUnshownJobsHadBeenListedAsSent() async throws {
-        let (model, controls) = makeModel()
-        let message = try await revokeTwentyFive(model, controls, running: ["job-05"])
-        XCTAssertTrue(message.contains("Of the 20 shown, 1 had already been sent"), message)
-        XCTAssertTrue(message.contains("None of the 5 not shown yet was listed as sent just before the revocation."), message)
-        XCTAssertFalse(message.contains("Up to"), message)
-    }
-
-    func testWithACappedPreviewTheResultSaysTheRestMayHaveBeenSentInsteadOfCountingThem() async throws {
+    func testWithACappedPreviewTheResultIsTheSameAndRowsThePreviewDidNotSeeClaimNothing() async throws {
         let (model, controls) = makeModel()
         let message = try await revokeTwentyFive(model, controls, running: ["job-01"], previewTruncated: true)
-        XCTAssertTrue(message.contains("Of the 20 shown, 1 had already been sent"), message)
-        XCTAssertTrue(
-            message.contains(
-                "Among the 5 not shown yet, more may have been sent; each row says so once shown, where the job was "
-                    + "listed just before the revocation."),
-            message)
-        XCTAssertFalse(message.contains("Up to"), "a capped preview bounds nothing: \(message)")
-        XCTAssertFalse(message.contains("None of"), message)
+        assertCountsNoSentRequests(message)
+        let page = try XCTUnwrap(model.retiredWork.first { $0.profileVersion == "hosted-v1" })
+        XCTAssertEqual(page.jobs[0].preview, .running)
+        XCTAssertEqual(page.jobs[1].preview, .unknown, "a capped preview labels nothing it did not list")
+        XCTAssertEqual(PrivacySettingsText.retiredJob(page.jobs[1]), "Job job-02 · retired by the revocation.")
     }
 
     func testTheResultIsExactlyWhatTheCoreRetiredNotWhatWasListedBefore() async throws {
@@ -966,9 +954,14 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1", "job-3"])
         XCTAssertEqual(model.retiredWork.first?.jobs.map(\.preview), [.queued, .notListed])
         let rows = (model.retiredWork.first?.jobs ?? []).map(PrivacySettingsText.retiredJob)
-        XCTAssertEqual(rows[0], "Job job-1 · retired by the revocation; it was listed queued just before.")
         XCTAssertEqual(
-            rows[1], "Job job-3 · retired by the revocation; it was pinned to the version in the moment before the revocation.")
+            rows[0],
+            "Job job-1 · retired by the revocation; it was listed queued just before the revocation and may have been "
+                + "sent after that; a reply is not applied.")
+        XCTAssertEqual(
+            rows[1],
+            "Job job-3 · retired by the revocation; it was pinned to the version in the moment before the revocation "
+                + "and may have been sent; a reply is not applied.")
 
         model.proposeRequeue(jobID: "job-2", toProfileVersion: "private-v1")
         XCTAssertNil(model.requeueProposal, "a job the core did not retire is not offered a move")

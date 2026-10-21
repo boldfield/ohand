@@ -190,10 +190,12 @@ struct PrivacyRetiredJob: Equatable {
     enum PriorListing: Equatable {
         /// Listed `running` just before the revocation: its request had already been sent.
         case running
-        /// Listed `queued` just before the revocation. That says nothing about whether an earlier attempt was sent.
+        /// Listed `queued` just before the revocation. That says nothing about whether an earlier attempt was sent,
+        /// nor whether the runner sent it in the moment between the listing and the revocation.
         case queued
         /// Absent from the screen's complete listing just before the revocation. The core retires only queued and
-        /// running work, so the job was pinned to the version in the moment between that listing and the revocation.
+        /// running work, so the job was pinned to the version in the moment between that listing and the revocation;
+        /// it may have been sent in that moment too.
         case notListed
         /// The screen has no complete listing from just before the revocation: it failed, was capped, or the
         /// revocation happened before this launch.
@@ -636,10 +638,11 @@ final class PrivacySettingsModel: ObservableObject {
                 }
                 actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
             case .revokeProfileVersion(let profileVersion, let versionLabel):
-                // A preview of the work pinned to it just before, so the result can say which retired job's request
-                // had already been sent. It is only a preview: the result itself is the core's durable listing of
-                // what the revocation retired, which includes work pinned in the moment after the preview that no
-                // preview can see. A failed or capped preview holds nothing back; it only leaves that detail unknown.
+                // A preview of the work pinned to it just before, so each retired row can say what the screen listed
+                // for it. It is only a preview: the result itself is the core's durable listing of what the
+                // revocation retired, which includes work pinned in the moment after the preview that no preview can
+                // see, and the runner keeps dispatching in that moment, so the result counts nothing from the
+                // preview. A failed or capped preview holds nothing back; it only leaves the rows' detail unknown.
                 var preview: JobConfigurationPinnedJobs?
                 do {
                     preview = try await controls.jobsPinned(toProfile: profileVersion, limit: nil)
@@ -648,8 +651,7 @@ final class PrivacySettingsModel: ObservableObject {
                 }
                 try await controls.revokeProfile(profileVersion)
                 recordPreview(preview, profileVersion: profileVersion)
-                actionState = .changed(
-                    await readRetiredResult(profileVersion, versionLabel: versionLabel, preview: preview))
+                actionState = .changed(await readRetiredResult(profileVersion, versionLabel: versionLabel))
             case .repinWaitingWork(let routeID, let routeLabel):
                 let moved = try await controls.repinWaitingWork(routeID: routeID)
                 actionState = .changed(
@@ -685,25 +687,16 @@ final class PrivacySettingsModel: ObservableObject {
     /// expectation, is the result: it has every job the revocation retired, and only those. A failed read says so;
     /// the core keeps the list, and the next refresh reads it again.
     ///
-    /// Only the first page is read here, so the count of retired jobs whose request had already been sent is exact
-    /// for the jobs shown. For the rest, the result says what is known: with a complete preview, at most how many
-    /// of them the preview listed as running (one may have completed before the revocation, so it was not retired);
-    /// with a capped or unread preview, that more may have been sent. Each row says so for itself once shown.
-    private func readRetiredResult(
-        _ profileVersion: String, versionLabel: String, preview: JobConfigurationPinnedJobs?
-    ) async -> String {
+    /// The result counts no sent requests. The core's listing does not record whether a retired job's request had
+    /// left the device, and the preview was read before the revocation while the runner kept dispatching, so a job
+    /// it listed queued, or never saw, can have been sent by the time the core retired it. The result says what holds
+    /// for every retired job instead; each row adds what the preview listed for it, labelled as seen before.
+    private func readRetiredResult(_ profileVersion: String, versionLabel: String) async -> String {
         do {
             let retired = try await readRetiredPages(profileVersion, versionLabel: versionLabel, atLeast: 0)
             retiredWork.removeAll { $0.profileVersion == profileVersion }
             if retired.total > 0 { retiredWork.append(retired) }
-            let sentShown = retired.jobs.filter { $0.preview == .running }.count
-            var sentUnshown: Int?
-            if let preview, !preview.truncated {
-                sentUnshown = max(preview.jobs.filter { $0.status == "running" }.count - sentShown, 0)
-            }
-            return PrivacySettingsText.profileRevoked(
-                versionLabel, retired: retired.total, listed: retired.jobs.count, sentShown: sentShown,
-                sentUnshown: sentUnshown)
+            return PrivacySettingsText.profileRevoked(versionLabel, retired: retired.total, listed: retired.jobs.count)
         } catch {
             retiredWorkUnreadable = true
             return PrivacySettingsText.profileRevokedUnread(versionLabel)
