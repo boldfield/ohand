@@ -320,6 +320,26 @@ final class ProviderSettingsModelTests: XCTestCase {
         XCTAssertFalse(none.needsPrivacyAllowance, "no default, nothing to allow")
     }
 
+    func testACloudGrantThatMayBelongToAnotherProviderDoesNotClearTheLine() async {
+        let mixed = providerListing(
+            versions: [("openai", "openai-v1", "open_ai", false, true), ("hosted", "hosted-v1", "anthropic", false, true)],
+            defaultVersion: "hosted-v1")
+        let controls = FakeProviderSettingsControls(listing: mixed)
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "an OpenAI-era grant cannot be told from one for the Anthropic default")
+
+        let singleControls = FakeProviderSettingsControls(
+            listing: providerListing(
+                versions: [("hosted", "hosted-v1", "anthropic", false, true), ("hosted", "hosted-v2", "anthropic", false, true)],
+                defaultVersion: "hosted-v2"))
+        singleControls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        let single = makeModel(singleControls)
+        await single.refresh()
+        XCTAssertFalse(single.needsPrivacyAllowance, "one hosted provider only: the grant is that provider's")
+    }
+
     func testUnsupportedCombinationsAreRefused() {
         var draft = ProviderSettingsDraft(
             profileName: "a", providerProtocol: .selfHosted, endpoint: "", model: "m", credentialReference: "c")

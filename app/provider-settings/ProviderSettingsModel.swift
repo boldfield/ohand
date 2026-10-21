@@ -363,7 +363,18 @@ final class ProviderSettingsModel: ObservableObject {
     /// so a cloud grant made for another provider cannot be told apart from one for this default.
     var needsPrivacyAllowance: Bool {
         guard case .hosted = operatingMode else { return false }
-        return cloudSendingAllowed != true
+        return cloudSendingAllowed != true || cloudGrantMayBelongToAnotherProvider
+    }
+
+    /// Whether a stored profile of another hosted provider exists, so a cloud-class grant could be the one made for it:
+    /// core authorizes exact origins, and the existing read cannot say which provider a grant covers. Fails closed.
+    private var cloudGrantMayBelongToAnotherProvider: Bool {
+        guard let listing, let current = defaultVersion else { return false }
+        return listing.profiles.contains { profile in
+            profile.versions.contains {
+                $0.providerProtocol != current.providerProtocol && $0.providerProtocol != "self_hosted"
+            }
+        }
     }
 
     /// Reads the stored profiles and defaults again. When the screen loads, it first sweeps secrets nothing owns.
