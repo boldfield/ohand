@@ -108,6 +108,12 @@ final class SettingsRootViewTests: XCTestCase {
         guard let object, depth < 40 else { return nil }
         if (object as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier { return object }
         var children: [NSObject] = (object.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if children.isEmpty, object.isAccessibilityElement == false {
+            let count = object.accessibilityElementCount()
+            if count != NSNotFound, count > 0 {
+                children = (0..<count).compactMap { object.accessibilityElement(at: $0) as? NSObject }
+            }
+        }
         if let view = object as? UIView { children += view.subviews }
         for child in children {
             if let found = accessibilityElement(identifier: identifier, in: child, depth: depth + 1) { return found }
@@ -121,7 +127,9 @@ final class SettingsRootViewTests: XCTestCase {
         let rootView = try XCTUnwrap(window?.rootViewController?.view)
         XCTAssertNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView))
 
-        let card = try XCTUnwrap(accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView))
+        settle { self.accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView) != nil }
+        let card = try XCTUnwrap(accessibilityElement(identifier: SettingsRootView.eraseIdentifier, in: rootView),
+                                 "the erase card is in the accessibility tree")
         XCTAssertTrue(card.accessibilityActivate(), "the erase card can be activated")
         settle { self.accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView) != nil }
         XCTAssertNotNil(accessibilityElement(identifier: ResetSettingsView.explanationIdentifier, in: rootView),
