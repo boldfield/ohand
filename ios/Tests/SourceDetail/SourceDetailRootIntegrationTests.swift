@@ -253,6 +253,89 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
         XCTAssertFalse(root.playback.fence.isHeld(audioURL))
     }
 
+    // MARK: reminder section follows the core after a change on detail
+
+    func testChangingTheTypeToActionMakesTheReminderSectionAppear() throws {
+        let root = try makeRoot(authenticated: true, modules: [])
+        defer { root.shutDown() }
+        let (itemID, _) = try saveCapture(root)
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+        try runOnMain { await model.itemControls?.load() }
+        try runOnMain { await model.reminderEditor?.load() }
+        XCTAssertEqual(model.reminderEditor?.isShown, false, "a note carries no reminder")
+
+        try runOnMain {
+            model.itemControls?.pendingType = .action
+            await model.itemControls?.applyType()
+        }
+
+        XCTAssertTrue(
+            pump(until: { model.reminderEditor?.isShown == true && model.reminderEditor?.isLoading == false }),
+            "the section follows the new type")
+        XCTAssertEqual(model.reminderEditor?.canSave, true)
+    }
+
+    func testChangingAnActionToAnotherTypeRemovesTheEditableReminderSection() throws {
+        let root = try makeRoot(authenticated: true, modules: [])
+        defer { root.shutDown() }
+        let (itemID, _) = try saveActionItem(root)
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+        try runOnMain { await model.itemControls?.load() }
+        try runOnMain { await model.reminderEditor?.load() }
+        XCTAssertEqual(model.reminderEditor?.isShown, true)
+
+        try runOnMain {
+            model.itemControls?.pendingType = .note
+            await model.itemControls?.applyType()
+        }
+
+        XCTAssertTrue(pump(until: { model.reminderEditor?.isShown == false }), "the section is no longer offered")
+        XCTAssertEqual(model.reminderEditor?.canSave, false)
+        XCTAssertEqual(model.reminderEditor?.canCancel, false)
+    }
+
+    func testCompletingTheItemClosesTheReminderSection() throws {
+        try assertLifecycleClosesTheReminderSection { await $0.complete() }
+    }
+
+    func testCancellingTheItemClosesTheReminderSection() throws {
+        try assertLifecycleClosesTheReminderSection { await $0.cancel() }
+    }
+
+    private func assertLifecycleClosesTheReminderSection(
+        _ act: @escaping @MainActor @Sendable (ItemControlsModel) async -> Void
+    ) throws {
+        let root = try makeRoot(authenticated: true, modules: [])
+        defer { root.shutDown() }
+        let (itemID, _) = try saveActionItem(root)
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+        try runOnMain { await model.itemControls?.load() }
+        try runOnMain { await model.reminderEditor?.load() }
+        XCTAssertEqual(model.reminderEditor?.canSave, true)
+        let controls = try XCTUnwrap(model.itemControls)
+
+        try runOnMain { await act(controls) }
+
+        XCTAssertTrue(pump(until: { model.reminderEditor?.isClosed == true }), "the section learns the item ended")
+        XCTAssertEqual(model.reminderEditor?.isShown, true)
+        XCTAssertEqual(model.reminderEditor?.canSave, false)
+        XCTAssertEqual(model.reminderEditor?.canCancel, false)
+    }
+
+    private func saveActionItem(_ root: ServiceCompositionRoot) throws -> (itemID: String, captureID: String) {
+        let saved = try saveCapture(root)
+        let itemID = saved.itemID
+        let expected = try revision(of: itemID)
+        _ = try run {
+            try await root.itemCorrections.correctType(
+                commandID: "cmd-action-\(itemID)", itemID: itemID, expectedRevision: expected, itemType: .action)
+        }
+        return saved
+    }
+
     private func runOnMain(_ operation: @escaping @MainActor @Sendable () async -> Void) throws {
         let box = SourceDetailRootResultBox<Void>()
         Task { @MainActor in
