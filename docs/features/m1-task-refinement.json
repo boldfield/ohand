@@ -1533,6 +1533,7 @@
         3
       ],
       "depends_on": [
+        "F41",
         "T04a"
       ],
       "source_pointers": [
@@ -3487,7 +3488,9 @@
         "ios/AppAssembly/ManagementCatalog.swift",
         "ios/Tests/AppAssembly/SettingsRootViewTests.swift",
         "app/data-settings/RetentionSettingsView.swift",
-        "ios/Tests/DataSettings/RetentionSettingsViewTests.swift"
+        "ios/Tests/DataSettings/RetentionSettingsViewTests.swift",
+        "ios/Tests/DataSettings/DeletionViewTests.swift",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
       ],
       "intent": "Make the design's Erase everything card open the existing reset screen and leave the Audio screen with only audio decisions.",
       "acceptance": [
@@ -3691,12 +3694,64 @@
         "See the F39 section of m1-task-refinement.md."
       ],
       "covers_parent_criteria": [],
-      "depends_on": [],
+      "depends_on": [
+        "F40"
+      ],
       "source_pointers": [
         "ios/AppAssembly/AppServices.swift:52",
         "app/provider-settings/ProviderSettingsModel.swift:165",
         "app/provider-settings/ProviderSettingsText.swift:99",
         "app/provider-settings/ProviderSettingsView.swift:585"
+      ]
+    },
+    {
+      "key": "F40",
+      "parent": null,
+      "title": "Report which provider versions a route's grant actually covers, and offer a grant for an uncovered one",
+      "file_scope": [
+        "core/src/privacy/routing/grants.rs",
+        "core/src/privacy/routing/mod.rs",
+        "core/src/ffi/route_policy.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift",
+        "ios/Services/ProviderConfiguration/ProviderConfigurationService.swift",
+        "app/privacy-settings/",
+        "ios/Tests/PrivacySettings/"
+      ],
+      "intent": "Make the grant read match authorize_job (exact origins per profile version) so the Processing footer and the Privacy grant offer are correct per provider.",
+      "acceptance": [
+        "See the F40 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U06b"
+      ],
+      "source_pointers": [
+        "core/src/privacy/routing/grants.rs:307",
+        "core/src/privacy/routing/mod.rs:293",
+        "app/privacy-settings/PrivacySettingsModel.swift:97"
+      ]
+    },
+    {
+      "key": "F41",
+      "parent": null,
+      "title": "Make cancelled exports leave nothing behind, and zero deleted text in the store",
+      "file_scope": [
+        "core/src/ffi/export_snapshot.rs",
+        "core/src/export/",
+        "core/src/ffi/core_handle/instance.rs",
+        "core/src/store/schema/mod.rs",
+        "core/tests/"
+      ],
+      "intent": "Close the two T04b acceptance-2 failures in core: export cancellation after start, and deleted text surviving in freed pages.",
+      "acceptance": [
+        "See the F41 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/export_snapshot.rs:134",
+        "core/src/ffi/core_handle/instance.rs:243",
+        "core/src/store/schema/mod.rs:128"
       ]
     }
   ],
@@ -4240,6 +4295,7 @@
       "U07c"
     ],
     "T04b": [
+      "F41",
       "T04a"
     ],
     "T12a": [
@@ -4473,7 +4529,13 @@
       "U11"
     ],
     "F38": [],
-    "F39": []
+    "F39": [
+      "F40"
+    ],
+    "F40": [
+      "U06b"
+    ],
+    "F41": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -4651,6 +4713,10 @@
     {
       "date": "2026-10-17",
       "change": "DS09 (restyle Export) added after U07b landed; U10 depends on it."
+    },
+    {
+      "date": "2026-10-21",
+      "change": "Added F40 (exact-destination grant read; F39 depends on it) and F41 (export cancellation and secure_delete; T04b depends on it). F31 owns DeletionViewTests.swift and the walkthrough Audio export step. F28 whole-capture scope amendment."
     }
   ]
 }

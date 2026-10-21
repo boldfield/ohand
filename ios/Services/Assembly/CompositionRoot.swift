@@ -1116,6 +1116,10 @@ public final class ServiceCompositionRoot {
     private let resetItemCleanup: ResetItemCleanupBridge
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
+    /// Adapts the job runner for B04's completion service so its drain-idle observer does not displace the root's.
+    let completionDrain: JobRunnerCompletionDrain
+    /// Built on first use on the main queue; `nil` when the platform supplies no background-execution grant.
+    private var backgroundCompletion: BackgroundCompletionService?
     private let stateLock = NSLock()
     private var ingress: ForegroundIngressService?
     private var isShutDown = false
@@ -1205,8 +1209,13 @@ public final class ServiceCompositionRoot {
         resetItemCleanup = assembly.resetItemCleanup
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
+        completionDrain = JobRunnerCompletionDrain(runner: assembly.jobRunner)
         assembly.rootReference.set(self)
-        jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
+        let drainForCompletion = completionDrain
+        jobRunner.setDrainIdleObserver { [weak self] in
+            self?.runReminderPassAfterDrain()
+            drainForCompletion.drainWentIdle()
+        }
         itemDeletion.setCleanupProvider { [weak self] in
             let coordinator = self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first
             let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
@@ -1270,8 +1279,10 @@ public final class ServiceCompositionRoot {
         let foregroundState = foreground
         foregroundState.set(isActive)
         foregroundTokens.append(
-            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) {
+                [weak self] _ in
                 foregroundState.set(true)
+                self?.completionBecameActive()
             })
         foregroundTokens.append(
             center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
@@ -1305,6 +1316,7 @@ public final class ServiceCompositionRoot {
         recovering?.recover { _ in }
         jobObserver.start(isActive: isActive)
         permissionObserver?.start(isActive: isActive)
+        if isActive { completionBecameActive() }
         if ownsLifecycle {
             lifecycleOwner?.beginLifecycle(isActive: isActive)
         }
@@ -1359,6 +1371,14 @@ public final class ServiceCompositionRoot {
         permissionObserver?.stop()
         tokens.forEach { adapters.lifecycleNotifications.removeObserver($0) }
         jobRunner.setDrainIdleObserver(nil)
+        let completion = takeBackgroundCompletion()
+        if let completion {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { completion.shutDown() }
+            } else {
+                DispatchQueue.main.async { completion.shutDown() }
+            }
+        }
         for module in modules.reversed() {
             module.shutDown()
         }
@@ -1409,8 +1429,10 @@ public final class ServiceCompositionRoot {
         }
         let record = IngressRecord(
             captureID: captureID, text: text, audio: nil, context: captureContext(at: capturedAt))
-        service.submit(record) { outcome in
-            completion(Self.saveOutcome(for: outcome))
+        service.submit(record) { [weak self] outcome in
+            let result = Self.saveOutcome(for: outcome)
+            if case .saved = result { self?.processAfterDurableSave() }
+            completion(result)
         }
     }
 
@@ -1437,8 +1459,10 @@ public final class ServiceCompositionRoot {
             audio: IngressAudioHandoff(
                 inProgressFileName: handoff.inProgressFileName, finalizedFileName: handoff.finalizedFileName),
             context: captureContext(at: handoff.startedAt))
-        service.submit(record) { outcome in
-            completion(Self.recordingOutcome(for: outcome))
+        service.submit(record) { [weak self] outcome in
+            let result = Self.recordingOutcome(for: outcome)
+            if case .saved = result { self?.processAfterDurableSave() }
+            completion(result)
         }
     }
 
@@ -1568,6 +1592,69 @@ public final class ServiceCompositionRoot {
         recordReminderReport(report)
         return report
     }
+
+    /// Starts processing the capture that was just saved, without waiting for a lifecycle event. Runs on the main
+    /// queue (ingress completions arrive there). With a background-execution grant, B04's service opens its bounded
+    /// completion window, which requests the drain and lets it finish if the app goes to the background; without
+    /// one, the runner is asked to drain, which it does while the app is in the foreground.
+    private func processAfterDurableSave() {
+        guard let service = completionService() else {
+            jobRunner.requestDrain()
+            return
+        }
+        Task { @MainActor in _ = await service.completeAfterCapture() }
+    }
+
+    /// The app became active: B04's pending-processing alert is no longer needed.
+    private func completionBecameActive() {
+        guard let service = completionService() else { return }
+        Task { @MainActor in await service.appBecameActive() }
+    }
+
+    private func takeBackgroundCompletion() -> BackgroundCompletionService? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let taken = backgroundCompletion
+        backgroundCompletion = nil
+        return taken
+    }
+
+    private func completionService() -> BackgroundCompletionService? {
+        stateLock.lock()
+        if isShutDown {
+            stateLock.unlock()
+            return nil
+        }
+        if let existing = backgroundCompletion {
+            stateLock.unlock()
+            return existing
+        }
+        stateLock.unlock()
+        guard let grant = adapters.backgroundGrant else { return nil }
+        let pending = LifecycleHealthPendingReader { [weak self] in
+            self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first?.processingHealth
+        }
+        let alertPolicy = PendingProcessingAlertPolicy(delay: Self.pendingAlertDelay)
+        let alert = alertPolicy.map { PendingProcessingAlert(center: adapters.notificationCenter, policy: $0) }
+        let created = MainActor.assumeIsolated {
+            BackgroundCompletionService(drain: completionDrain, grant: grant, pending: pending, alert: alert)
+        }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if isShutDown {
+            MainActor.assumeIsolated { created.shutDown() }
+            return nil
+        }
+        if let existing = backgroundCompletion {
+            MainActor.assumeIsolated { created.shutDown() }
+            return existing
+        }
+        backgroundCompletion = created
+        return created
+    }
+
+    /// How long after a capture the safety-net alert fires if its processing is still unfinished.
+    private static let pendingAlertDelay: TimeInterval = 120
 
     private func runReminderPassAfterDrain() {
         stateLock.lock()
