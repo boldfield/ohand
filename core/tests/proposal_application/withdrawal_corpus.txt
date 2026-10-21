@@ -5,11 +5,13 @@
 #   unscheduled  the capture withdraws the reminder: NoExplicitIntent, no reminder row or operation
 #   scheduled    a control: exactly one scheduled reminder at the proposed instant
 #   recognised   a control the withdrawal grammar leaves alone (never NoExplicitIntent) whose
-#                timing the F28 content boundary holds for correction: after the time only the
-#                sentence end, a filler, or a comma and `to` followed by punctuation-free task
-#                content may schedule, so a trailing clause ("..., I don't want to miss it",
-#                "... so I don't need to worry", "... about the gym") is CandidateRejected with
-#                no reminder row or operation
+#                timing the F28 content boundary holds for correction: with the task first, only
+#                the sentence end or a filler may follow the time, so a trailing clause ("...,
+#                I don't want to miss it", "... so I don't need to worry", "... to stop the
+#                leak") is kept as a not_scheduled_yet reminder with the whole capture as its
+#                phrase, with no instant and no operation. With the time first, plain task
+#                content schedules with or without `to` ("remind me {time} about the gym"),
+#                while content holding a clause mark is recognised
 # Add a new phrasing as a line here; no Rust change is needed unless the grammar itself changes.
 # Lines starting with `#` and blank lines are ignored.
 
@@ -76,7 +78,7 @@ recognised | remind me to call the roofer {time}, it's not urgent
 recognised | remind me to call the roofer {time}, he said "never mind" last time
 scheduled | set a reminder for {time} to cancel the old subscription
 recognised | remind me to call the roofer {time}, don't cancel the ladder order
-scheduled | remind me to call the roofer {time} to stop the leak
+recognised | remind me to call the roofer {time} to stop the leak
 recognised | remind me to call the roofer {time}, I want it fixed
 recognised | remind me to call the roofer {time}, don't stop looking for quotes
 recognised | remind me to call the roofer {time}, I don't want the quote to expire
@@ -91,11 +93,11 @@ recognised | remind me to call the roofer {time}, the quote wasn't cheap
 
 # --- I05b: over-rejections that must schedule again ---
 # gerund or infinitive task object after "about"
-recognised | remind me {time} about cancelling the gym
-recognised | remind me at {time} about canceling the gym membership
-recognised | remind me {time} about skipping the gym
-recognised | remind me {time} about forgetting the ladder
-recognised | remind me {time} about to cancel the gym
+scheduled | remind me {time} about cancelling the gym
+scheduled | remind me at {time} about canceling the gym membership
+scheduled | remind me {time} about skipping the gym
+scheduled | remind me {time} about forgetting the ladder
+scheduled | remind me {time} about to cancel the gym
 recognised | remind me to call the roofer {time}, and ask about cancelling the gym
 # coordinated verbs inside the requested task
 scheduled | remind me {time} to call the roofer and cancel the order
@@ -218,7 +220,7 @@ unscheduled | remind me to call the roofer {time}, so I don't need to worry anyw
 # take-back inside the requested task, after a coordination or a filler
 scheduled | remind me {time} to call the shop and take the ladder back
 scheduled | remind me {time} to please take the ladder back
-recognised | remind me {time} about taking the ladder back
+scheduled | remind me {time} about taking the ladder back
 scheduled | remind me {time} to call the shop and take back the ladder
 unscheduled | remind me {time} to call the roofer and take back what I said
 unscheduled | remind me {time} to call the roofer, I take back the call
@@ -475,7 +477,7 @@ unscheduled | remind me {time} to take the audio back
 scheduled | remind me {time} to call the roofer and cancel the gas bill
 scheduled | remind me {time} to call the roofer and cancel the delivery
 scheduled | remind me {time} to call the library and take the books back
-recognised | remind me {time} about returning the books
+scheduled | remind me {time} about returning the books
 
 # --- I05b round 4: the known-thing boundary applies to every attached noun phrase ---
 # a reminder, time, capture or request word reached through a preposition still withdraws
@@ -519,7 +521,7 @@ scheduled | remind me {time} to call the roofer and cancel the order for the gif
 scheduled | remind me {time} to call the roofer and cancel the order from the shop
 scheduled | remind me {time} to call the roofer and cancel the order by the weekend
 scheduled | remind me {time} to call the roofer and cancel the order at the end of the week
-recognised | remind me {time} about cancelling the delivery of the parcel
+scheduled | remind me {time} about cancelling the delivery of the parcel
 scheduled | remind me {time} to take the ladder back to the garage
 recognised | remind me to call the roofer {time}, so I don't need to cancel by the deadline
 recognised | remind me to call the roofer {time}, so I don't need to cancel by the end of the week
@@ -571,7 +573,7 @@ scheduled | remind me {time} to call the roofer and cancel the old gas bill
 scheduled | remind me {time} to call the shop and take the library books back
 scheduled | remind me {time} to take the spare ladder back
 scheduled | remind me {time} to take the rented ladder back to the shop
-recognised | remind me {time} about cancelling the gym membership
+scheduled | remind me {time} about cancelling the gym membership
 recognised | remind me to call the hotel {time}, so I don't need to cancel the dinner reservation
 recognised | remind me to call the roofer {time}, so I don't need to chase the old gas bill
 

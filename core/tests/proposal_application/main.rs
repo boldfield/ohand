@@ -21,6 +21,7 @@ use ohand_core::privacy::routing::{DenialReason, JOB_TYPE_INTERPRET};
 use ohand_core::providers::contracts::{FailureKind, ProviderFailure};
 use ohand_core::reminders::state::{get_reminder, list_operations, OperationType};
 use ohand_core::retrieval::index::search_source_direct;
+use ohand_core::time::span_covers_time_expression;
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType, ItemScope, ItemType,
 };
@@ -1046,6 +1047,41 @@ fn assert_rejected_and_unscheduled(fixture: &Fixture, disposition: ReminderDispo
     assert_rejected_and_unscheduled_for(&source_text_of(fixture), fixture, disposition);
 }
 
+/// The span quoted less than the capture's time expression: the request is kept as not scheduled
+/// yet, needing correction, with the whole capture as its phrase, no instant and no schedule
+/// operation. The model's instant is never used.
+fn assert_held_for_correction(fixture: &Fixture, disposition: ReminderDisposition) {
+    let text = source_text_of(fixture);
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet),
+        "{text}"
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "not_scheduled_yet", "{text}");
+    assert_eq!(reminder.schedule_state, "not_scheduled", "{text}");
+    assert_eq!(reminder.resolved_instant, None, "{text}");
+    assert!(reminder.ambiguity_reason.is_some(), "{text}");
+    let (_, _, operations, phrase) = fixture.reminder_effects().expect("a reminder row");
+    assert_eq!(operations, vec![], "{text}");
+    assert_eq!(phrase.as_deref(), Some(text.trim()), "{text}");
+    assert_eq!(fixture.durable().reminders, 1, "{text}");
+}
+
+fn assert_scheduled_at(fixture: &Fixture, disposition: ReminderDisposition, instant: &str) {
+    let text = source_text_of(fixture);
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+        "{text}"
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "resolved", "{text}");
+    let stored = DateTime::parse_from_rfc3339(reminder.resolved_instant.as_deref().unwrap())
+        .expect("stored instant is RFC 3339");
+    assert_eq!(stored, DateTime::parse_from_rfc3339(instant).unwrap(), "{text}");
+}
+
 fn assert_rejected_and_unscheduled_for(
     text: &str,
     fixture: &Fixture,
@@ -1060,18 +1096,18 @@ fn assert_rejected_and_unscheduled_for(
 }
 
 #[test]
-fn a_span_missing_the_zone_qualifier_is_rejected() {
+fn a_span_missing_the_zone_qualifier_is_held_for_correction() {
     let (fixture, disposition) = apply_clock_proposal(
         "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
         "tomorrow at 9 a.m.",
         "2026-10-09T09:00:00-04:00",
         "join the call",
     );
-    assert_rejected_and_unscheduled(&fixture, disposition);
+    assert_held_for_correction(&fixture, disposition);
 }
 
 #[test]
-fn a_span_missing_a_multiword_or_bracketed_zone_is_rejected() {
+fn a_span_missing_a_multiword_or_bracketed_zone_is_held_for_correction() {
     for text in [
         "Remind me tomorrow at 9 a.m. New York time to join the call",
         "Remind me tomorrow at 9 a.m. Los Angeles time to join the call",
@@ -1084,14 +1120,13 @@ fn a_span_missing_a_multiword_or_bracketed_zone_is_rejected() {
             "2026-10-09T09:00:00-04:00",
             "join the call",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_span_followed_by_any_other_place_or_zone_text_is_rejected() {
+fn a_span_followed_by_any_other_place_or_zone_text_is_held_for_correction() {
     for text in [
-        "Remind me tomorrow at 9 a.m. Tokyo to join the call",
         "Remind me tomorrow at 9 a.m. Ho Chi Minh City time to join the call",
         "Remind me tomorrow at 9 a.m. America/New_York to join the call",
         "Remind me tomorrow at 9 a.m. Tokyo, Japan time to join the call",
@@ -1103,12 +1138,12 @@ fn a_span_followed_by_any_other_place_or_zone_text_is_rejected() {
             "2026-10-09T09:00:00-04:00",
             "join the call",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_span_missing_the_surrounding_date_is_rejected() {
+fn a_span_missing_the_surrounding_date_is_held_for_correction() {
     for text in [
         "Remind me at 3 p.m. on October 15 to join the call",
         "Remind me on the 15th at 3 p.m. to join the call",
@@ -1120,12 +1155,12 @@ fn a_span_missing_the_surrounding_date_is_rejected() {
             "2026-10-08T15:00:00-04:00",
             "join the call",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_dayless_span_after_a_spelled_or_abbreviated_day_is_rejected() {
+fn a_dayless_span_after_a_spelled_or_abbreviated_day_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Remind me on the twelfth at 3 p.m. to call the roofer",
@@ -1149,12 +1184,12 @@ fn a_dayless_span_after_a_spelled_or_abbreviated_day_is_rejected() {
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_span_holding_one_of_two_alternative_times_is_rejected() {
+fn a_span_holding_one_of_two_alternative_times_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Remind me Friday at 3 p.m. or Saturday at 4 p.m. to call the roofer",
@@ -1204,12 +1239,12 @@ fn a_span_holding_one_of_two_alternative_times_is_rejected() {
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_day_naming_span_after_another_day_in_its_sentence_is_rejected() {
+fn a_day_naming_span_after_another_day_in_its_sentence_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Friday, remind me tomorrow at 5 p.m. to call the roofer",
@@ -1228,12 +1263,12 @@ fn a_day_naming_span_after_another_day_in_its_sentence_is_rejected() {
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_span_followed_by_a_self_correction_or_zone_aside_after_a_comma_is_rejected() {
+fn a_span_followed_by_a_self_correction_or_zone_aside_after_a_comma_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Remind me Friday at 3 p.m., sorry, Saturday at 3 p.m., to call the roofer",
@@ -1267,7 +1302,7 @@ fn a_span_followed_by_a_self_correction_or_zone_aside_after_a_comma_is_rejected(
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
@@ -1289,12 +1324,12 @@ fn a_clause_or_aside_after_the_time_is_rejected_whether_or_not_it_names_a_place(
             "2026-10-09T09:00:00-04:00",
             "call the roofer",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_self_correction_to_a_relative_time_or_a_possessive_zone_is_rejected() {
+fn a_self_correction_to_a_relative_time_or_a_possessive_zone_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Remind me Friday at 3 p.m., sorry, the day after, to call the roofer",
@@ -1328,7 +1363,7 @@ fn a_self_correction_to_a_relative_time_or_a_possessive_zone_is_rejected() {
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
@@ -1344,12 +1379,13 @@ fn a_list_after_the_time_needs_correction_but_the_same_list_before_it_schedules(
             "2026-10-09T09:00:00-04:00",
             "buy eggs",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
-    // With the time last, the span guard covers the time (see the unit table in
-    // `core/src/time/expression.rs`). End to end the comma-separated list stops earlier: the
-    // explicit-intent check (I05) treats the comma between "remind me" and the time as a clause
-    // break, which is outside F28. The same list without commas schedules.
+    // With the time last, the commas of the list are clause marks in the content before the
+    // time, which the whole-capture rule holds for correction (see the unit table in
+    // `core/src/time/expression.rs`). End to end the capture stops earlier: the explicit-intent
+    // check (I05) treats the comma between "remind me" and the time as a clause break, which is
+    // outside F28. The same list without commas schedules.
     let text = "Remind me to buy eggs, milk and bread tomorrow at 9 a.m.";
     let (fixture, disposition) = apply_clock_proposal(
         text,
@@ -1400,7 +1436,7 @@ fn the_allowed_boundaries_around_the_time_still_schedule() {
 }
 
 #[test]
-fn a_day_naming_span_after_a_relative_modifier_is_rejected() {
+fn a_day_naming_span_after_a_relative_modifier_is_held_for_correction() {
     for text in [
         "Remind me before Friday at 3 p.m. to call the roofer",
         "Remind me after Friday at 3 p.m. to call the roofer",
@@ -1416,12 +1452,12 @@ fn a_day_naming_span_after_a_relative_modifier_is_rejected() {
             "2026-10-09T15:00:00-04:00",
             "call the roofer",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_dayless_span_after_a_day_earlier_in_the_sentence_is_rejected() {
+fn a_dayless_span_after_a_day_earlier_in_the_sentence_is_held_for_correction() {
     for (text, instant) in [
         (
             "Friday, remind me at 3 p.m. to call the roofer",
@@ -1450,12 +1486,12 @@ fn a_dayless_span_after_a_day_earlier_in_the_sentence_is_rejected() {
             "at 3 p.m."
         };
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_dayless_span_after_a_day_in_an_earlier_sentence_or_past_a_pause_is_rejected() {
+fn a_dayless_span_after_a_day_in_an_earlier_sentence_or_past_a_pause_is_held_for_correction() {
     for (text, quoted, instant) in [
         (
             "Tomorrow... remind me at 5 p.m. to call the roofer",
@@ -1479,12 +1515,12 @@ fn a_dayless_span_after_a_day_in_an_earlier_sentence_or_past_a_pause_is_rejected
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
 #[test]
-fn a_dayless_span_with_a_day_in_the_task_text_is_rejected_not_anchored_to_today() {
+fn a_dayless_span_with_a_day_in_the_task_text_is_held_for_correction_not_anchored_to_today() {
     for (text, quoted, instant) in [
         (
             "Remind me at 5 p.m. to call the roofer tomorrow",
@@ -1533,7 +1569,7 @@ fn a_dayless_span_with_a_day_in_the_task_text_is_rejected_not_anchored_to_today(
         ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_held_for_correction(&fixture, disposition);
     }
 }
 
@@ -1542,7 +1578,6 @@ fn a_day_naming_span_whose_task_text_names_another_time_still_schedules() {
     for text in [
         "Remind me Friday at 3 p.m. to call the roofer on Saturday",
         "Remind me Friday at 3 p.m. to call the roofer before the 9 a.m. meeting",
-        "Remind me Friday at 3 p.m. to call the roofer. Tomorrow is busy",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
@@ -1578,36 +1613,207 @@ fn a_dayless_span_after_only_request_words_still_schedules() {
 }
 
 #[test]
-fn a_connector_or_bracketed_aside_after_the_time_is_rejected() {
-    for (text, item_span) in [
+fn a_bracketed_aside_after_the_time_is_held_for_correction() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+        "call Sam about the quote",
+    );
+    assert_held_for_correction(&fixture, disposition);
+}
+
+/// After the time come optionally a comma, optionally `to` or a filler, then the task content:
+/// plain words are content whether or not `to` introduces them. A bare place with no zone word
+/// next to the clock is plain content too, an accepted limit: places are unbounded and no list
+/// of them is kept.
+#[test]
+fn plain_words_after_the_time_are_task_content_with_or_without_to() {
+    for (text, quoted, instant, item_span) in [
         (
-            "Remind me tomorrow at 9 a.m. and call the roofer",
+            "Remind me tomorrow at 9 a.m. about the dentist",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "the dentist",
+        ),
+        (
+            "Remind me Friday at 3 p.m., call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
             "call the roofer",
         ),
         (
-            "Remind me tomorrow at 9 a.m. (call Sam about the quote)",
-            "call Sam about the quote",
+            "Remind me Friday at 3 p.m. call the roofer",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
         ),
+        (
+            "Remind me tomorrow at 9 a.m. and call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "call the roofer",
+        ),
+        (
+            "Remind me Friday at 3 p.m., I don't want to miss it",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "miss it",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m. Tokyo to join the call",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "join the call",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, item_span);
+        assert_scheduled_at(&fixture, disposition, instant);
+    }
+}
+
+/// Task first: between the content and the time only nothing, a single comma or a filler may
+/// appear, and the content may hold no clause mark.
+#[test]
+fn a_clause_mark_in_the_content_before_the_time_is_held_for_correction() {
+    for text in [
+        "Remind me to call the roofer - urgent - Friday at 3 p.m.",
+        "Remind me to call the roofer \u{2014} urgent \u{2014} Friday at 3 p.m.",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // A bracket or colon between the request and the time is a clause break for the
+    // explicit-intent check (I05), which stops the capture before the guard runs; that check is
+    // outside F28. The guard's own verdict on these forms is pinned here and in the unit table.
+    for text in [
+        "Remind me to call the roofer (urgent) Friday at 3 p.m.",
+        "Remind me to call the roofer: Friday at 3 p.m.",
+    ] {
+        let span = span_of(text, "Friday at 3 p.m.");
+        assert!(!span_covers_time_expression(text, span.start, span.end), "{text}");
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+        assert_eq!(fixture.durable().reminders, 0, "{text}");
+    }
+}
+
+/// Task first: after the time only the end of the text, closing punctuation or a filler may
+/// follow.
+#[test]
+fn task_content_after_a_trailing_time_is_held_for_correction() {
+    for text in [
+        "Remind me to call the roofer Friday at 3 p.m. to fix the leak",
+        "Remind me to call the roofer Friday at 3 p.m. about the leak",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_held_for_correction(&fixture, disposition);
+    }
+}
+
+/// Whole-capture scope: a temporal token in any other sentence of the capture makes the timing
+/// ambiguous, whether it corrects the time, qualifies its zone, or is the accepted cost of a
+/// date mentioned elsewhere.
+#[test]
+fn a_temporal_token_in_another_sentence_is_held_for_correction() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, make it Saturday at 4 p.m.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Sorry, I mean Saturday.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, make it 4.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me tomorrow at 9 a.m. to call the roofer. That's Tokyo time.",
             "tomorrow at 9 a.m.",
             "2026-10-09T09:00:00-04:00",
-            item_span,
+        ),
+        (
+            "Remind me tomorrow at 9 a.m.! Tokyo time, to call the roofer",
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+        ),
+        (
+            "Talked to Jim on Monday. Remind me Friday at 3 p.m. to call the roofer.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Tomorrow is busy",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // A retraction in the next sentence is dropped earlier by the explicit-intent check (I05),
+    // outside F28. The guard holds it on its own, so it stays covered if that check changes.
+    let text = "Remind me to call the roofer tomorrow at 9 a.m. No wait, 10 a.m.";
+    let span = span_of(text, "tomorrow at 9 a.m.");
+    assert!(!span_covers_time_expression(text, span.start, span.end), "{text}");
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+        "call the roofer",
+    );
+    assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+    assert_eq!(fixture.durable().reminders, 0, "{text}");
+}
+
+/// Context in another sentence that holds no temporal token (a filler, a person, a place) is
+/// outside the guard's reach and still schedules.
+#[test]
+fn another_sentence_without_a_temporal_token_still_schedules() {
+    for text in [
+        "Remind me Friday at 3 p.m. to call the roofer. Thanks",
+        "I talked to Sam. Remind me Friday at 3 p.m. to call the roofer",
+        "Remind me Friday at 3 p.m. to call the roofer. He is in Tokyo",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
         );
-        assert_rejected_and_unscheduled(&fixture, disposition);
+        assert_scheduled_at(&fixture, disposition, "2026-10-09T15:00:00-04:00");
     }
 }
 
 #[test]
-fn a_span_missing_the_day_is_rejected() {
+fn a_span_missing_the_day_is_held_for_correction() {
     let (fixture, disposition) = apply_clock_proposal(
         "Remind me tomorrow at 5 p.m. to join the call",
         "at 5 p.m.",
         "2026-10-08T17:00:00-04:00",
         "join the call",
     );
-    assert_rejected_and_unscheduled(&fixture, disposition);
+    assert_held_for_correction(&fixture, disposition);
 }
 
 #[test]
@@ -1830,8 +2036,7 @@ fn a_reminder_on_an_item_that_is_not_an_action_is_not_recorded() {
 
 #[test]
 fn a_later_proposal_refines_an_unresolved_reminder_but_never_replaces_a_committed_time() {
-    let text =
-        "remind me to call the roofer 2026-01-16 09:00:00. Remind me again 2026-01-17 09:00:00";
+    let text = "remind me 2026-01-16 09:00:00 to call the roofer and again 2026-01-17 09:00:00";
     let mut fixture = Fixture::new(text);
     let build = |fixture: &Fixture, lease: &Lease, phrase: &str, instant: Option<&str>, quality| {
         fixture
@@ -2204,11 +2409,17 @@ fn the_withdrawal_corpus_decides_which_reminder_requests_schedule() {
                     && durable.reminders == 0
             }
             // Not a withdrawal, but the clause after the time keeps the timing ambiguous under
-            // the F28 content boundary: rejected as a candidate, never scheduled.
+            // the F28 content boundary: kept as not scheduled yet with the whole capture as its
+            // phrase, needing correction, never scheduled.
             CorpusExpectation::Recognised => {
-                matches!(disposition, ReminderDisposition::CandidateRejected(_))
-                    && fixture.reminder_effects().is_none()
-                    && durable.reminders == 0
+                disposition == ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet)
+                    && fixture
+                        .reminder_effects()
+                        .is_some_and(|(_, _, operations, phrase)| {
+                            operations.is_empty() && phrase.as_deref() == Some(text.as_str())
+                        })
+                    && durable.reminders == 1
+                    && fixture.reminder_row().resolved_instant.is_none()
             }
             CorpusExpectation::Scheduled => {
                 disposition == ReminderDisposition::Recorded(ReminderRequestState::Resolved)

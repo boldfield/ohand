@@ -43,7 +43,7 @@ use crate::reminders::state::{
 };
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
-use crate::time::resolver::{ResolutionError, TimeContext, TimeResolver};
+use crate::time::resolver::{TimeContext, TimeResolver};
 use crate::time::span_covers_time_expression;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
@@ -106,6 +106,9 @@ pub enum ReminderDisposition {
     NoExplicitIntent,
     /// The candidate contradicts the deterministic resolver (different instant or timezone, or a
     /// time the resolver itself calls ambiguous); nothing is scheduled and no reminder is created.
+    /// A span that quotes less than the capture's time expression is not a contradiction: the
+    /// request is recorded as not scheduled yet, needing correction, with the whole capture as
+    /// its phrase.
     CandidateRejected(&'static str),
     /// The reminder was already committed, recurring or cancelled; derived output cannot replace
     /// it, so it was left exactly as it was.
@@ -795,6 +798,12 @@ pub fn record_interpretation_failure_in_tx(
 /// reduce text with a repeat marker to a one-shot, never replaces a committed time, and records
 /// the schedule operation in the same transaction. Unparseable, ambiguous or recurring phrases
 /// are stored there as not scheduled with the phrase kept.
+///
+/// A quoted phrase that resolves but covers less than the capture's time expression
+/// ([`span_covers_time_expression`]) is kept the same way: the request goes to the API with the
+/// whole capture as its phrase. The resolver cannot reduce a text that asks to be reminded to
+/// one instant, so the API stores it as not scheduled yet, needing correction, and the claim is
+/// never used.
 fn record_reminder(
     tx: &Transaction<'_>,
     proposal: &Proposal,
@@ -818,11 +827,13 @@ fn record_reminder(
     }
 
     let phrase = quoted_phrase(candidate, basis_text);
-    if let Some(contradiction) =
-        candidate_contradiction(candidate, &phrase, basis_text, &source.time_context)
-    {
-        return Ok(ReminderDisposition::CandidateRejected(contradiction));
-    }
+    let phrase = match candidate_agreement(candidate, &phrase, basis_text, &source.time_context) {
+        Agreement::Contradicts(contradiction) => {
+            return Ok(ReminderDisposition::CandidateRejected(contradiction));
+        }
+        Agreement::SpanTruncated => basis_text.to_string(),
+        Agreement::Agrees => phrase,
+    };
 
     let request = DerivedReminderRequest {
         item_id: item.item_id.clone(),
@@ -850,25 +861,6 @@ fn record_reminder(
     }
 }
 
-/// The resolver's repeat detection applied to the whole text, punctuation treated as whitespace,
-/// as the reminder API applies it when it records a derived request.
-fn text_states_repeat(basis_text: &str, time_context: &TimeContext) -> bool {
-    let spaced: String = basis_text
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() {
-                character
-            } else {
-                ' '
-            }
-        })
-        .collect();
-    matches!(
-        TimeResolver::resolve(&spaced, time_context),
-        Err(ResolutionError::UnsupportedRepeat(_))
-    )
-}
-
 struct FixedClock(DateTime<Utc>);
 
 impl Clock for FixedClock {
@@ -890,28 +882,40 @@ fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Why the model's claim cannot be trusted, or `None` when it agrees with the resolver or the
-/// resolver itself declines to produce one instant (ambiguous, unparseable or recurring phrases,
-/// which the reminder API stores as not scheduled without using the claim).
-fn candidate_contradiction(
+/// How the model's claim stands against the source.
+enum Agreement {
+    /// The claim agrees with the resolver, or the resolver itself declines to produce one instant
+    /// (ambiguous, unparseable or recurring phrases, which the reminder API stores as not
+    /// scheduled without using the claim).
+    Agrees,
+    /// The claim cannot be trusted, for the given reason.
+    Contradicts(&'static str),
+    /// The quoted phrase resolves, but covers less than the time expression around it, so what
+    /// it resolves to may not be what the capture says ("at 5 p.m." of "tomorrow at 5 p.m.",
+    /// "tomorrow at 9 a.m." of "... Tokyo time", "Friday at 3 p.m." of "... Actually, make it
+    /// Saturday"). The capture's timing is ambiguous and the claim is never used.
+    SpanTruncated,
+}
+
+fn candidate_agreement(
     candidate: &ReminderProposal,
     phrase: &str,
     basis_text: &str,
     time_context: &TimeContext,
-) -> Option<&'static str> {
-    let resolution = TimeResolver::resolve(phrase, time_context).ok()?;
-    let resolved = resolution.resolved_time?;
+) -> Agreement {
+    let Ok(resolution) = TimeResolver::resolve(phrase, time_context) else {
+        return Agreement::Agrees;
+    };
+    let Some(resolved) = resolution.resolved_time else {
+        return Agreement::Agrees;
+    };
     if let Some(span) = candidate.source_span {
-        // A repeat marker elsewhere in the text ("every Monday starting ...") is stored as an
-        // unsupported recurrence without an instant, which says more than a rejection would.
-        if !span_covers_time_expression(basis_text, span.start, span.end)
-            && !text_states_repeat(basis_text, time_context)
-        {
-            return Some("the proposed instant is not what the source phrase resolves to");
+        if !span_covers_time_expression(basis_text, span.start, span.end) {
+            return Agreement::SpanTruncated;
         }
     }
     if candidate.quality == TimeResolutionQuality::Ambiguous {
-        return Some("the interpreter reported the time as ambiguous");
+        return Agreement::Contradicts("the interpreter reported the time as ambiguous");
     }
     let claimed = candidate
         .instant
@@ -919,15 +923,15 @@ fn candidate_contradiction(
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|instant| instant.with_timezone(&Utc));
     if claimed != Some(resolved) {
-        return Some("the proposed instant is not what the source phrase resolves to");
+        return Agreement::Contradicts("the proposed instant is not what the source phrase resolves to");
     }
     if candidate.timezone_id.as_deref() != Some(time_context.timezone.as_str()) {
-        return Some("the proposed timezone differs from the capture's timezone");
+        return Agreement::Contradicts("the proposed timezone differs from the capture's timezone");
     }
     if resolution.is_ambiguous && !resolution.is_past {
-        return Some("the resolver reports the time as ambiguous");
+        return Agreement::Contradicts("the resolver reports the time as ambiguous");
     }
-    None
+    Agreement::Agrees
 }
 
 struct IntentToken {
