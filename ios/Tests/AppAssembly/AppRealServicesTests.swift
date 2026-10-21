@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 import OhAndCoreBridge
 @testable import OhAndServices
@@ -120,6 +121,49 @@ final class AppRealServicesTests: XCTestCase {
         wait { !services.voice.recoveryModel.rows.isEmpty }
 
         XCTAssertEqual(services.voice.recoveryModel.rows.count, 1, "the cancelled audio is offered, never silently dropped")
+    }
+
+    // MARK: processing starts when a capture is saved
+
+    func testASavedTypedCaptureIsInterpretedAndItsReminderRecordedWithNoLifecycleEvent() throws {
+        let services = try AppServices.production(
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
+        created.append(services)
+        XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0, "nothing has drained before the save")
+
+        services.captureEntry.textModel.updateText("remind me to water the ferns tomorrow")
+        services.captureEntry.saveText()
+        wait { self.scalar("SELECT COUNT(*) FROM reminders") != "0" }
+
+        XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save itself asked for the drain")
+        XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM reminders"), "0", "the offline grammar's reminder is recorded")
+    }
+
+    func testASavedRecordingStartsAJobDrainWithNoLifecycleEvent() throws {
+        let services = try makeServices()
+        XCTAssertEqual(services.root.jobRunner.startedDrainCount, 0)
+
+        services.captureEntry.startRecording()
+        wait { if case .recording = services.captureEntry.recorderState { return true } else { return false } }
+        services.captureEntry.stopRecording()
+        wait { services.captureEntry.acknowledgment?.savedItemID != nil }
+        XCTAssertNotNil(services.captureEntry.acknowledgment?.savedItemID)
+        wait { services.root.jobRunner.startedDrainCount > 0 }
+
+        XCTAssertGreaterThan(services.root.jobRunner.startedDrainCount, 0, "the save started processing")
+    }
+
+    private func scalar(_ sql: String) -> String {
+        var database: OpaquePointer?
+        let path = ProtectedStorageLayout(rootDirectory: storageRoot).databaseURL.path
+        guard sqlite3_open(path, &database) == SQLITE_OK else { return "" }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5000)
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return "" }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: text)
     }
 
     // MARK: notification wiring
