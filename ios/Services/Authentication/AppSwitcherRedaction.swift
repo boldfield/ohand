@@ -21,15 +21,43 @@ final class WindowRedactionPresenter: RedactionPresenter {
 
     var coverWindowCount: Int { coverWindows.count }
 
+    /// The design's `brand` indigo in light theme and the dark launch ground in dark theme.
+    static let brandBackground = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x0A / 255, green: 0x0B / 255, blue: 0x12 / 255, alpha: 1)
+            : UIColor(red: 0x1E / 255, green: 0x27 / 255, blue: 0x61 / 255, alpha: 1)
+    }
+
+    /// The italic ampersand mark. A fixed glyph, never stored history.
+    private static func makeMark() -> UIView {
+        let label = UILabel()
+        let baseFont = UIFont(descriptor: UIFontDescriptor.preferredFontDescriptor(withTextStyle: .largeTitle)
+            .withDesign(.serif) ?? UIFontDescriptor(), size: 120)
+        let italic = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic)
+            .map { UIFont(descriptor: $0, size: 120) } ?? baseFont
+        label.font = italic
+        label.text = "&"
+        label.textColor = .white
+        label.isAccessibilityElement = false
+        label.sizeToFit()
+        label.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
+        label.translatesAutoresizingMaskIntoConstraints = true
+        return label
+    }
+
     func showRedaction() {
         guard coverWindows.isEmpty else { return }
         for scene in windowScenes() {
             let window = UIWindow(windowScene: scene)
             window.windowLevel = UIWindow.Level.alert + 1
             let controller = UIViewController()
-            controller.view.backgroundColor = .systemBackground
+            controller.view.backgroundColor = Self.brandBackground
+            controller.view.addSubview(Self.makeMark())
             controller.view.accessibilityIgnoresInvertColors = true
             window.rootViewController = controller
+            controller.view.subviews.first.map { mark in
+                mark.center = CGPoint(x: scene.coordinateSpace.bounds.midX, y: scene.coordinateSpace.bounds.midY)
+            }
             window.isHidden = false
             coverWindows.append(window)
         }
@@ -97,5 +125,38 @@ final class SessionLifecycleCoordinator {
 
     private func observe(_ name: Notification.Name, _ action: @escaping () -> Void) {
         observers.append(notificationCenter.addObserver(forName: name, object: nil, queue: nil) { _ in action() })
+    }
+}
+
+/// Covers a scene while it is inactive, and only the cover: the relock stays with the app's own lifecycle handling, so
+/// nothing relocks twice. The cover is raised when the scene will resign active, before the system takes its snapshot,
+/// and removed when the scene becomes active. A scene that becomes active without resigning never shows it.
+final class SceneCoverController {
+    private let presenter: RedactionPresenter
+    private(set) var isCovered = false
+
+    init(presenter: RedactionPresenter) {
+        self.presenter = presenter
+    }
+
+    func sceneWillResignActive() {
+        guard !isCovered else { return }
+        isCovered = true
+        presenter.showRedaction()
+    }
+
+    func sceneDidBecomeActive() {
+        removeCover()
+    }
+
+    /// A capture entry (Control, shortcut or URL) shows the capture surface, not the cover.
+    func captureEntryArrived() {
+        removeCover()
+    }
+
+    private func removeCover() {
+        guard isCovered else { return }
+        isCovered = false
+        presenter.hideRedaction()
     }
 }

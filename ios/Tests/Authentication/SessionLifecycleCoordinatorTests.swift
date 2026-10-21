@@ -2,7 +2,7 @@ import UIKit
 import XCTest
 @testable import OhAndServices
 
-private final class RecordingRedactionPresenter: RedactionPresenter {
+final class RecordingRedactionPresenter: RedactionPresenter {
     private(set) var calls: [String] = []
     func showRedaction() { calls.append("show") }
     func hideRedaction() { calls.append("hide") }
@@ -138,5 +138,48 @@ final class SessionLifecycleCoordinatorTests: XCTestCase {
 
         windowPresenter.hideRedaction()
         XCTAssertEqual(windowPresenter.coverWindowCount, 0)
+    }
+}
+
+final class SceneCoverControllerTests: XCTestCase {
+    private var presenter: RecordingRedactionPresenter!
+    private var cover: SceneCoverController!
+
+    override func setUp() {
+        super.setUp()
+        presenter = RecordingRedactionPresenter()
+        cover = SceneCoverController(presenter: presenter)
+    }
+
+    func testResigningActiveShowsTheCover() {
+        cover.sceneWillResignActive()
+        XCTAssertEqual(presenter.calls, ["show"])
+        XCTAssertTrue(cover.isCovered)
+    }
+
+    func testBecomingActiveRemovesTheCover() {
+        cover.sceneWillResignActive()
+        cover.sceneDidBecomeActive()
+        XCTAssertEqual(presenter.calls, ["show", "hide"])
+        XCTAssertFalse(cover.isCovered)
+    }
+
+    func testBecomingActiveWithoutResigningNeverShowsTheCover() {
+        cover.sceneDidBecomeActive()
+        XCTAssertEqual(presenter.calls, [])
+    }
+
+    func testResigningTwiceCoversOnce() {
+        cover.sceneWillResignActive()
+        cover.sceneWillResignActive()
+        XCTAssertEqual(presenter.calls, ["show"])
+    }
+
+    func testCaptureEntryWhileCoveredShowsTheCaptureSurface() {
+        cover.sceneWillResignActive()
+        cover.captureEntryArrived()
+        XCTAssertEqual(presenter.calls, ["show", "hide"])
+        cover.sceneDidBecomeActive()
+        XCTAssertEqual(presenter.calls, ["show", "hide"], "no second removal")
     }
 }
