@@ -166,9 +166,12 @@ extension View {
 struct ReminderHistoryList: View {
     @ObservedObject var model: ReminderHistoryModel
 
+    /// Names what this list holds, so it is not confused with the item's own history above it on detail.
+    static let headingText = "Reminder history"
+
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.xs) {
-            Text("Reminder history")
+            Text(Self.headingText)
                 .font(DSFont.body)
                 .foregroundColor(DSColor.ink.color)
                 .accessibilityAddTraits(.isHeader)

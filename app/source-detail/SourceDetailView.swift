@@ -267,10 +267,13 @@ struct SourceDetailView: View {
         }
     }
 
+    /// Names the item's own change list, apart from the reminder history shown beside the reminder.
+    static let itemHistoryHeading = "Item history"
+
     @ViewBuilder private func history(_ content: SourceDetailContent) -> some View {
         if !content.history.isEmpty {
             DSGroupedSection(
-                title: "Item history", footer: content.historyTruncated ? "Older changes are not shown." : nil
+                title: Self.itemHistoryHeading, footer: content.historyTruncated ? "Older changes are not shown." : nil
             ) {
                 ForEach(content.history) { row in
                     DSRow(
