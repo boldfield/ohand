@@ -3183,6 +3183,15 @@ Acceptance:
 - Remove the zone and place word lists that only served to detect asides. Zone qualifiers directly attached to the clock ("EST", "Tokyo time", "UTC+9", acceptance 2) stay ambiguous as before.
 - Tests: the Tokyo aside above, a parenthetical "(I'll be in Lisbon)", a dash aside, an aside with no place ("…, after the meeting, …") — all ambiguous; "tomorrow at 9 a.m. to call the roofer", "tomorrow at 9 a.m., to call the roofer" and "to call the roofer tomorrow at 9 a.m." still schedule. Reviewers should probe the allowlist's boundary, not enumerate places.
 
+**Content boundary made exact (coordinator, 2026-10-21, after the Opus round-8 review of PR #323).** Round 8 found self-corrections after a comma ("Remind me Friday at 3 p.m., sorry, the day after, to call the roofer") and "<my/your/their> time" read as an occasion. The allowlist above covers both. To stop the worker and reviewers from disagreeing about where task content starts, the boundary is defined exactly:
+
+- **Time first.** After the time expression come: optionally a single comma, optionally `to` or an allowed filler, then the task content. If that task content contains any further clause mark (comma, semicolon, colon, dash, parenthesis or bracket), the timing is ambiguous. Plain words without punctuation are task content.
+- **Content first.** Between the content and the time expression, only nothing, a single comma or a filler may appear. After the time expression, only the end of the text, closing punctuation (`.`, `!`, `?`) or a filler may follow. Anything else is ambiguous.
+- A possessive followed by "time" directly after the clock ("3 p.m. my time", "their time") is a zone qualifier: ambiguous under acceptance 2, never an occasion idiom.
+- **Accepted cost.** A list that follows the time ("tomorrow at 9 a.m., buy eggs, milk and bread") needs correction. Stating the time last ("buy eggs, milk and bread tomorrow at 9 a.m.") still schedules. Test both.
+- **Accepted limit.** An aside with no punctuation at all, inside task content that follows the time, is out of this guard's reach. The model's own reading is the defence there. Reviewers may not block on unpunctuated variants; they may block on any punctuated case that the rule above lets through.
+- Tests add both round-8 self-corrections, "Friday at 3 p.m. my time", and the list case in both orders.
+
 ### F29
 
 Keep a hedged reminder request as one that needs correction instead of dropping it
@@ -3343,6 +3352,20 @@ Acceptance:
 1. The cover is shown when the scene will resign active, before iOS takes the snapshot, and removed when it becomes active again. It uses the design's brand background and mark, and holds no text from stored history. The existing relock stays where it is; only the cover is installed, so nothing relocks twice.
 2. A capture launched from a Control, shortcut or URL while the cover is up shows the capture surface, not the cover.
 3. Tests: resign-active shows the cover, become-active removes it, and a scene that becomes active without resigning first never shows it. The PR includes a simulator screenshot of the app switcher, or the closest observable proxy, and the exact-head macOS run.
+
+**Cover only unlocked content (coordinator, 2026-10-21, after PR #327's walkthrough failure).** Covering on every resign-active also covers the app behind its own Face ID prompt, because that prompt resigns the scene. The walkthrough's unlock step then finds the cover where the control was (`WalkthroughUITests.swift:174`, "Activation point invalid"), and a person would see the cover flash on every unlock. While reads are locked, nothing from stored history is on screen, so there is nothing to cover. Acceptance 1 is narrowed to this rule, and nothing else changes:
+
+- The cover is shown while the scene is not active **and** reads are unlocked. Read the lock state through the existing `services.root.readSession` (`currentAuthorization()`; `observeScope` for changes). Do not edit `AppServices.swift` or `CompositionRoot.swift`, which F35 is changing.
+- On resign-active: cover if unlocked. If reads become unlocked while the scene is inactive (a Face ID success that lands before `didBecomeActive`), show the cover until the scene becomes active. On entering the background: cover if unlocked, before returning from the callback.
+- The app's own Face ID prompt, shown while locked, never shows the cover. Do not change the walkthrough; it must pass unchanged on the exact head.
+- Tests add: resign-active while locked shows no cover; unlocking while inactive shows it; entering the background while unlocked shows it.
+
+**Once raised, the cover stays up until the scene is active (coordinator, 2026-10-21, after PR #327 round 1).** The amendment above gates *raising* the cover, not removing it. The relock runs on `didEnterBackgroundNotification`, after `sceneDidEnterBackground` and before the snapshot. If the cover follows the lock state, it comes down at exactly the moment it exists for. Rules:
+
+- Lock state decides only whether the cover is raised. Once raised, only `sceneDidBecomeActive` removes it. A relock, a scope change or any URL never removes it. Replace `testRelockingWhileCoveredRemovesTheCover` with a test that a relock while covered keeps the cover and become-active removes it.
+- Remove the early dismissal on URL contexts (`captureEntryArrived`). Every capture entry (URL, Control, shortcut or App Intent) makes the scene active, and becoming active removes the cover. Acceptance 2 is met by that path. Prove it with tests: a capture URL entry and a `CaptureEntryHandoff` announcement, each followed by become-active, end uncovered. An unrelated URL while covered leaves the cover up. Do not edit the intent or handoff code.
+- The cover reuses the shipped launch assets (`LaunchBackground` colour and `LaunchMark` image, the same pair as the launch screen) or `DSMark`. It does not redraw the mark with a system font or hard-coded colours. A test checks that the presenter uses those assets.
+- The acceptance 3 proxy: a hosted test raises the cover on the simulator and attaches its rendered window as an `XCTAttachment` (kept in `OhAndTests.xcresult`). The PR names the attachment and links the exact-head run.
 
 ### F37
 
