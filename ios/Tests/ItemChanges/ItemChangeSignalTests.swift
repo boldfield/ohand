@@ -47,7 +47,11 @@ private final class ScriptedCorrectionCore: ItemCorrectionCore, @unchecked Senda
 
 private final class ScriptedActionCore: NotificationActionCore, @unchecked Sendable {
     let completeOutcome: String
-    init(completeOutcome: String) { self.completeOutcome = completeOutcome }
+    let resolvedItemID: String?
+    init(completeOutcome: String, resolvedItemID: String? = nil) {
+        self.completeOutcome = completeOutcome
+        self.resolvedItemID = resolvedItemID
+    }
 
     func recordEvidence(
         notificationID: String, kind: NotificationActionCommand.Evidence, observedAt: Date, itemID: String?
@@ -62,7 +66,8 @@ private final class ScriptedActionCore: NotificationActionCore, @unchecked Senda
     }
 
     func resolve(notificationID: String) async throws -> NotificationActionAnswer {
-        NotificationActionAnswer(outcome: "unknown_notification")
+        resolvedItemID.map { NotificationActionAnswer(outcome: "resolved", itemID: $0) }
+            ?? NotificationActionAnswer(outcome: "unknown_notification")
     }
 }
 
@@ -155,5 +160,22 @@ final class ItemChangeSignalTests: XCTestCase {
             await flushMainQueue()
             XCTAssertEqual(recorder.changes, expected, outcome)
         }
+    }
+
+    func testACompletionWithoutAPayloadItemPublishesTheResolvedItemNeverAllItems() async throws {
+        let signal = ItemChangeSignal()
+        let recorder = ChangeRecorder()
+        _ = signal.observe { recorder.record($0) }
+        let core = ChangePublishingNotificationActionCore(
+            base: ScriptedActionCore(completeOutcome: "completed", resolvedItemID: "item-9"), changes: signal)
+        _ = try await core.complete(notificationID: "n-1", itemID: nil)
+        await flushMainQueue()
+        XCTAssertEqual(recorder.changes, [.item("item-9")])
+
+        let unresolved = ChangePublishingNotificationActionCore(
+            base: ScriptedActionCore(completeOutcome: "completed"), changes: signal)
+        _ = try await unresolved.complete(notificationID: "n-2", itemID: nil)
+        await flushMainQueue()
+        XCTAssertEqual(recorder.changes, [.item("item-9")])
     }
 }

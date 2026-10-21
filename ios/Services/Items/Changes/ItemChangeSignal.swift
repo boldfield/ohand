@@ -76,10 +76,15 @@ struct ChangePublishingNotificationActionCore: NotificationActionCore {
     }
 
     func complete(notificationID: String, itemID: String?) async throws -> NotificationActionAnswer {
+        // A tap whose payload lost its target is still completed by notification id; ask the core which item that is
+        // before completing, so one completion announces one item and never the reset-only "all items".
+        var changedItemID = itemID
+        if changedItemID == nil {
+            changedItemID = try? await base.resolve(notificationID: notificationID).itemID
+        }
         let answer = try await base.complete(notificationID: notificationID, itemID: itemID)
-        if answer.outcome == "completed" {
-            // The answer does not name the item; when the tap did not either, any item may have changed.
-            changes.publish(itemID.map(ItemChange.item) ?? .allItems)
+        if answer.outcome == "completed", let changedItemID {
+            changes.publish(.item(changedItemID))
         }
         return answer
     }
