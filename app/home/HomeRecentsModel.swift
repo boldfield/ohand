@@ -74,6 +74,8 @@ final class HomeRecentsModel: ObservableObject {
     private var headCount = 0
     /// Set when an item changed while the first page was being read, so that read may predate the change.
     private var reloadFirstPageWhenDone = false
+    /// Items that changed while the first page was being read; that page may still hold them in their old state.
+    private var changedDuringFirstRead: Set<String> = []
 
     /// Waits before the given poll attempt; tests replace it so no real time passes.
     private let pause: (TimeInterval) async -> Void
@@ -172,6 +174,7 @@ final class HomeRecentsModel: ObservableObject {
         loadFailed = false
         headCount = 0
         reloadFirstPageWhenDone = false
+        changedDuringFirstRead = []
     }
 
     // MARK: Item changes
@@ -187,6 +190,7 @@ final class HomeRecentsModel: ObservableObject {
             resetList()
         case .item(let itemID):
             let wasSorting = justSaved.removeValue(forKey: itemID) != nil
+            if isLoadingFirstPage { changedDuringFirstRead.insert(itemID) }
             guard let index = loadedItems.firstIndex(where: { $0.itemID == itemID }) else {
                 // A first page still being read may predate the change and hold the item.
                 if wasSorting || isLoadingFirstPage { reloadFirstPage() }
@@ -305,6 +309,9 @@ final class HomeRecentsModel: ObservableObject {
         }
         if startedIn == generation, reloadFirstPageWhenDone {
             reloadFirstPageWhenDone = false
+            // The page just merged may have brought a changed item back; the next read puts it right.
+            loadedItems.removeAll { changedDuringFirstRead.contains($0.itemID) }
+            changedDuringFirstRead = []
             loadFirstPage()
         }
     }

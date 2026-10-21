@@ -35,6 +35,7 @@ final class RetrievalSearchModelTests: XCTestCase {
         scope = .authenticated
         selected = []
         searcher = FakeRetrievalSearcher()
+        changeHandlers = []
         model = RetrievalSearchModel(
             searcher: searcher,
             readScope: { [unowned self] in self.scope },
@@ -43,7 +44,6 @@ final class RetrievalSearchModelTests: XCTestCase {
                 self.changeHandlers.append(handler)
                 return {}
             })
-        changeHandlers = []
     }
 
     private func publish(_ change: ItemChange) {

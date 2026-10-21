@@ -58,6 +58,9 @@ final class RetrievalSearchModel: ObservableObject {
     /// The request whose answer is awaited, before any search has completed.
     private var inFlightRequest: RetrievalSearchRequest?
     private var handedOffToDetail = false
+    /// True from leaving for a result's detail (search kept) until the screen is back.
+    private var awayInDetail = false
+    private var isInDetail: Bool { handedOffToDetail || awayInDetail }
     /// True once an item changed after the shown results were asked for, so they may be out of date.
     private var resultsMayBeStale = false
     private var removeChangeObserver: (() -> Void)?
@@ -122,6 +125,7 @@ final class RetrievalSearchModel: ObservableObject {
     /// Call when the screen appears or the app becomes active: a session that is no longer authenticated empties it.
     func revalidate() {
         handedOffToDetail = false
+        awayInDetail = false
         if readScope() != .authenticated, phase != .idle {
             clear()
             phase = .locked
@@ -148,7 +152,7 @@ final class RetrievalSearchModel: ObservableObject {
             rows.removeAll { $0.reference.value == itemID.lowercased() }
             totalAccessible = max(0, totalAccessible - (before - rows.count))
         }
-        if !handedOffToDetail { runAgain() }
+        if !isInDetail { runAgain() }
     }
 
     /// Runs the last query again from its first result, keeping the item pane's selection if its row is still there.
@@ -165,6 +169,7 @@ final class RetrievalSearchModel: ObservableObject {
     func screenDidDisappear() {
         let keepsSearch = handedOffToDetail && readScope() == .authenticated
         handedOffToDetail = false
+        awayInDetail = keepsSearch
         if !keepsSearch { clear() }
     }
 
@@ -185,6 +190,7 @@ final class RetrievalSearchModel: ObservableObject {
         lastRequest = nil
         selectedReference = nil
         resultsMayBeStale = false
+        awayInDetail = false
         inFlightRequest = nil
     }
 
@@ -233,7 +239,7 @@ final class RetrievalSearchModel: ObservableObject {
         // An item changed while this was being read, so the page may still hold it. Ask again instead of showing it.
         if resultsMayBeStale, case .success = result {
             lastRequest = request
-            if handedOffToDetail {
+            if isInDetail {
                 if !appending { rows = [] }
             } else {
                 runAgain()
