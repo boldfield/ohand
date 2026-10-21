@@ -83,6 +83,12 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
   Tests show the field is `true` after stop-suggesting even when more than 50 later events push the `stop_suggesting` event out of `history`, and `false` for an item that never had suggestions stopped. No new read, gate, client or composition-root change is granted.
 
+- **Notification permission seams for U11 (coordinator, 2026-10-20, from the pre-trial audit).** No production code ever calls `UNUserNotificationCenter.requestAuthorization`, so on a fresh install every reminder reports "notifications are not allowed" and the daily prompt can never fire. iOS lists no notification toggle for an app that has never asked, so the person cannot fix it in Settings. U11 owns asking at the feature boundary, but the boundaries sit outside its directories. U11 may also edit:
+  - `ios/AppAssembly/AppServices.swift`: in `start()`, set `root.setReminderReportObserver` (`CompositionRoot.swift:1556`, added by A10 "so the app can ask then"). When a report says reminders are undeliverable because permission was never requested, ask once through `ios/Services/Permissions/` while the app is in the foreground, then request a reminders pass.
+  - `app/prompt-settings/PromptSettingsModel.swift` and its tests in `ios/Tests/PromptSettings/`: switching the daily prompt on while permission is not yet requested asks once, then saves and re-reads, so the screen shows the real outcome.
+
+  Ask only at those two points, never at launch. A denial is respected; the existing "turn them on in Settings" copy is correct once iOS has asked. U11 also depends on F35, which edits `AppServices.swift` first.
+
 - Test-target registration allowance (coordinator, 2026-10-12, after PR #178 round 2 blocked T02a on ownership alone). The verification tasks own top-level test directories that Cargo does not discover: it finds integration tests only in a package's own `tests/`, the root workspace lists its members explicitly, and a separate workspace would not run under `make test`. So a Rust suite in an owned directory can only run in `make test` and CI through a `[[test]]` entry in `core/Cargo.toml`. Standing allowance: each of T02a, T02b, T03, T04a and T04b may add exactly one `[[test]]` entry to `core/Cargo.toml`, containing only `name` and a `path` inside its own owned directory (for example, `name = "capture_processing_resilience"`, `path = "../tests/resilience/capture-processing/main.rs"`). Tasks that share a directory share one entry: T02b reuses T02a's entry and T04b reuses T04a's, and the later sibling only adds modules under the shared directory. If the earlier sibling has not landed, the first to land adds the entry and the other rebases. No other change to `core/Cargo.toml`, the root `Cargo.toml` or `Cargo.lock` is covered, including new dependencies, dev-dependencies, features or `harness = false`. A suite that needs one of those must block and name it. A suite that is not Rust (Swift or simulator tests) is not covered by this allowance.
 
 - P11a criterion 2 amended (coordinator, 2026-10-12, after PR #177 rounds 1–2). The P11a slice contradicted itself: criterion 1 takes the signed bundle set from the unsigned archive, while criterion 2 required refusing an uncovered bundle "before any build". Meeting both meant predicting the archive's bundles from `ios/project.yml` before building. Every round then found another project-spec construct (dependency kinds, build phases, copy phases, Info.plist literals, transitive targets) through which that prediction could differ from the archive. Bundle coverage is now decided from the archive itself, so criterion 2 reads "before any keychain, profile-installation, signing or export work". The unsigned archive build may precede the refusal, because it uses no identity or profile and signs nothing. The set of refusals is unchanged: uncovered, expired, Xcode-managed and target-device-missing profiles still refuse with a distinct exit, naming only the bundle identifier. Only their position in the run moves, so acceptance is not lowered. Review surface:
@@ -3169,6 +3175,23 @@ Acceptance:
 - Existing tests in `tools/bench/src/report/tests.rs` and `tools/evaluation/comparison/tests.rs` whose asserted outcome changes only because a clock phrase now resolves may be updated under the same rule as `core/tests/`. List each in the PR.
 - CI: the iOS simulator job runs on every PR, including this one, which has no native edits. Its known intermittent failures (`AppServicesTests…SystemTimeZoneCallbackReportsARealChange`, which F27 fixes, and `ManagementPresentationTests`) are not this task's to fix. Rerunning the failed jobs of the exact-head run (`gh run rerun <id> --failed`) is allowed. Nothing may be skipped or disabled. Link the green exact-head run.
 
+
+**Closed by allowlist (coordinator, 2026-10-20, after the Fable round-2 review of PR #323).** Review keeps finding another aside that names a place or zone next to the time, the latest being "Remind me tomorrow at 9 a.m., I will be in Tokyo, to call the roofer". Extending a list of zone and place words cannot converge, because places are unbounded. The guard is closed the same way the offline grammar is (`core/src/interpretation/fast_path/mod.rs`, "Both open ends of the command are closed by allowlists, not by deny-lists"):
+
+- Between the end of the time expression and the start of the task content, only these may appear: nothing, a single comma, `to`, or the closed filler words the fast path already accepts ("please", "thanks"). The same applies in the other order (task first, then the time), between the content and the time expression.
+- Anything else adjacent to the time expression makes the timing ambiguous: kept, needing correction, and never scheduled. That includes a comma clause, a parenthetical, a dash aside, a second clause or any unlisted word, whether or not it names a place. The same holds for text after the time expression when the time comes last.
+- Remove the zone and place word lists that only served to detect asides. Zone qualifiers directly attached to the clock ("EST", "Tokyo time", "UTC+9", acceptance 2) stay ambiguous as before.
+- Tests: the Tokyo aside above, a parenthetical "(I'll be in Lisbon)", a dash aside, an aside with no place ("…, after the meeting, …") — all ambiguous; "tomorrow at 9 a.m. to call the roofer", "tomorrow at 9 a.m., to call the roofer" and "to call the roofer tomorrow at 9 a.m." still schedule. Reviewers should probe the allowlist's boundary, not enumerate places.
+
+**Content boundary made exact (coordinator, 2026-10-21, after the Opus round-8 review of PR #323).** Round 8 found self-corrections after a comma ("Remind me Friday at 3 p.m., sorry, the day after, to call the roofer") and "<my/your/their> time" read as an occasion. The allowlist above covers both. To stop the worker and reviewers from disagreeing about where task content starts, the boundary is defined exactly:
+
+- **Time first.** After the time expression come: optionally a single comma, optionally `to` or an allowed filler, then the task content. If that task content contains any further clause mark (comma, semicolon, colon, dash, parenthesis or bracket), the timing is ambiguous. Plain words without punctuation are task content.
+- **Content first.** Between the content and the time expression, only nothing, a single comma or a filler may appear. After the time expression, only the end of the text, closing punctuation (`.`, `!`, `?`) or a filler may follow. Anything else is ambiguous.
+- A possessive followed by "time" directly after the clock ("3 p.m. my time", "their time") is a zone qualifier: ambiguous under acceptance 2, never an occasion idiom.
+- **Accepted cost.** A list that follows the time ("tomorrow at 9 a.m., buy eggs, milk and bread") needs correction. Stating the time last ("buy eggs, milk and bread tomorrow at 9 a.m.") still schedules. Test both.
+- **Accepted limit.** An aside with no punctuation at all, inside task content that follows the time, is out of this guard's reach. The model's own reading is the defence there. Reviewers may not block on unpunctuated variants; they may block on any punctuated case that the rule above lets through.
+- Tests add both round-8 self-corrections, "Friday at 3 p.m. my time", and the list case in both orders.
+
 ### F29
 
 Keep a hedged reminder request as one that needs correction instead of dropping it
@@ -3265,7 +3288,7 @@ The detail screen after a deletion also shows two messages: the generic "Not her
 
 Owned paths: a new `ios/Services/Items/Changes/` (the signal), `ios/Services/Assembly/CompositionRoot.swift` (construct it, expose it read-only and connect publishers), and publishing calls only in `ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift`, `ios/Services/Items/Corrections/ItemCorrectionService.swift`, `ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift`, `ios/Services/Reminders/Controls/ReminderControlService.swift` and `ios/Services/Reset/ResetService.swift`; `app/home/`, `app/retrieval/RetrievalSearchModel.swift`, `app/source-detail/SourceDetailView.swift`; tests under `ios/Tests/HomeRecents/`, `ios/Tests/Retrieval/`, `ios/Tests/ItemChanges/` (new) and the existing tests of those services.
 
-Dependencies: F32, which also edits `app/home/`.
+Dependencies: F32, which also edits `app/home/`, and F35, which edits `CompositionRoot.swift` first (added 2026-10-20).
 
 Acceptance:
 
@@ -3274,3 +3297,128 @@ Acceptance:
 3. Search: when the person returns from a result's detail and an item changed in the meantime, the same query and filters are re-run, so a deleted item is gone and a changed item shows its current text. When nothing changed, the kept results come back unchanged, without a new query, as now. A deleted item is never shown as a result, even while the re-run is in flight. The regular-width item pane behaves the same way.
 4. Detail: after the person deletes the item, the screen shows the deletion result and the back button only, not the "Not here" message as well. Opening an item that was deleted earlier still shows "Not here".
 5. Tests, real core where the read path matters: delete from detail, then home and search no longer list the item; correct text from detail, then home and search show the new text; a stale-revision refusal publishes nothing; a change while locked loads nothing; the signal never carries content. Exact-head macOS run linked.
+
+### F34
+
+Let the person send notes that are waiting to be sorted to a provider they have just allowed
+
+A07 added the explicit operation that moves waiting work onto a newly authorized profile (`repin_waiting_interpretations`, exposed as `JobConfigurationService.repinWaitingWork(routeID:)`). By design it never runs on its own (A07 acceptance 3). No screen calls it. On the maintainer's phone, which uses "On this phone" processing, typed notes from days ago are all "Not yet sorted". That is correct while no provider is set. Once a provider is configured and allowed, those notes still stay unsorted, because nothing offers the explicit step. Every note captured before the trial's provider is set up would stay unsorted.
+
+
+**Withdrawn (coordinator, 2026-10-20).** This duplicates U06b. Its PR #317 already offers "sort waiting notes" on the Privacy screen through `repinWaitingWork`. The coordinator checked the API but not the open PR before filing this. Nothing here is built separately; U06b carries it.
+
+Owned paths: `app/privacy-settings/` and its tests (`ios/Tests/PrivacySettings/` or the existing test location for that directory).
+
+Dependencies: U06b, which owns `app/privacy-settings/`.
+
+Acceptance:
+
+1. On the Privacy screen, a route that has a granted, authorized processing profile offers one explicit control to sort the notes waiting on that route. Its explanation names where the notes will go (the provider's display name and whether it is a cloud provider or the person's own server) and says that only notes still waiting are sent. Nothing is sent until the person confirms.
+2. Confirming calls `repinWaitingWork(routeID:)` and keeps calling while it moves a full batch, up to a bounded number of calls. The screen then shows how many notes were queued, or "No notes were waiting" when the count is 0. A failure shows a retry, and nothing is reported as sent that was not.
+3. The control is absent for a route with no grant or no authorized profile, and while reads are locked. The operation itself requires an authenticated session (A07 acceptance 4).
+4. It never runs implicitly: granting a route or changing the default does not call it, and a test proves this.
+5. Real-core test: capture with no provider; configure a fake provider profile and grant the route; confirm; the waiting item's job is queued against that profile. Exact-head macOS run linked.
+
+### F35
+
+Start processing a capture as soon as it is saved, and finish briefly in the background
+
+Found in the pre-trial audit (2026-10-20). Saving a capture never starts the job runner. `ServiceCompositionRoot.saveText` / `saveRecording` (`ios/Services/Assembly/CompositionRoot.swift:1397-1446`) only submit to ingress. `CaptureEntryModel.captureDidEnd` (`ios/Capture/Entry/CaptureEntryModel.swift:66`), the hook meant for this, is set only in tests. B04's `BackgroundCompletionService` is never constructed in production, so `completeAfterCapture()` and `JobRunnerService.beginCompletionWindow` have no production caller. `JobRunnerService.requestDrain()` runs only on activation, a reachability change, or a rerun after a capped drain, and a drain that empties the queue never reruns. As a result, a new note stays "Just now · sorting…", a voice note gets no transcript, and an offline-recognized reminder ("remind me tomorrow to …") is not scheduled until the app is next brought to the foreground. On going to the background, `suspend()` cancels the drain without a completion window, so nothing finishes there either, and B04's pending-processing alert never appears.
+
+Owned paths: `ios/AppAssembly/AppServices.swift`, `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/BackgroundCompletion/`, `ios/Services/JobRunner/JobRunnerService.swift`; tests under `ios/Tests/BackgroundCompletion/`, `ios/Tests/JobRunner/` and `ios/Tests/AppAssembly/AppRealServicesTests.swift`.
+
+Dependencies: F27, which edits `AppServices.swift`.
+
+Acceptance:
+
+1. A durable save (text or voice) requests a drain right away, while the app is in the foreground. A save that fails requests nothing.
+2. The production root builds B04's `BackgroundCompletionService` over the real job runner, background-task grant and pending reader. It calls `completeAfterCapture()` after each durable save and `appBecameActive()` on activation, so work started just before backgrounding gets B04's bounded completion window and B04's alert when it cannot finish. B04's own acceptance is not changed.
+3. `JobRunnerService`'s drain-idle observer is a single slot (`setDrainIdleObserver`), and the root already uses it for the reminder pass after a drain (`CompositionRoot.swift:1209`). Wiring B04 must not replace that observer. Either make the slot a list or compose the two observers in the root, and add a test proving both run.
+4. Real-core test through the production assembly: save a typed capture that the offline grammar recognizes, with no activation event, and the item is interpreted and its reminder recorded without any lifecycle trigger. Save a voice capture, and transcription starts without a trigger.
+5. Exact-head macOS run linked.
+
+### F36
+
+Cover the app in the app switcher
+
+Found in the pre-trial audit (2026-10-20). C01b built the app-switcher redaction (`WindowRedactionPresenter`, `SessionLifecycleCoordinator` in `ios/Services/Authentication/AppSwitcherRedaction.swift`), but production never installs it. The root re-implemented the relock (`CompositionRoot.swift:1280-1290`) but not the cover. The app-switcher card therefore shows whatever was on screen: home recents, search results or an open item. C01b acceptance 2 requires the redaction.
+
+Owned paths: `ios/AppAssembly/SceneDelegate.swift`, `ios/Services/Authentication/AppSwitcherRedaction.swift`, `ios/Tests/Authentication/`.
+
+Dependencies: none beyond landed work (C01b).
+
+Acceptance:
+
+1. The cover is shown when the scene will resign active, before iOS takes the snapshot, and removed when it becomes active again. It uses the design's brand background and mark, and holds no text from stored history. The existing relock stays where it is; only the cover is installed, so nothing relocks twice.
+2. A capture launched from a Control, shortcut or URL while the cover is up shows the capture surface, not the cover.
+3. Tests: resign-active shows the cover, become-active removes it, and a scene that becomes active without resigning first never shows it. The PR includes a simulator screenshot of the app switcher, or the closest observable proxy, and the exact-head macOS run.
+
+**Cover only unlocked content (coordinator, 2026-10-21, after PR #327's walkthrough failure).** Covering on every resign-active also covers the app behind its own Face ID prompt, because that prompt resigns the scene. The walkthrough's unlock step then finds the cover where the control was (`WalkthroughUITests.swift:174`, "Activation point invalid"), and a person would see the cover flash on every unlock. While reads are locked, nothing from stored history is on screen, so there is nothing to cover. Acceptance 1 is narrowed to this rule, and nothing else changes:
+
+- The cover is shown while the scene is not active **and** reads are unlocked. Read the lock state through the existing `services.root.readSession` (`currentAuthorization()`; `observeScope` for changes). Do not edit `AppServices.swift` or `CompositionRoot.swift`, which F35 is changing.
+- On resign-active: cover if unlocked. If reads become unlocked while the scene is inactive (a Face ID success that lands before `didBecomeActive`), show the cover until the scene becomes active. On entering the background: cover if unlocked, before returning from the callback.
+- The app's own Face ID prompt, shown while locked, never shows the cover. Do not change the walkthrough; it must pass unchanged on the exact head.
+- Tests add: resign-active while locked shows no cover; unlocking while inactive shows it; entering the background while unlocked shows it.
+
+### F37
+
+Record delivered notifications, unlock for a locked notification tap, and refresh home when processing lands
+
+Found in the pre-trial audit (2026-10-20). Three gaps in what happens after the app is set up:
+
+- `NotificationBridge.ingestDeliveredNotifications` (`ios/Services/Notifications/NotificationBridge.swift:259`) is meant to run at launch, and nothing calls it. Both production bridges are built with a no-op event handler (`CompositionRoot.swift:1810-1812`, which uses `CompositionEnvironment.notificationEvents = { _ in }`; `LifecycleCoordinator.swift:581-582`). A reminder that fired while the app was in the background and was not tapped then reads "Time has passed. Nothing recorded whether it was shown", and the trial's delivery evidence undercounts.
+- A reminder notification tap while reads are locked holds the open (`ios/Services/NotificationActions/ActionHandler.swift:225-233`) and never asks the person to unlock. Prompt taps do ask, through `navigation.openSuggestion`. The held open then replays on some later, unrelated unlock and replaces whatever screen the person chose (`ManagementNavigationModel.present`).
+- Home polls only items saved in this session, and that list is cleared on every relock (`app/home/HomeRecentsModel.swift:141-150, 317-345`). Notes sorted or transcribed later stay "Not yet sorted" or "Voice capture" on home until something else reloads it.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Assembly/LifecycleCoordinator.swift` (the bridge's event handler only), `ios/Services/Notifications/NotificationBridge.swift`, `ios/Services/NotificationActions/`, `ios/AppAssembly/AppServices.swift`, `ios/AppAssembly/ManagementNavigationModel.swift`; tests under `ios/Tests/NotificationActions/`, `ios/Tests/Notifications/` and `ios/Tests/AppAssembly/`.
+
+Dependencies: F33 (the item-change signal, and `CompositionRoot.swift`) and U11 (`AppServices.swift`).
+
+Acceptance:
+
+1. On launch and on each return to the foreground, notifications delivered while the app was away are read once and passed through the real ingestor into core. The bridges' event handler records them instead of discarding them. Ingesting the same notification twice records it once.
+2. A reminder tap while locked asks for authentication through the navigation model, as a prompt tap does. Success opens the item. A cancelled or failed authentication drops the held open. A held open is never replayed by a later, unrelated unlock.
+3. When a drain applies interpretation or transcription results, the F33 signal is published for those items, so an unlocked home shows the sorted type or transcript without a manual reload. No content is carried, as in F33.
+4. Tests for each, real core where the store is read. Exact-head macOS run linked.
+
+### F38
+
+Keep the source-detail sections consistent after a change, and tidy the detail form
+
+Found in the pre-trial audit (2026-10-20). `onCorrected` reloads only `SourceDetailModel` (`app/source-detail/SourceDetailModel.swift:390-392`). The reminder section loads once (`app/reminders/ReminderEditView.swift:47,51`). So after changing the type to Action, no reminder section appears. After changing an Action to another type, the message says the reminder was cancelled while the section still offers Save time and Cancel. After Complete or Cancel item, the reminder still looks editable until a tap fails. Also: the reminder card flashes for non-action items while its read is in flight (`ReminderEditView.swift:37`), detail shows two "History" headings (`SourceDetailView.swift:273`, `ReminderEditView.swift:171`), and the Words and Topic fields use `.roundedBorder`, which renders as an unstyled black box in dark mode (`app/item-controls/ItemControlsView.swift:152-154, 236-237`).
+
+Owned paths: `app/source-detail/SourceDetailModel.swift`, `app/reminders/`, `app/item-controls/ItemControlsView.swift` (field styling only); tests under `ios/Tests/SourceDetail/`, `ios/Tests/ReminderEdit/`, `ios/Tests/ReminderHistory/` and `ios/Tests/ItemControls/`.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. After any committed correction or lifecycle action on detail, the reminder section reloads too, so its state matches the core: it appears when the item becomes an Action, and shows cancelled or ended (not editable) after a type change away from Action, Complete or Cancel item.
+2. The reminder section shows nothing until its read says the item can carry a reminder.
+3. One "History" heading per history list, each naming what it lists (for example "Item history" and "Reminder history").
+4. The text fields use design-system tokens (surface, ink, radius) in both appearances.
+5. Tests for 1–3 with the real core where state matters. Hosted screenshots of detail in both appearances. Exact-head macOS run linked.
+
+### F39
+
+Make adding Anthropic on the Processing screen lead to notes actually being sorted, and hide own-server until it works
+
+The maintainer will use Anthropic for the trial (decided 2026-10-20). The pre-trial audit found that the provider screens let the person finish setup in a state where nothing is ever sent, and offer an option that cannot work in this build:
+
+- **Own server is a dead end.** Production composes no `OptionalCapabilitiesModule` (`ios/AppAssembly/AppServices.swift:52-56`), so `self_hosted` is not enabled. Even if it were, a self-hosted send needs a `(profile_version, model)` registration fixed at assembly, and the UI mints a new version on every save. Choosing "With my own server" pins new captures to a profile that is put back forever as `protocol_not_enabled`, so they sit at "sorting…" indefinitely, worse than "On this phone". Enabling self-hosted for UI-created profiles is out of scope here and is deferred until after the trial.
+- **Choosing a cloud provider is not enough.** Making a profile the default changes nothing else (`ProviderSettingsModel.swift:165-166`). A new capture is pinned only when the capture route has also been granted on the Privacy screen (`core/src/interpretation/enqueue/mod.rs:45-64`). The only hint is in the info sheet. So the root reads "Processing: Anthropic" while every new note is handled on the phone only.
+- **"OpenAI-compatible" is misleading.** It takes no address and always sends to api.openai.com (`core/src/providers/profiles/mod.rs:230-233`), yet it is the type picker's default (`ProviderSettingsModel.swift:130`).
+- **The empty Add provider form lists every problem at once** ("Give the profile a name. Enter the model name. Store the secret…", `ProviderSettingsView.swift:585-589`), which is a status paragraph under the design's copy rules.
+
+Owned paths: `app/provider-settings/` and `ios/Tests/ProviderSettings/`.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. "With my own server" and the "Private server" type are not offered in this build. Hide them behind one named switch in `app/provider-settings/`, with a comment that names this section, so turning them back on later is a one-line change. A self-hosted profile already saved is still listed, but cannot be made the default, and says why in one line. Nothing in core or Services changes.
+2. After a cloud profile becomes the default, the Processing screen shows one footer line while that destination is not yet allowed for the person's captures: "Allow it under Privacy to start sending notes." The line names the Privacy screen; a navigation link is optional, and only if `app/provider-settings/` can reach it without editing another directory. The line disappears once the route is granted. The read used to tell whether the route is granted is an existing read, not a new one.
+3. The `open_ai` type is labelled "OpenAI". The type picker has no preselected type, or preselects Anthropic, so the person chooses deliberately.
+4. The Add provider form shows each field's problem only after the first Save attempt, or once that field has been edited, never on an untouched form.
+5. The model field has a placeholder showing the expected form of a model identifier (a generic example, not a recommendation). The info sheet says the identifier must match the provider's exactly.
+6. Hosted view tests for 1–4 in both appearances. Exact-head macOS run linked, with walkthrough screenshots of the Processing and Add provider screens.
