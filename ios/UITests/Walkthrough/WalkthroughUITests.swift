@@ -139,7 +139,7 @@ final class WalkthroughUITests: XCTestCase {
             }
             goBack(to: settingsHeader, "Settings")
         }
-        // The "Erase everything" card on the Settings root must open the reset screen. Nothing is confirmed here.
+        // The "Erase everything" card on the Settings root must open the reset screen, which is captured. Nothing is confirmed.
         let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
         XCTAssertTrue(eraseCard.waitForExistence(timeout: screenTimeout), "Erase everything card not found on Settings")
         if !eraseCard.isHittable { app.swipeUp() }
@@ -147,6 +147,7 @@ final class WalkthroughUITests: XCTestCase {
         eraseCard.tap()
         let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
         XCTAssertTrue(resetExplanation.waitForExistence(timeout: screenTimeout), "Erase everything did not open the reset screen")
+        capture(prefix, "erase everything")
         goBack(to: settingsHeader, "Settings")
         goBack(to: homeLink(homeSearch), "home")
     }

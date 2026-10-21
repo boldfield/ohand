@@ -281,18 +281,85 @@ final class DeletionViewTests: XCTestCase {
         }
     }
 
-    func testTheAudioSettingsScreenNoLongerLinksToReset() async {
+    /// The reset screen is entered from the Settings root's "Erase everything" card, and only from there. The root is
+    /// hosted over real services so its other rows have models; the card's tap is the presentation the root opens on
+    /// appear, so the reset screen read here is the one the card pushes.
+    func testTheResetScreenIsReachedFromTheSettingsRootEraseCard() async throws {
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("deletion-erase-card-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        let lifecycle = LifecycleCoordinator()
+        let services = AppServices(
+            root: try ServiceCompositionRoot(
+                configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle]),
+            lifecycle: lifecycle, handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
+            notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: NotificationCenter(), isProtectedDataAvailable: { true })
+        defer {
+            window?.isHidden = true
+            window = nil
+            services.shutDown()
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+        var rootRendered: [String: String] = [:]
+        func showRoot(resetSettings: ResetSettingsModel?, opensResetOnAppear: Bool) async {
+            window?.isHidden = true
+            rootRendered = [:]
+            let current = services.managementContext
+            let retention = RetentionSettingsModel(
+                controls: FakeRetentionControls(
+                    status: RetentionStatus(
+                        policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
+                        storagePressure: .normal, unresolved: [])),
+                readScope: { .authenticated }, resetSettings: resetSettings)
+            let context = ManagementContext(
+                voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
+                providerSettings: current.providerSettings, promptSettings: current.promptSettings,
+                sourceDetail: current.sourceDetail, suggestion: current.suggestion,
+                privacySettings: current.privacySettings)
+            await show(
+                NavigationStack {
+                    SettingsRootView(
+                        sections: ManagementCatalog.settingsSections, context: context,
+                        renderReporter: { rootRendered = $0 }, opensResetOnAppear: opensResetOnAppear,
+                        resetRenderReporter: { [unowned self] in rendered = $0 })
+                })
+        }
+        func waitUntil(_ condition: () -> Bool) async {
+            let deadline = Date(timeIntervalSinceNow: 10)
+            while !condition() && Date() < deadline { await self.settle() }
+        }
+
         let resetSettings = ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated })
+        await showRoot(resetSettings: resetSettings, opensResetOnAppear: false)
+        await waitUntil { rootRendered[SettingsRootView.eraseIdentifier] != nil }
+        XCTAssertEqual(rootRendered[SettingsRootView.eraseIdentifier], "Erase everything")
+
+        await showRoot(resetSettings: resetSettings, opensResetOnAppear: true)
+        await waitUntil { rendered[ResetSettingsView.explanationIdentifier] != nil }
+        XCTAssertEqual(text(ResetSettingsView.explanationIdentifier), DeletionText.resetExplanation)
+        XCTAssertEqual(text(ResetSettingsView.limitsIdentifier), DeletionText.resetLimitsNote)
+        XCTAssertEqual(text(ResetSettingsView.captureNoteIdentifier), DeletionText.resetCaptureNote)
+        XCTAssertEqual(text(ResetSettingsView.choiceRequiredIdentifier), DeletionText.choiceRequiredNote)
+        assertTappable(ResetSettingsView.keepIdentifier)
+        assertTappable(ResetSettingsView.removeIdentifier)
+        assertTappable(ResetSettingsView.continueIdentifier, enabled: false)
+
+        await showRoot(resetSettings: nil, opensResetOnAppear: false)
+        await waitUntil { rootRendered["audio-retention"] != nil }
+        XCTAssertNil(rootRendered[SettingsRootView.eraseIdentifier], "no reset model, no card")
+
         let retention = RetentionSettingsModel(
             controls: FakeRetentionControls(
                 status: RetentionStatus(
                     policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true), storagePressure: .normal,
                     unresolved: [])),
             readScope: { .authenticated }, resetSettings: resetSettings)
+        window?.isHidden = true
         await show(
             NavigationStack {
                 RetentionSettingsView(model: retention, renderReporter: { [unowned self] in rendered = $0 })
             })
-        XCTAssertNil(rendered["data-settings.retention.reset-link"])
+        XCTAssertNil(rendered["data-settings.retention.reset-link"], "the Audio screen does not link to reset")
     }
 }
