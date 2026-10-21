@@ -128,35 +128,86 @@ final class SessionLifecycleCoordinator {
     }
 }
 
-/// Covers a scene while it is inactive, and only the cover: the relock stays with the app's own lifecycle handling, so
-/// nothing relocks twice. The cover is raised when the scene will resign active, before the system takes its snapshot,
-/// and removed when the scene becomes active. A scene that becomes active without resigning never shows it.
+/// The read lock as the scene cover sees it. The session itself stays inside the services module.
+public protocol ReadLockState: AnyObject {
+    var readsAreUnlocked: Bool { get }
+    /// Calls `handler` whenever the read scope changes, on any thread. Returns the registration; release it to stop.
+    func observeReadScopeChanges(_ handler: @escaping () -> Void) -> AnyObject
+}
+
+private final class ReadScopeRegistration {
+    private let session: ReadAuthenticationSession
+    private let token: SessionScopeObserverToken
+
+    init(session: ReadAuthenticationSession, handler: @escaping () -> Void) {
+        self.session = session
+        token = session.observeScope { _ in handler() }
+    }
+
+    deinit { session.removeScopeObserver(token) }
+}
+
+extension ServiceCompositionRoot: ReadLockState {
+    public var readsAreUnlocked: Bool { readSession.scope == .authenticated }
+
+    public func observeReadScopeChanges(_ handler: @escaping () -> Void) -> AnyObject {
+        ReadScopeRegistration(session: readSession, handler: handler)
+    }
+}
+
+/// Covers a scene while it is not active and reads are unlocked, and only the cover: the relock stays with the app's
+/// own lifecycle handling, so nothing relocks twice. While locked nothing stored is on screen, so the app's own Face ID
+/// prompt (which resigns the scene) never shows the cover. The cover is raised when the scene will resign active or
+/// enters the background, before the system takes its snapshot, and removed when the scene becomes active. Reads that
+/// unlock while the scene is inactive raise it until the scene is active. A scene that becomes active without resigning
+/// never shows it. Called on the main thread.
 public final class SceneCoverController {
     private let presenter: RedactionPresenter
+    private let readLock: ReadLockState
+    private var registration: AnyObject?
+    private var isInactive = false
+    private var captureEntryShowing = false
     public private(set) var isCovered = false
 
-    public init(presenter: RedactionPresenter) {
+    public init(presenter: RedactionPresenter, readLock: ReadLockState) {
         self.presenter = presenter
+        self.readLock = readLock
+        registration = readLock.observeReadScopeChanges { [weak self] in
+            if Thread.isMainThread {
+                self?.refresh()
+            } else {
+                DispatchQueue.main.async { self?.refresh() }
+            }
+        }
     }
 
     public func sceneWillResignActive() {
-        guard !isCovered else { return }
-        isCovered = true
-        presenter.showRedaction()
+        isInactive = true
+        captureEntryShowing = false
+        refresh()
+    }
+
+    public func sceneDidEnterBackground() {
+        isInactive = true
+        refresh()
     }
 
     public func sceneDidBecomeActive() {
-        removeCover()
+        isInactive = false
+        captureEntryShowing = false
+        refresh()
     }
 
-    /// A capture entry (Control, shortcut or URL) shows the capture surface, not the cover.
+    /// A capture entry (Control, shortcut or URL) shows the capture surface, not the cover, until the scene is next active.
     public func captureEntryArrived() {
-        removeCover()
+        captureEntryShowing = true
+        refresh()
     }
 
-    private func removeCover() {
-        guard isCovered else { return }
-        isCovered = false
-        presenter.hideRedaction()
+    private func refresh() {
+        let shouldCover = isInactive && !captureEntryShowing && readLock.readsAreUnlocked
+        guard shouldCover != isCovered else { return }
+        isCovered = shouldCover
+        if shouldCover { presenter.showRedaction() } else { presenter.hideRedaction() }
     }
 }

@@ -6,6 +6,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private var sceneCover: SceneCoverController?
 
+    /// Built once the services exist, which can be after the scene connects when the first build failed.
+    private func cover() -> SceneCoverController? {
+        if sceneCover == nil, let root = launcher?.services?.root, let windowScene = window?.windowScene {
+            sceneCover = SceneCoverController(
+                presenter: WindowRedactionPresenter(windowScenes: { [weak windowScene] in
+                    windowScene.map { [$0] } ?? []
+                }),
+                readLock: root)
+        }
+        return sceneCover
+    }
+
     private var launcher: AppLauncher? {
         (UIApplication.shared.delegate as? AppDelegate)?.launcher
     }
@@ -17,10 +29,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = (scene as? UIWindowScene), let launcher = launcher else { return }
         launcher.launch()
-        sceneCover = SceneCoverController(presenter: WindowRedactionPresenter(windowScenes: { [weak windowScene] in
-            windowScene.map { [$0] } ?? []
-        }))
-
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UIHostingController(rootView: AppLauncherView(launcher: launcher))
         self.window = window
@@ -29,15 +37,15 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         for context in connectionOptions.urlContexts {
             launcher.services?.receive(url: context.url)
         }
-        if !connectionOptions.urlContexts.isEmpty { sceneCover?.captureEntryArrived() }
+        if !connectionOptions.urlContexts.isEmpty { cover()?.captureEntryArrived() }
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
-        sceneCover?.sceneWillResignActive()
+        cover()?.sceneWillResignActive()
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
-        sceneCover?.sceneDidBecomeActive()
+        cover()?.sceneDidBecomeActive()
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
@@ -45,6 +53,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        cover()?.sceneDidEnterBackground()
         launcher?.services?.sceneDidEnterBackground()
     }
 
@@ -52,6 +61,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         for context in URLContexts {
             launcher?.services?.receive(url: context.url)
         }
-        sceneCover?.captureEntryArrived()
+        cover()?.captureEntryArrived()
     }
 }

@@ -141,14 +141,33 @@ final class SessionLifecycleCoordinatorTests: XCTestCase {
     }
 }
 
+final class FakeReadLock: ReadLockState {
+    var readsAreUnlocked: Bool
+    private var handlers: [() -> Void] = []
+
+    init(unlocked: Bool) { readsAreUnlocked = unlocked }
+
+    func observeReadScopeChanges(_ handler: @escaping () -> Void) -> AnyObject {
+        handlers.append(handler)
+        return NSObject()
+    }
+
+    func setUnlocked(_ unlocked: Bool) {
+        readsAreUnlocked = unlocked
+        handlers.forEach { $0() }
+    }
+}
+
 final class SceneCoverControllerTests: XCTestCase {
     private var presenter: RecordingRedactionPresenter!
+    private var readLock: FakeReadLock!
     private var cover: SceneCoverController!
 
     override func setUp() {
         super.setUp()
         presenter = RecordingRedactionPresenter()
-        cover = SceneCoverController(presenter: presenter)
+        readLock = FakeReadLock(unlocked: true)
+        cover = SceneCoverController(presenter: presenter, readLock: readLock)
     }
 
     func testResigningActiveShowsTheCover() {
@@ -175,11 +194,59 @@ final class SceneCoverControllerTests: XCTestCase {
         XCTAssertEqual(presenter.calls, ["show"])
     }
 
+    func testResigningWhileLockedShowsNoCover() {
+        readLock.setUnlocked(false)
+        cover.sceneWillResignActive()
+        cover.sceneDidBecomeActive()
+        XCTAssertEqual(presenter.calls, [])
+    }
+
+    func testUnlockingWhileInactiveShowsTheCoverUntilActive() {
+        readLock.setUnlocked(false)
+        cover.sceneWillResignActive()
+        readLock.setUnlocked(true)
+        XCTAssertEqual(presenter.calls, ["show"])
+        cover.sceneDidBecomeActive()
+        XCTAssertEqual(presenter.calls, ["show", "hide"])
+    }
+
+    func testRelockingWhileCoveredRemovesTheCover() {
+        cover.sceneWillResignActive()
+        readLock.setUnlocked(false)
+        XCTAssertEqual(presenter.calls, ["show", "hide"])
+    }
+
+    func testUnlockingWhileActiveShowsNoCover() {
+        readLock.setUnlocked(false)
+        cover.sceneDidBecomeActive()
+        readLock.setUnlocked(true)
+        XCTAssertEqual(presenter.calls, [])
+    }
+
+    func testEnteringTheBackgroundWhileUnlockedShowsTheCover() {
+        cover.sceneDidEnterBackground()
+        XCTAssertEqual(presenter.calls, ["show"])
+    }
+
+    func testEnteringTheBackgroundWhileLockedShowsNoCover() {
+        readLock.setUnlocked(false)
+        cover.sceneDidEnterBackground()
+        XCTAssertEqual(presenter.calls, [])
+    }
+
     func testCaptureEntryWhileCoveredShowsTheCaptureSurface() {
         cover.sceneWillResignActive()
         cover.captureEntryArrived()
         XCTAssertEqual(presenter.calls, ["show", "hide"])
         cover.sceneDidBecomeActive()
         XCTAssertEqual(presenter.calls, ["show", "hide"], "no second removal")
+    }
+
+    func testReadScopeChangeAfterCaptureEntryDoesNotBringBackTheCover() {
+        cover.sceneWillResignActive()
+        cover.captureEntryArrived()
+        readLock.setUnlocked(false)
+        readLock.setUnlocked(true)
+        XCTAssertEqual(presenter.calls, ["show", "hide"])
     }
 }
