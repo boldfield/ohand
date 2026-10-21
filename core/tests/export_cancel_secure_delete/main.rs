@@ -182,6 +182,28 @@ fn cancel_racing_an_export_leaves_no_canary_file_unless_success_was_reported() {
 }
 
 #[test]
+fn cancel_racing_an_export_never_removes_a_file_that_already_existed() {
+    let (directory, store_path) = export_fixture();
+    for run in 0..60u64 {
+        let output_path = directory.path().join(format!("precious-{run}.txt"));
+        std::fs::write(&output_path, b"caller-owned").unwrap();
+        let mut handle = 0;
+        must_succeed(unsafe {
+            ohand_core_open(store_path.as_ptr(), store_path.len(), &mut handle)
+        });
+        must_succeed(start_export(handle, &output_path));
+        std::thread::sleep(Duration::from_micros(run * 200));
+        must_succeed(ohand_core_cancel(handle));
+        must_succeed(ohand_core_close(handle));
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            b"caller-owned",
+            "run {run}: a pre-existing destination was removed or replaced"
+        );
+    }
+}
+
+#[test]
 fn cancel_after_success_is_reported_leaves_the_export() {
     let (directory, store_path) = export_fixture();
     let output_path = directory.path().join("export-complete.jsonl");

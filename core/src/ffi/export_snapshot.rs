@@ -41,7 +41,8 @@ use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,7 +133,11 @@ fn export_failure(error: ExportError) -> AbiFailure {
     }
 }
 
-fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFailure> {
+fn run(
+    database: &mut Database,
+    export: &ValidatedExport,
+    created_file: &AtomicBool,
+) -> Result<Value, AbiFailure> {
     if current_job_cancelled() {
         return Err(AbiFailure::CANCELLED);
     }
@@ -143,6 +148,7 @@ fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFa
     }
 
     let file = create_exclusive(&export.output_path).map_err(|_| write_failed())?;
+    created_file.store(true, Ordering::SeqCst);
     let mut writer = BufWriter::new(file);
     let written = write_snapshot_until(&snapshot, &mut writer, &current_job_cancelled)
         .map_err(export_failure)
@@ -158,6 +164,7 @@ fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFa
         Ok(summary) => summary,
         Err(failure) => {
             let _ = std::fs::remove_file(&export.output_path);
+            created_file.store(false, Ordering::SeqCst);
             return Err(failure);
         }
     };
@@ -181,10 +188,10 @@ fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFa
     }))
 }
 
-fn export_job(export: ValidatedExport, operation_id: u64) -> JobFn {
+fn export_job(export: ValidatedExport, operation_id: u64, created_file: Arc<AtomicBool>) -> JobFn {
     Box::new(move |database: &Mutex<Database>| {
         let mut database = lock(database);
-        let mut body = run(&mut database, &export)?;
+        let mut body = run(&mut database, &export, &created_file)?;
         if let Value::Object(fields) = &mut body {
             fields.insert("operation_id".to_string(), json!(operation_id));
         }
@@ -224,12 +231,18 @@ pub unsafe extern "C" fn ohand_core_start_export(
             serde_json::from_slice(bytes).map_err(|_| AbiFailure::INVALID_REQUEST)?;
         let export = command.validate()?;
         let output_path = export.output_path.clone();
+        // Only a file this job created is ours to remove; a file that already sat at the
+        // destination belongs to the caller.
+        let created_file = Arc::new(AtomicBool::new(false));
+        let discard_created_file = Arc::clone(&created_file);
         let discard: DiscardFn = Box::new(move || {
-            let _ = std::fs::remove_file(output_path);
+            if discard_created_file.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_file(output_path);
+            }
         });
         core.submit_with_discard(
             operation_id,
-            export_job(export, operation_id),
+            export_job(export, operation_id, created_file),
             Some(discard),
         )
     })
