@@ -96,6 +96,8 @@ private final class LostSaveAnswerControls: ProviderSettingsControlling, @unchec
 
     func listProfiles() async throws -> ProviderProfileListAnswer { try await service.listProfiles() }
 
+    func listRoutePolicy() async throws -> [RoutePolicyRoute] { try await service.listRoutePolicy() }
+
     func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome {
         try await service.checkConnection(profileVersion: profileVersion)
     }
@@ -162,7 +164,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         }.value
         root = built.root
         coordinator = built.coordinator
-        return ProviderSettingsModel.assembled(root: root)
+        return ProviderSettingsModel.assembled(root: root, offersOwnServer: true)
     }
 
     /// The one private-server model the core declares supported; any other model name is declared unverified.
@@ -399,7 +401,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         return ProviderSettingsModel(
             controls: LostSaveAnswerControls(service: liveRoot.providerConfiguration, coreCommits: coreCommits),
             credentials: liveRoot.providerCredentials, sweep: liveRoot.providerCredentialSweep,
-            readScope: { [weak liveRoot] in liveRoot?.readScope ?? .captureOnly })
+            readScope: { [weak liveRoot] in liveRoot?.readScope ?? .captureOnly }, offersOwnServer: true)
     }
 
     private func saveWithLostAnswer(_ model: ProviderSettingsModel) async {

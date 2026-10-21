@@ -19,7 +19,12 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
     /// Invoked in the middle of every call, so a test can change the session while it is in flight.
     var during: (() -> Void)?
 
+    /// The route policy the privacy read reports; a failure leaves the answer unknown.
+    var routePolicy: Result<[RoutePolicyRoute], Error> = .success([])
+
     init(listing: ProviderProfileListAnswer) { self.listing = .success(listing) }
+
+    func listRoutePolicy() async throws -> [RoutePolicyRoute] { try routePolicy.get() }
 
     func createProfile(_ draft: ProviderProfileDraft) async throws -> ProviderProfileCreatedAnswer {
         created.append(draft)
@@ -179,9 +184,18 @@ final class ProviderSettingsModelTests: XCTestCase {
     private let credentials = FakeProviderSettingsCredentials()
     private let sweep = FakeProviderSettingsSweep()
 
-    private func makeModel(_ controls: FakeProviderSettingsControls) -> ProviderSettingsModel {
+    private func makeModel(_ controls: FakeProviderSettingsControls, offersOwnServer: Bool = true) -> ProviderSettingsModel {
         ProviderSettingsModel(
-            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
+            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope },
+            offersOwnServer: offersOwnServer)
+    }
+
+    private static func routes(granting grants: [(capability: String, classes: [String])]) -> [RoutePolicyRoute] {
+        let granted = grants.map {
+            #"{"capability":"\#($0.capability)","destination_classes":[\#($0.classes.map { "\"\($0)\"" }.joined(separator: ","))]}"#
+        }.joined(separator: ",")
+        let json = #"[{"route_id":"route-personal","route_name":"Local capture","scope":"personal","granted_capabilities":[\#(granted)]}]"#
+        return try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(json.utf8))
     }
 
     private static let twoVersions = providerListing(
@@ -224,6 +238,70 @@ final class ProviderSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(controls.created, [])
         XCTAssertNotNil(model.saveState?.message)
+    }
+
+    func testAFreshFormPreselectsAnthropicAndShowsNoProblemUntilEditedOrSaveIsPressed() async {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await model.refresh()
+        XCTAssertEqual(model.draft.providerProtocol, .anthropic)
+        XCTAssertFalse(model.issues.isEmpty)
+        for field in [ProviderSettingsField.profileName, .model, .credential] {
+            XCTAssertEqual(model.visibleIssues(for: field), [], "an untouched form shows nothing")
+        }
+
+        model.draft.profileName = " "
+        XCTAssertEqual(model.visibleIssues(for: .profileName), [.profileNameRequired], "an edited field shows its own problem")
+        XCTAssertEqual(model.visibleIssues(for: .model), [], "other fields stay quiet")
+
+        await model.save()
+        XCTAssertTrue(model.hasAttemptedSave)
+        XCTAssertEqual(model.visibleIssues(for: .model), [.modelRequired])
+        XCTAssertEqual(model.visibleIssues(for: .credential), [.credentialRequired])
+
+        model.resetDraft()
+        XCTAssertEqual(model.visibleIssues(for: .model), [], "abandoning the form starts the next one untouched")
+    }
+
+    func testTheOwnServerTypeIsNotOfferedAndASavedOneCannotBecomeTheDefault() async {
+        XCTAssertFalse(ProviderSettingsModel.ownServerOffered, "this build does not offer a private server")
+        XCTAssertEqual(ProviderSettingsProtocol.offered(offersOwnServer: false), [.openAI, .anthropic])
+        XCTAssertEqual(ProviderSettingsProtocol.offered(offersOwnServer: true), ProviderSettingsProtocol.allCases)
+
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls, offersOwnServer: false)
+        await model.refresh()
+        let privateServer = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "private-v1" }!
+        XCTAssertTrue(model.isUnofferedOwnServer(privateServer))
+        XCTAssertFalse(model.canMakeDefault(privateServer))
+        XCTAssertNil(model.candidateVersion(for: .ownServer))
+        await model.makeDefault(privateServer)
+        XCTAssertEqual(controls.defaultsSet, [])
+        XCTAssertTrue(model.canMakeDefault(model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" }!))
+    }
+
+    func testTheAllowanceLineIsNeededOnlyForACloudDefaultThatIsNotYetAllowed() async {
+        let listing = providerListing(
+            versions: [("hosted", "hosted-v1", "anthropic", false, true)], defaultVersion: "hosted-v1")
+        let controls = FakeProviderSettingsControls(listing: listing)
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "no grant yet")
+
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        await model.refresh()
+        XCTAssertFalse(model.needsPrivacyAllowance, "the line goes once the route is granted")
+
+        controls.routePolicy = .success(Self.routes(granting: [("review", ["cloud"])]))
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "another capability does not allow interpretation")
+
+        controls.routePolicy = .failure(ProviderConfigurationError.unreadable)
+        await model.refresh()
+        XCTAssertFalse(model.needsPrivacyAllowance, "an unreadable policy shows no claim")
+
+        let none = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await none.refresh()
+        XCTAssertFalse(none.needsPrivacyAllowance, "no default, nothing to allow")
     }
 
     func testUnsupportedCombinationsAreRefused() {

@@ -202,7 +202,7 @@ extension ProviderSettingsModel {
     /// Drops the draft and deletes a secret stored for it that no saved version names, when the screen that held the
     /// form is left without saving.
     func abandonDraft() {
-        draft = ProviderSettingsDraft()
+        resetDraft()
     }
 }
 
@@ -259,9 +259,9 @@ struct ProviderSettingsView: View {
     static let tryAgainIdentifier = "provider-settings.try-again"
     static let defaultStateIdentifier = "provider-settings.default-state"
     static let saveStateIdentifier = "provider-settings.save-state"
-    static let issuesIdentifier = "provider-settings.issues"
     static let saveIdentifier = "provider-settings.save"
     static let localOnlyIdentifier = "provider-settings.local-only"
+    static let privacyAllowanceIdentifier = "provider-settings.privacy-allowance"
     static let defaultUnavailableIdentifier = "provider-settings.default-unavailable"
     static let nameFieldIdentifier = "provider-settings.field.name"
     static let modelFieldIdentifier = "provider-settings.field.model"
@@ -275,6 +275,10 @@ struct ProviderSettingsView: View {
     static let addProviderIdentifier = "provider-settings.add-provider"
     static let advancedIdentifier = "provider-settings.advanced"
     static let timeoutIdentifier = "provider-settings.field.timeout"
+    static func ownServerUnavailableIdentifier(_ version: String) -> String {
+        "provider-settings.own-server-unavailable.\(version)"
+    }
+    static func fieldIssueIdentifier(_ field: ProviderSettingsField) -> String { "provider-settings.issue.\(field)" }
     static func choiceIdentifier(_ choice: ProviderProcessingChoice) -> String { "provider-settings.choice.\(choice.rawValue)" }
     static func savedSecretFieldIdentifier(_ version: String) -> String { "provider-settings.saved-secret.field.\(version)" }
     static func replaceSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.replace.\(version)" }
@@ -349,9 +353,12 @@ struct ProviderSettingsView: View {
     @ViewBuilder
     private var loaded: some View {
         DSGroupedSection(title: "Sort my captures", footer: Self.footerText) {
-            ForEach(ProviderProcessingChoice.allCases) { choice in
+            ForEach(ProviderProcessingChoice.allCases.filter(isShown)) { choice in
                 choiceRow(choice)
             }
+        }
+        if model.needsPrivacyAllowance {
+            providerNote(ProviderSettingsText.privacyAllowanceNotice, identifier: Self.privacyAllowanceIdentifier)
         }
         if let availability = model.defaultAvailability, availability != .ready {
             providerNote(ProviderSettingsText.unavailableDefaultNotice, identifier: ProviderSettingsView.defaultUnavailableIdentifier)
@@ -378,6 +385,11 @@ struct ProviderSettingsView: View {
             }
             .hidden()
             .accessibilityHidden(true))
+    }
+
+    /// The own-server choice is hidden unless the build offers it or it is already the choice in use.
+    private func isShown(_ choice: ProviderProcessingChoice) -> Bool {
+        choice != .ownServer || model.offersOwnServer || model.isSelected(choice)
     }
 
     private func choiceRow(_ choice: ProviderProcessingChoice) -> some View {
@@ -407,7 +419,9 @@ struct ProviderAddView: View {
     var body: some View {
         SettingsScreenChrome(
             title: "Add provider", infoTitle: "Add provider",
-            infoParagraphs: [ProviderSettingsText.credentialNote, ProviderSettingsText.capabilityNote]
+            infoParagraphs: [
+                ProviderSettingsText.credentialNote, ProviderSettingsText.modelNote, ProviderSettingsText.capabilityNote,
+            ]
         ) {
             ProviderPhaseContent(model: model) {
                 ProviderProfileForm(model: model, showsAdvancedFields: false, secretBufferProbe: secretBufferProbe)
@@ -430,7 +444,8 @@ struct ProviderAdvancedView: View {
             title: "Advanced", infoTitle: "Advanced",
             infoParagraphs: [
                 ProviderSettingsText.defaultChangeNote, ProviderSettingsText.credentialNote,
-                ProviderSettingsText.connectionCheckNote, ProviderSettingsText.capabilityNote,
+                ProviderSettingsText.connectionCheckNote, ProviderSettingsText.modelNote,
+                ProviderSettingsText.capabilityNote,
             ]
         ) {
             ProviderPhaseContent(model: model) {
@@ -517,6 +532,11 @@ struct ProviderAdvancedView: View {
             if let state = model.connectionStates[version.profileVersion] {
                 versionNote(state.message, identifier: ProviderSettingsView.connectionStateIdentifier(version.profileVersion))
             }
+            if model.isUnofferedOwnServer(version) {
+                versionNote(
+                    ProviderSettingsText.ownServerUnavailableNotice,
+                    identifier: ProviderSettingsView.ownServerUnavailableIdentifier(version.profileVersion))
+            }
             if !version.revoked { savedSecretControls(version) }
             if model.canMakeDefault(version) {
                 DSPillButton(title: "Make default", style: .secondary) { Task { await model.makeDefault(version) } }
@@ -582,11 +602,6 @@ private struct ProviderProfileForm: View {
                 VStack(alignment: .leading, spacing: DSSpacing.xs) { fields }
                     .padding(DSSpacing.md)
             }
-            if !model.issues.isEmpty {
-                providerNote(
-                    model.issues.map(ProviderSettingsText.issue).joined(separator: " "),
-                    identifier: ProviderSettingsView.issuesIdentifier)
-            }
             DSPillButton(title: "Save profile", style: .primary) { Task { await model.save() } }
                 .reportRendered(ProviderSettingsView.saveIdentifier, text: "Save profile")
                 .disabled(!model.canSave)
@@ -600,7 +615,7 @@ private struct ProviderProfileForm: View {
     @ViewBuilder
     private var fields: some View {
         Picker("Provider type", selection: $model.draft.providerProtocol) {
-            ForEach(ProviderSettingsProtocol.allCases, id: \.self) { choice in
+            ForEach(ProviderSettingsProtocol.offered(offersOwnServer: model.offersOwnServer), id: \.self) { choice in
                 Text(ProviderSettingsText.protocolName(choice.rawValue)).tag(choice)
             }
         }
@@ -612,18 +627,21 @@ private struct ProviderProfileForm: View {
             .providerFieldStyle()
             .reportRendered(ProviderSettingsView.nameFieldIdentifier, text: model.draft.profileName)
             .accessibilityIdentifier(ProviderSettingsView.nameFieldIdentifier)
+        fieldIssues(.profileName)
         if model.draft.providerProtocol.takesEndpoint {
             TextField("https://server address", text: $model.draft.endpoint)
                 .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                 .providerFieldStyle()
                 .reportRendered(ProviderSettingsView.endpointFieldIdentifier, text: model.draft.endpoint)
                 .accessibilityIdentifier(ProviderSettingsView.endpointFieldIdentifier)
+            fieldIssues(.endpoint)
         }
-        TextField("Model", text: $model.draft.model)
+        TextField(ProviderSettingsText.modelPlaceholder, text: $model.draft.model)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .providerFieldStyle()
             .reportRendered(ProviderSettingsView.modelFieldIdentifier, text: model.draft.model)
             .accessibilityIdentifier(ProviderSettingsView.modelFieldIdentifier)
+        fieldIssues(.model)
         if showsAdvancedFields {
             Text(model.draft.credentialReference.isEmpty
                 ? "Credential name: filled in when you store a secret" : "Credential name: \(model.draft.credentialReference)")
@@ -636,6 +654,7 @@ private struct ProviderProfileForm: View {
             buttonIdentifier: ProviderSettingsView.storeSecretIdentifier,
             onSecret: { model.storeCredential($0) }, onRejected: { model.noteRejectedSecret($0) },
             bufferProbe: secretBufferProbe)
+        fieldIssues(.credential)
         if showsAdvancedFields {
             HStack {
                 DSPillButton(title: "Check saved", style: .plain) { model.checkCredential() }
@@ -662,6 +681,21 @@ private struct ProviderProfileForm: View {
                     .font(DSFont.rowLabel).foregroundColor(DSColor.ink.color)
             }
             .accessibilityIdentifier(ProviderSettingsView.timeoutIdentifier)
+            fieldIssues(.timeout)
+        }
+    }
+
+    /// The problems of one field, shown only after the first Save attempt or once the field has been edited.
+    @ViewBuilder
+    private func fieldIssues(_ field: ProviderSettingsField) -> some View {
+        let text = model.visibleIssues(for: field).map(ProviderSettingsText.issue).joined(separator: " ")
+        if !text.isEmpty {
+            Text(text)
+                .font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .reportRendered(ProviderSettingsView.fieldIssueIdentifier(field), text: text)
+                .accessibilityIdentifier(ProviderSettingsView.fieldIssueIdentifier(field))
         }
     }
 }
@@ -669,9 +703,12 @@ private struct ProviderProfileForm: View {
 extension ProviderSettingsModel {
     /// The model as the app assembles it: the root's provider configuration, credentials and credential sweep, gated by
     /// the root's read scope.
-    nonisolated static func assembled(root: ServiceCompositionRoot) -> ProviderSettingsModel {
+    nonisolated static func assembled(
+        root: ServiceCompositionRoot, offersOwnServer: Bool = ProviderSettingsModel.ownServerOffered
+    ) -> ProviderSettingsModel {
         ProviderSettingsModel(
             controls: root.providerConfiguration, credentials: root.providerCredentials,
-            sweep: root.providerCredentialSweep, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            sweep: root.providerCredentialSweep, readScope: { [weak root] in root?.readScope ?? .captureOnly },
+            offersOwnServer: offersOwnServer)
     }
 }

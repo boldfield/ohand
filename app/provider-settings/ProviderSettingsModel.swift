@@ -11,6 +11,8 @@ protocol ProviderSettingsControlling: AnyObject {
     func clearDefault(capability: String) async throws
     func listProfiles() async throws -> ProviderProfileListAnswer
     func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome
+    /// The existing route-policy read, used only to tell whether sending has been allowed under Privacy.
+    func listRoutePolicy() async throws -> [RoutePolicyRoute]
 }
 
 extension ProviderConfigurationService: ProviderSettingsControlling {}
@@ -64,6 +66,28 @@ enum ProviderSettingsProtocol: String, CaseIterable, Equatable {
     case selfHosted = "self_hosted"
 
     var takesEndpoint: Bool { self == .selfHosted }
+
+    /// The types the Add provider form offers. A private server is offered only when `offersOwnServer` is true.
+    static func offered(offersOwnServer: Bool) -> [ProviderSettingsProtocol] {
+        allCases.filter { $0 != .selfHosted || offersOwnServer }
+    }
+}
+
+/// The parts of the profile form that can show a problem of their own.
+enum ProviderSettingsField: Equatable, Hashable {
+    case profileName, model, endpoint, credential, timeout
+}
+
+extension ProviderSettingsIssue {
+    var field: ProviderSettingsField {
+        switch self {
+        case .profileNameRequired, .profileNameTooLong: return .profileName
+        case .modelRequired, .modelTooLong: return .model
+        case .endpointRequired, .endpointNotHTTPS, .endpointHasQueryOrFragment, .endpointNotAllowed: return .endpoint
+        case .credentialRequired, .credentialTooLong: return .credential
+        case .timeoutOutOfBounds: return .timeout
+        }
+    }
 }
 
 /// Whether a stored version can serve text interpretation, from the support the core declared.
@@ -127,7 +151,8 @@ struct ProviderSettingsDraft: Equatable {
     var profileName = ""
     /// Choosing a provider type that takes no address drops any address typed earlier: its field is no longer shown,
     /// so a leftover value would block saving with nothing on screen to clear.
-    var providerProtocol: ProviderSettingsProtocol = .openAI {
+    /// The person chooses a type deliberately: Anthropic is preselected, not the type that takes no address at all.
+    var providerProtocol: ProviderSettingsProtocol = .anthropic {
         didSet { if !providerProtocol.takesEndpoint { endpoint = "" } }
     }
     var endpoint = ""
@@ -174,9 +199,23 @@ final class ProviderSettingsModel: ObservableObject {
     /// What the last secret replacement, status check or removal reported for a stored version.
     @Published private(set) var savedCredentialStates: [String: ProviderSettingsCredentialState] = [:]
     @Published private(set) var connectionStates: [String: ProviderSettingsConnectionState] = [:]
+    /// Whether the capture route allows sending to a cloud provider; nil when the policy could not be read.
+    @Published private(set) var cloudSendingAllowed: Bool?
+    /// Set by the first Save attempt, after which every field's problem is shown.
+    @Published private(set) var hasAttemptedSave = false
+    /// The fields edited since the form was last empty; each shows its own problem once edited.
+    @Published private(set) var editedFields: Set<ProviderSettingsField> = []
     @Published var draft = ProviderSettingsDraft() {
-        didSet { if let added = addedReference, draft.credentialReference != added { discardAddedReference() } }
+        didSet {
+            if let added = addedReference, draft.credentialReference != added { discardAddedReference() }
+            noteEdits(from: oldValue)
+        }
     }
+
+    /// The one switch for the private-server option (M1 F39 in docs/features/m1-task-refinement.md). It is off because
+    /// this build composes no self-hosted capability and a saved profile mints a new version that nothing registers.
+    /// Turning it on later is this one line; a self-hosted profile already saved is listed either way.
+    static let ownServerOffered = false
 
     static let capability = "text_interpretation"
     static let defaultTimeoutSeconds = 60
@@ -190,6 +229,8 @@ final class ProviderSettingsModel: ObservableObject {
     private let credentials: ProviderSettingsCredentialControlling
     private let sweep: ProviderSettingsCredentialSweeping
     private let readScope: () -> CompositionReadScope
+    /// Whether "With my own server" and the "Private server" type are offered. See `ownServerOffered`.
+    let offersOwnServer: Bool
     private var generation = 0
     private var session = 0
     /// The opaque reference of a secret this screen stored that no saved profile version names yet. It is deleted if
@@ -199,8 +240,10 @@ final class ProviderSettingsModel: ObservableObject {
 
     nonisolated init(
         controls: ProviderSettingsControlling, credentials: ProviderSettingsCredentialControlling,
-        sweep: ProviderSettingsCredentialSweeping, readScope: @escaping () -> CompositionReadScope
+        sweep: ProviderSettingsCredentialSweeping, readScope: @escaping () -> CompositionReadScope,
+        offersOwnServer: Bool = ProviderSettingsModel.ownServerOffered
     ) {
+        self.offersOwnServer = offersOwnServer
         self.controls = controls
         self.credentials = credentials
         self.sweep = sweep
@@ -212,7 +255,29 @@ final class ProviderSettingsModel: ObservableObject {
 
     /// Everything wrong with the draft as it stands; empty means it can be saved.
     var issues: [ProviderSettingsIssue] { Self.issues(for: draft) }
-    var canSave: Bool { issues.isEmpty && !isSaving && phase == .loaded }
+    /// Save stays pressable on an incomplete form: the first press is what shows each field's problem.
+    var canSave: Bool { !isSaving && phase == .loaded }
+
+    /// What is wrong with `field`, shown only after the first Save attempt or once that field has been edited.
+    func visibleIssues(for field: ProviderSettingsField) -> [ProviderSettingsIssue] {
+        guard hasAttemptedSave || editedFields.contains(field) else { return [] }
+        return issues.filter { $0.field == field }
+    }
+
+    private func noteEdits(from previous: ProviderSettingsDraft) {
+        if draft.profileName != previous.profileName { editedFields.insert(.profileName) }
+        if draft.model != previous.model { editedFields.insert(.model) }
+        if draft.endpoint != previous.endpoint { editedFields.insert(.endpoint) }
+        if draft.credentialReference != previous.credentialReference { editedFields.insert(.credential) }
+        if draft.timeoutSeconds != previous.timeoutSeconds { editedFields.insert(.timeout) }
+    }
+
+    /// Empties the form and forgets what was edited or attempted, so the next form starts untouched.
+    func resetDraft() {
+        draft = ProviderSettingsDraft()
+        editedFields = []
+        hasAttemptedSave = false
+    }
 
     static func issues(for draft: ProviderSettingsDraft) -> [ProviderSettingsIssue] {
         var found: [ProviderSettingsIssue] = []
@@ -281,7 +346,19 @@ final class ProviderSettingsModel: ObservableObject {
     /// version is shown as unavailable, because the core refuses to dispatch to it.
     func canMakeDefault(_ version: ProviderProfileListAnswer.Version) -> Bool {
         !version.revoked && !isChangingDefault && availability(of: version) == .ready
-            && defaultVersion?.profileVersion != version.profileVersion
+            && !isUnofferedOwnServer(version) && defaultVersion?.profileVersion != version.profileVersion
+    }
+
+    /// Whether `version` is a private-server profile this build does not offer: still listed, never the default.
+    func isUnofferedOwnServer(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        version.providerProtocol == "self_hosted" && !offersOwnServer
+    }
+
+    /// Whether the default is a cloud provider whose destination the person's captures are not yet allowed to reach,
+    /// so new notes are still handled on the phone only. False when the policy could not be read.
+    var needsPrivacyAllowance: Bool {
+        guard case .hosted = operatingMode else { return false }
+        return cloudSendingAllowed == false
     }
 
     /// Reads the stored profiles and defaults again. When the screen loads, it first sweeps secrets nothing owns.
@@ -301,11 +378,25 @@ final class ProviderSettingsModel: ObservableObject {
             guard readScope() == .authenticated else { lock(); return }
             listing = fresh
             phase = .loaded
+            await refreshSendingAllowance(generation: thisGeneration)
         } catch {
             guard thisGeneration == generation else { return }
             if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
             guard readScope() == .authenticated else { lock(); return }
             phase = .failed(ProviderSettingsText.failure(error))
+        }
+    }
+
+    /// Reads the route policy again. A failed read leaves the answer unknown, which shows no prompt.
+    private func refreshSendingAllowance(generation thisGeneration: Int) async {
+        let routes = try? await controls.listRoutePolicy()
+        guard thisGeneration == generation, readScope() == .authenticated else { return }
+        cloudSendingAllowed = routes.map { routes in
+            routes.contains { route in
+                route.grantedCapabilities.contains {
+                    $0.capability == Self.capability && $0.destinationClasses.contains("cloud")
+                }
+            }
         }
     }
 
@@ -315,7 +406,8 @@ final class ProviderSettingsModel: ObservableObject {
         guard readScope() == .authenticated else { lock(); return }
         guard !isSaving, phase == .loaded else { return }
         guard issues.isEmpty else {
-            saveState = .failed(issues.map(ProviderSettingsText.issue).joined(separator: " "))
+            hasAttemptedSave = true
+            saveState = .failed(ProviderSettingsText.formNeedsAttention)
             return
         }
         let thisSession = session
@@ -340,7 +432,7 @@ final class ProviderSettingsModel: ObservableObject {
             guard mayPublish(from: thisSession) else { return }
             saveState = .saved
             credentialState = nil
-            draft = ProviderSettingsDraft()
+            resetDraft()
             await refresh()
         } catch {
             if let namedReference {
@@ -568,7 +660,8 @@ final class ProviderSettingsModel: ObservableObject {
         connectionStates = [:]
         savedCredentialStates = [:]
         discardAddedReference()
-        draft = ProviderSettingsDraft()
+        resetDraft()
+        cloudSendingAllowed = nil
         phase = .idle
     }
 
