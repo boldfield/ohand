@@ -515,6 +515,43 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM items WHERE item_id = '\(itemID)'"), "1")
     }
 
+    private func interpretPin(of itemID: String) -> String {
+        scalar("SELECT IFNULL(profile_version, '') FROM jobs WHERE item_id = '\(itemID)' AND job_type = 'interpret'")
+    }
+
+    func testAnOpenAIGrantKeepsThePrivacyLineForAnAnthropicDefaultUntilItsOwnGrantPinsNewCaptures() async throws {
+        let model = try await makeModel()
+        await model.refresh()
+        fill(model, name: "openai", providerProtocol: .openAI)
+        await model.save()
+        fill(model, name: "anthropic", providerProtocol: .anthropic)
+        await model.save()
+        let openAI = try version(model, profile: "openai")
+        let anthropic = try version(model, profile: "anthropic")
+        let policy = root.providerConfiguration
+
+        await model.makeDefault(openAI)
+        XCTAssertTrue(model.needsPrivacyAllowance, "nothing is granted yet")
+        _ = try await policy.grant(
+            routeID: "route-personal", capability: ProviderSettingsModel.capability, profileVersion: openAI.profileVersion)
+        await model.refresh()
+        XCTAssertFalse(model.needsPrivacyAllowance, "the grant covers the OpenAI default")
+
+        await model.makeDefault(anthropic)
+        XCTAssertEqual(model.defaultVersion?.profileVersion, anthropic.profileVersion)
+        XCTAssertTrue(model.needsPrivacyAllowance, "the OpenAI grant does not cover the Anthropic default")
+        let heldBack = try await saveCapture()
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE item_id = '\(heldBack)' AND job_type = 'interpret'"), "1")
+        XCTAssertEqual(interpretPin(of: heldBack), "", "the core keeps this capture on the phone, as the line says")
+
+        _ = try await policy.grant(
+            routeID: "route-personal", capability: ProviderSettingsModel.capability, profileVersion: anthropic.profileVersion)
+        await model.refresh()
+        XCTAssertFalse(model.needsPrivacyAllowance, "the line goes once the Anthropic version is covered")
+        let sent = try await saveCapture()
+        XCTAssertEqual(interpretPin(of: sent), anthropic.profileVersion, "a new capture is pinned to the Anthropic default")
+    }
+
     func testARelockedSessionShowsNothingFromTheCore() async throws {
         let model = try await makeModel()
         await model.refresh()

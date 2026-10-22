@@ -11,7 +11,7 @@ protocol ProviderSettingsControlling: AnyObject {
     func clearDefault(capability: String) async throws
     func listProfiles() async throws -> ProviderProfileListAnswer
     func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome
-    /// The existing route-policy read, used only to tell whether sending has been allowed under Privacy.
+    /// The route-policy read, used only to tell whether the default's version is allowed under Privacy.
     func listRoutePolicy() async throws -> [RoutePolicyRoute]
 }
 
@@ -199,8 +199,9 @@ final class ProviderSettingsModel: ObservableObject {
     /// What the last secret replacement, status check or removal reported for a stored version.
     @Published private(set) var savedCredentialStates: [String: ProviderSettingsCredentialState] = [:]
     @Published private(set) var connectionStates: [String: ProviderSettingsConnectionState] = [:]
-    /// Whether the capture route allows sending to a cloud provider; nil when the policy could not be read.
-    @Published private(set) var cloudSendingAllowed: Bool?
+    /// The profile versions the capture route's `text_interpretation` grant covers, as the core reports them. Empty when
+    /// nothing is granted, the route is unknown or the policy could not be read, so none of those clears the prompt.
+    @Published private(set) var coveredProfileVersions: Set<String> = []
     /// The route new captures are pinned to. Only a grant on this route counts; nil means it cannot be established.
     private let captureRouteID: String?
     /// Set by the first Save attempt, after which every field's problem is shown.
@@ -358,23 +359,11 @@ final class ProviderSettingsModel: ObservableObject {
     }
 
     /// Whether the default is a cloud provider whose destination the person's captures are not yet allowed to reach,
-    /// so new notes are still handled on the phone only. Only an exact positive on the capture route clears it: an
-    /// unreadable policy or an unknown route keeps the prompt. The existing read lists destination classes, not origins,
-    /// so a cloud grant made for another provider cannot be told apart from one for this default.
+    /// so new notes are still handled on the phone only. It clears only when the capture route's grant covers the
+    /// default's exact version, the test core applies before sending: a grant made for another provider does not count.
     var needsPrivacyAllowance: Bool {
-        guard case .hosted = operatingMode else { return false }
-        return cloudSendingAllowed != true || cloudGrantMayBelongToAnotherProvider
-    }
-
-    /// Whether a stored profile of another hosted provider exists, so a cloud-class grant could be the one made for it:
-    /// core authorizes exact origins, and the existing read cannot say which provider a grant covers. Fails closed.
-    private var cloudGrantMayBelongToAnotherProvider: Bool {
-        guard let listing, let current = defaultVersion else { return false }
-        return listing.profiles.contains { profile in
-            profile.versions.contains {
-                $0.providerProtocol != current.providerProtocol && $0.providerProtocol != "self_hosted"
-            }
-        }
+        guard case .hosted = operatingMode, let current = defaultVersion else { return false }
+        return !coveredProfileVersions.contains(current.profileVersion)
     }
 
     /// Reads the stored profiles and defaults again. When the screen loads, it first sweeps secrets nothing owns.
@@ -403,18 +392,13 @@ final class ProviderSettingsModel: ObservableObject {
         }
     }
 
-    /// Reads the route policy again. A failed read leaves the answer unknown, which shows no prompt.
+    /// Reads the route policy again. A failed read covers nothing, which keeps the prompt.
     private func refreshSendingAllowance(generation thisGeneration: Int) async {
         let routes = try? await controls.listRoutePolicy()
         guard thisGeneration == generation, readScope() == .authenticated else { return }
-        cloudSendingAllowed = routes.map { routes in
-            routes.contains { route in
-                route.routeID == captureRouteID
-                    && route.grantedCapabilities.contains {
-                        $0.capability == Self.capability && $0.destinationClasses.contains("cloud")
-                    }
-            }
-        }
+        let grant = routes?.first { $0.routeID == captureRouteID }?.grantedCapabilities
+            .first { $0.capability == Self.capability }
+        coveredProfileVersions = Set(grant?.coveredProfileVersions ?? [])
     }
 
     /// Stores the draft as a new immutable profile version. It does not become the default. Accepted only once the
@@ -678,7 +662,7 @@ final class ProviderSettingsModel: ObservableObject {
         savedCredentialStates = [:]
         discardAddedReference()
         resetDraft()
-        cloudSendingAllowed = nil
+        coveredProfileVersions = []
         phase = .idle
     }
 

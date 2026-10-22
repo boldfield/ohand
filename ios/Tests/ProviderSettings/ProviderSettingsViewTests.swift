@@ -197,7 +197,7 @@ final class ProviderSettingsViewTests: XCTestCase {
                     text(ProviderSettingsView.privacyAllowanceIdentifier), ProviderSettingsText.privacyAllowanceNotice, "\(style)")
                 XCTAssertEqual(ProviderSettingsText.privacyAllowanceNotice, "Allow it under Privacy to start sending notes.")
 
-                let granted = #"[{"route_id":"r","route_name":"Local capture","scope":"personal","granted_capabilities":[{"capability":"text_interpretation","destination_classes":["cloud"]}]}]"#
+                let granted = #"[{"route_id":"r","route_name":"Local capture","scope":"personal","granted_capabilities":[{"capability":"text_interpretation","destination_classes":["cloud"],"covered_profile_versions":["cloud-v1"]}]}]"#
                 controls.routePolicy = .success(try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(granted.utf8)))
                 await model.refresh()
                 await settle()

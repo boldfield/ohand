@@ -191,10 +191,11 @@ final class ProviderSettingsModelTests: XCTestCase {
     }
 
     private static func routes(
-        granting grants: [(capability: String, classes: [String])], routeID: String = "route-personal"
+        granting grants: [(capability: String, covered: [String])], routeID: String = "route-personal"
     ) -> [RoutePolicyRoute] {
-        let granted = grants.map {
-            #"{"capability":"\#($0.capability)","destination_classes":[\#($0.classes.map { "\"\($0)\"" }.joined(separator: ","))]}"#
+        let granted = grants.map { grant in
+            let covered = grant.covered.map { "\"\($0)\"" }.joined(separator: ",")
+            return #"{"capability":"\#(grant.capability)","destination_classes":["cloud"],"covered_profile_versions":[\#(covered)]}"#
         }.joined(separator: ",")
         let json = #"[{"route_id":"\#(routeID)","route_name":"Local capture","scope":"personal","granted_capabilities":[\#(granted)]}]"#
         return try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(json.utf8))
@@ -289,11 +290,11 @@ final class ProviderSettingsModelTests: XCTestCase {
         await model.refresh()
         XCTAssertTrue(model.needsPrivacyAllowance, "no grant yet")
 
-        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["hosted-v1"])]))
         await model.refresh()
-        XCTAssertFalse(model.needsPrivacyAllowance, "the line goes once the route is granted")
+        XCTAssertFalse(model.needsPrivacyAllowance, "the line goes once the grant covers the default's version")
 
-        controls.routePolicy = .success(Self.routes(granting: [("review", ["cloud"])]))
+        controls.routePolicy = .success(Self.routes(granting: [("review", ["hosted-v1"])]))
         await model.refresh()
         XCTAssertTrue(model.needsPrivacyAllowance, "another capability does not allow interpretation")
 
@@ -301,17 +302,17 @@ final class ProviderSettingsModelTests: XCTestCase {
         await model.refresh()
         XCTAssertTrue(model.needsPrivacyAllowance, "an unreadable policy keeps the prompt")
 
-        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])], routeID: "route-other"))
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["hosted-v1"])], routeID: "route-other"))
         await model.refresh()
         XCTAssertTrue(model.needsPrivacyAllowance, "a grant on a different route does not allow this capture route")
 
-        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["private_server"])]))
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", [])]))
         await model.refresh()
-        XCTAssertTrue(model.needsPrivacyAllowance, "a non-cloud grant does not allow a cloud default")
+        XCTAssertTrue(model.needsPrivacyAllowance, "a grant that covers no version does not allow the default")
 
         let unknownRoute = ProviderSettingsModel(
             controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
-        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["hosted-v1"])]))
         await unknownRoute.refresh()
         XCTAssertTrue(unknownRoute.needsPrivacyAllowance, "without a known capture route nothing is proven")
 
@@ -320,24 +321,24 @@ final class ProviderSettingsModelTests: XCTestCase {
         XCTAssertFalse(none.needsPrivacyAllowance, "no default, nothing to allow")
     }
 
-    func testACloudGrantThatMayBelongToAnotherProviderDoesNotClearTheLine() async {
+    func testAGrantCoveringAnotherProvidersVersionDoesNotClearTheLine() async {
         let mixed = providerListing(
             versions: [("openai", "openai-v1", "open_ai", false, true), ("hosted", "hosted-v1", "anthropic", false, true)],
             defaultVersion: "hosted-v1")
         let controls = FakeProviderSettingsControls(listing: mixed)
-        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["openai-v1"])]))
         let model = makeModel(controls)
         await model.refresh()
-        XCTAssertTrue(model.needsPrivacyAllowance, "an OpenAI-era grant cannot be told from one for the Anthropic default")
+        XCTAssertTrue(model.needsPrivacyAllowance, "an OpenAI-only grant does not cover the Anthropic default")
 
-        let singleControls = FakeProviderSettingsControls(
-            listing: providerListing(
-                versions: [("hosted", "hosted-v1", "anthropic", false, true), ("hosted", "hosted-v2", "anthropic", false, true)],
-                defaultVersion: "hosted-v2"))
-        singleControls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["cloud"])]))
-        let single = makeModel(singleControls)
-        await single.refresh()
-        XCTAssertFalse(single.needsPrivacyAllowance, "one hosted provider only: the grant is that provider's")
+        controls.routePolicy = .success(Self.routes(granting: [("text_interpretation", ["hosted-v1", "openai-v1"])]))
+        await model.refresh()
+        XCTAssertFalse(model.needsPrivacyAllowance, "with both providers stored, covering the default clears the line")
+
+        let legacy = #"[{"route_id":"route-personal","route_name":"Local capture","scope":"personal","granted_capabilities":[{"capability":"text_interpretation","destination_classes":["cloud"]}]}]"#
+        controls.routePolicy = .success(try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(legacy.utf8)))
+        await model.refresh()
+        XCTAssertTrue(model.needsPrivacyAllowance, "a listing without per-version coverage covers nothing")
     }
 
     func testUnsupportedCombinationsAreRefused() {
