@@ -1,6 +1,14 @@
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
+@testable import OhAnd
+
+/// A provider that is never reachable, as on a fresh install with no provider configured.
+private final class UnreachableProviderSender: ProviderRequestSender {
+    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        throw URLError(.notConnectedToInternet)
+    }
+}
 
 /// Capture never waits on a permission, a provider or a notification: a fresh install saves a silent capture locally, and
 /// a recording whose speech permission is refused keeps its audio and goes nowhere.
@@ -28,23 +36,59 @@ final class CaptureWithoutPermissionsTests: XCTestCase {
         return condition()
     }
 
-    func testFreshInstallWithNoProviderSavesASilentCaptureLocally() throws {
+    private final class SearchBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<RetrievalPage, RetrievalSearchFailure>?
+
+        var value: Result<RetrievalPage, RetrievalSearchFailure>? {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ result: Result<RetrievalPage, RetrievalSearchFailure>) {
+            lock.lock(); stored = result; lock.unlock()
+        }
+    }
+
+    func testFreshInstallWithNoProviderAndDeniedNotificationsSavesAndRetrievesASilentCapture() throws {
         let storageRoot = directory.appendingPathComponent("storage", isDirectory: true)
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        let deniedCenter = FakeNotificationCenter()
+        deniedCenter.authorizationStatus = .denied
+        let module = RetrievalSearchModule()
         let root = try ServiceCompositionRoot(
-            configuration: CompositionConfiguration(
-                storageRootPath: storageRoot.path, captureRouteID: "permissions-route", jobRetryDelaySeconds: 3600))
+            testing: CompositionConfiguration(
+                storageRootPath: storageRoot.path, captureRouteID: "permissions-route", jobRetryDelaySeconds: 3600),
+            environment: CompositionEnvironment(
+                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+            adapters: .injectedForTests(
+                sender: UnreachableProviderSender(), readSession: session,
+                notificationCenter: deniedCenter, reachability: FakeReachability(reachable: false)),
+            modules: [module])
         defer { root.shutDown() }
 
-        // Nothing has been granted, no provider is configured, and no permission has been requested.
+        // Notifications are denied, no provider is configured, and no other permission has been requested.
         var outcome: CompositionSaveOutcome?
-        root.saveText(captureID: UUID().uuidString.lowercased(), text: "synthetic silent capture", capturedAt: Date()) {
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: "synthetic silent roofer capture", capturedAt: Date()) {
             outcome = $0
         }
         XCTAssertTrue(pump(until: { outcome != nil }), "the save completes")
-        guard case .saved(_, _, let alreadySaved)? = outcome else {
+        guard case .saved(_, let itemID, let alreadySaved)? = outcome else {
             return XCTFail("expected a confirmed local save, got \(String(describing: outcome))")
         }
         XCTAssertFalse(alreadySaved)
+
+        session.authenticate(reason: "test") { _ in }
+        XCTAssertEqual(session.scope, .authenticated)
+        let box = SearchBox()
+        module.search(RetrievalSearchRequest(query: "roofer")) { box.set($0) }
+        XCTAssertTrue(pump(until: { box.value != nil }), "the search completes")
+        guard case .success(let page)? = box.value else {
+            return XCTFail("expected the capture to be retrieved, got \(String(describing: box.value))")
+        }
+        XCTAssertEqual(page.rows.map(\.reference.value), [itemID])
+        XCTAssertEqual(page.rows.first?.text, "synthetic silent roofer capture")
+        XCTAssertTrue(deniedCenter.addedRequests.isEmpty, "no notification was scheduled")
     }
 
     func testRefusedSpeechPermissionKeepsTheAudioAndAppliesNothing() async throws {

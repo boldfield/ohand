@@ -48,6 +48,8 @@ final class AppServices {
     /// the foreground. The ask happens when it next becomes active.
     private var notificationAskPending = false
     private var notificationAskInFlight = false
+    /// The OS was already asked during this foreground stay, so a prompt that left the state undecided is not repeated.
+    private var notificationAskSpent = false
 
     /// Builds the production root over the app's own storage, with the lifecycle coordinator attached.
     static func production(
@@ -159,10 +161,7 @@ final class AppServices {
             DispatchQueue.main.async { self?.routePromptTap(event) }
         }
         root.setReminderReportObserver { [weak self] report in
-            guard report.readiness.reminders.contains(where: { $0.outlook == .undeliverable(.permissionNotRequested) }) else {
-                return
-            }
-            DispatchQueue.main.async { self?.askForNotificationsAtReminderBoundary() }
+            DispatchQueue.main.async { self?.handleReminderReport(report) }
         }
         notificationHooks.installDelegate(root.notificationCenterDelegate)
         root.start(isActive: isActive)
@@ -183,7 +182,10 @@ final class AppServices {
             },
             lifecycleCenter.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
-            ) { [weak self] _ in self?.quietAttemptSpent = false },
+            ) { [weak self] _ in
+                self?.quietAttemptSpent = false
+                self?.notificationAskSpent = false
+            },
         ]
     }
 
@@ -200,19 +202,30 @@ final class AppServices {
 
     /// A reminder cannot alert because the OS was never asked: this is the one point, besides turning on the daily prompt,
     /// where the app asks. It never asks at launch, and only in the foreground; otherwise it waits for the next activation.
+    func handleReminderReport(_ report: NotificationPermissionReport) {
+        guard report.readiness.reminders.contains(where: { $0.outlook == .undeliverable(.permissionNotRequested) }) else {
+            return
+        }
+        askForNotificationsAtReminderBoundary()
+    }
+
     private func askForNotificationsAtReminderBoundary() {
         guard isForeground() else {
             notificationAskPending = true
             return
         }
         notificationAskPending = false
-        guard !notificationAskInFlight else { return }
+        guard !notificationAskInFlight, !notificationAskSpent else { return }
         notificationAskInFlight = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             let outcome = await self.notificationPermission.askIfNeverRequested()
             self.notificationAskInFlight = false
-            if case .asked = outcome { _ = try? await self.root.reconcileReminders() }
+            guard case .asked(let state) = outcome else { return }
+            self.notificationAskSpent = true
+            // Only a pass under a new answer can change anything; a prompt that left the state undecided would just report
+            // the same outlook again.
+            if state != .notRequested { _ = try? await self.root.reconcileReminders() }
         }
     }
 
