@@ -25,10 +25,10 @@ use super::capture::OHAND_CORE_MAX_CAPTURE_REQUEST_BYTES;
 use super::core_handle::exports::guarded;
 use super::core_handle::exports::{OhandCoreHandle, OhandCoreResult, OHAND_CORE_MAX_PATH_BYTES};
 use super::core_handle::failure::AbiFailure;
-use super::core_handle::instance::{self, lock, JobFn};
+use super::core_handle::instance::{self, current_job_cancelled, lock, DiscardFn, JobFn};
 use crate::export::{
-    read_core_snapshot, write_snapshot, AudioInclusion, ExportError, ExportRequest, ExportedAudio,
-    ReadAuthentication,
+    read_core_snapshot, write_snapshot_until, AudioInclusion, ExportError, ExportRequest,
+    ExportedAudio, ReadAuthentication,
 };
 use crate::providers::contracts::ErrorClass;
 use crate::store::events::ItemScope;
@@ -41,7 +41,8 @@ use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,26 +129,42 @@ fn export_failure(error: ExportError) -> AbiFailure {
         }
         ExportError::Storage(error) => AbiFailure::from_store(&error, AbiFailure::STORAGE_ERROR),
         ExportError::Write(_) => write_failed(),
+        ExportError::Cancelled => AbiFailure::CANCELLED,
     }
 }
 
-fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFailure> {
+fn run(
+    database: &mut Database,
+    export: &ValidatedExport,
+    created_file: &AtomicBool,
+) -> Result<Value, AbiFailure> {
+    if current_job_cancelled() {
+        return Err(AbiFailure::CANCELLED);
+    }
     let snapshot =
         read_core_snapshot(database, &export.request, Utc::now()).map_err(export_failure)?;
+    if current_job_cancelled() {
+        return Err(AbiFailure::CANCELLED);
+    }
 
     let file = create_exclusive(&export.output_path).map_err(|_| write_failed())?;
+    created_file.store(true, Ordering::SeqCst);
     let mut writer = BufWriter::new(file);
-    let written = write_snapshot(&snapshot, &mut writer)
+    let written = write_snapshot_until(&snapshot, &mut writer, &current_job_cancelled)
         .map_err(export_failure)
         .and_then(|summary| {
             let file = writer.into_inner().map_err(|_| write_failed())?;
             file.sync_all().map_err(|_| write_failed())?;
+            if current_job_cancelled() {
+                return Err(AbiFailure::CANCELLED);
+            }
             Ok(summary)
         });
     let summary = match written {
         Ok(summary) => summary,
         Err(failure) => {
             let _ = std::fs::remove_file(&export.output_path);
+            created_file.store(false, Ordering::SeqCst);
             return Err(failure);
         }
     };
@@ -171,10 +188,10 @@ fn run(database: &mut Database, export: &ValidatedExport) -> Result<Value, AbiFa
     }))
 }
 
-fn export_job(export: ValidatedExport, operation_id: u64) -> JobFn {
+fn export_job(export: ValidatedExport, operation_id: u64, created_file: Arc<AtomicBool>) -> JobFn {
     Box::new(move |database: &Mutex<Database>| {
         let mut database = lock(database);
-        let mut body = run(&mut database, &export)?;
+        let mut body = run(&mut database, &export, &created_file)?;
         if let Value::Object(fields) = &mut body {
             fields.insert("operation_id".to_string(), json!(operation_id));
         }
@@ -213,7 +230,21 @@ pub unsafe extern "C" fn ohand_core_start_export(
         let command: Command =
             serde_json::from_slice(bytes).map_err(|_| AbiFailure::INVALID_REQUEST)?;
         let export = command.validate()?;
-        core.submit(operation_id, export_job(export, operation_id))
+        let output_path = export.output_path.clone();
+        // Only a file this job created is ours to remove; a file that already sat at the
+        // destination belongs to the caller.
+        let created_file = Arc::new(AtomicBool::new(false));
+        let discard_created_file = Arc::clone(&created_file);
+        let discard: DiscardFn = Box::new(move || {
+            if discard_created_file.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_file(output_path);
+            }
+        });
+        core.submit_with_discard(
+            operation_id,
+            export_job(export, operation_id, created_file),
+            Some(discard),
+        )
     })
 }
 
