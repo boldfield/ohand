@@ -69,7 +69,7 @@ private let notificationsGranted = [PermissionEntry(kind: .notifications, status
 final class StatusModelTests: XCTestCase {
     private func model(
         health: ProcessingHealthOutcome, permissions: [PermissionEntry] = notificationsGranted,
-        retrier: CountingRetrier = CountingRetrier()
+        retrier: CountingRetrier = CountingRetrier(), scheduling: NotificationPermissionReport? = nil
     ) -> (StatusModel, ScriptedHealth, CountingRetrier) {
         let scripted = ScriptedHealth(health)
         return (
