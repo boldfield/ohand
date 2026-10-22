@@ -9,6 +9,7 @@ use crate::core_boundary::{
 };
 use chrono::{TimeZone, Utc};
 use ohand_core::ffi::item_detail::ohand_core_start_item_detail;
+use ohand_core::ffi::recent_items::ohand_core_start_recent_items;
 use ohand_core::ffi::retrieval::ohand_core_start_retrieval;
 use ohand_core::lifecycle::delete_intent::mark_deletion_intent;
 use ohand_core::retrieval::query::{
@@ -233,4 +234,153 @@ fn a_deleted_item_disappears_from_search_listing_and_detail() {
         !store.dump_state().contains(PERSONAL_CANARY),
         "deleted text remains readable in the store"
     );
+}
+
+fn recent(core: &mut OpenCore, scopes: &[&str]) -> Outcome {
+    core.run(
+        ohand_core_start_recent_items,
+        &json!({ "read_scopes": scopes }),
+    )
+}
+
+#[test]
+fn recent_items_show_only_authorized_scopes_current_text_and_no_deleted_items() {
+    let store = MixedStore::new();
+    let mut core = OpenCore::open(&store.store_path);
+
+    let work = recent(&mut core, &["work"]);
+    assert!(work.is_ok(), "{}", work.text());
+    assert_eq!(work.json()["items"].as_array().unwrap().len(), 1);
+    assert_no_content_beyond(&work, &[WORK_CANARY]);
+
+    // A corrected item shows its current text, never the text it replaced.
+    let personal = recent(&mut core, &["personal"]);
+    assert_eq!(personal.json()["items"].as_array().unwrap().len(), 2);
+    assert_no_content_beyond(&personal, &[PERSONAL_CANARY, PERSONAL_CORRECTED_CANARY]);
+    assert!(!personal.text().contains(WORK_CANARY));
+
+    let mut database = store.database();
+    let personal_item = store.seeded.personal_item.clone();
+    let revision: i32 = database
+        .conn()
+        .query_row(
+            "SELECT revision FROM items WHERE item_id = ?",
+            [&personal_item],
+            |row| row.get(0),
+        )
+        .unwrap();
+    mark_deletion_intent(
+        &mut database,
+        &personal_item,
+        revision,
+        Utc.with_ymd_and_hms(2026, 10, 9, 9, 0, 0).unwrap(),
+    )
+    .unwrap();
+    let after = recent(&mut core, &["personal", "work"]);
+    assert_eq!(after.json()["items"].as_array().unwrap().len(), 2);
+    assert!(!after.text().contains(PERSONAL_CANARY));
+    assert!(!after.text().contains(&personal_item));
+}
+
+#[test]
+fn a_relocked_session_reads_nothing_through_any_read_path() {
+    let store = MixedStore::new();
+    let mut core = OpenCore::open(&store.store_path);
+    let personal = store.seeded.personal_item.clone();
+
+    // While authenticated, native passes the scopes and reads succeed.
+    assert!(retrieve(&mut core, list(&["personal", "work"])).is_ok());
+    assert!(detail(&mut core, &personal, &["personal"]).is_ok());
+    assert!(recent(&mut core, &["personal", "work"]).is_ok());
+
+    // Relocking returns to capture-only: native has no scope to pass, so nothing may come back,
+    // and the refusals are the same as a session that was never unlocked.
+    let fresh_store = MixedStore::new();
+    let mut fresh = OpenCore::open(&fresh_store.store_path);
+    let relocked_reads: [(&str, Outcome, Outcome); 4] = [
+        (
+            "search",
+            retrieve(&mut core, search(PERSONAL_CANARY, &[])),
+            retrieve(&mut fresh, search(PERSONAL_CANARY, &[])),
+        ),
+        (
+            "list",
+            retrieve(&mut core, list(&[])),
+            retrieve(&mut fresh, list(&[])),
+        ),
+        (
+            "detail",
+            detail(&mut core, &personal, &[]),
+            detail(&mut fresh, &personal, &[]),
+        ),
+        ("recent", recent(&mut core, &[]), recent(&mut fresh, &[])),
+    ];
+    for (path, relocked, never_unlocked) in relocked_reads {
+        assert!(!relocked.is_ok(), "{path} answered a relocked session");
+        assert_eq!(relocked.code(), "invalid_request", "{path}");
+        assert_eq!(relocked.payload, never_unlocked.payload, "{path}");
+        assert_no_content_beyond(&relocked, &[]);
+        assert!(!relocked.text().contains(personal.as_str()), "{path}");
+    }
+}
+
+#[test]
+fn log_bound_failures_name_no_stored_content() {
+    // The read, export and notification paths emit no logs of their own (no tracing, println or
+    // eprintln in the core library); the log-bound surfaces are the Debug and Display of their
+    // errors and the normalized ABI failures. Assert both stay content-free, and that none of
+    // the library sources acquired a logging call that would need its own redaction test.
+    use ohand_core::export::ExportError;
+    use ohand_core::ffi::core_handle::failure::AbiFailure;
+
+    let store = MixedStore::new();
+    let mut core = OpenCore::open(&store.store_path);
+    let rendered = [
+        format!("{:?}", ExportError::NotAuthenticated),
+        ExportError::NoScopeSelected.to_string(),
+        ExportError::Cancelled.to_string(),
+        format!("{:?}", AbiFailure::INVALID_REQUEST),
+        retrieve(&mut core, search(PERSONAL_CANARY, &[])).text(),
+        detail(&mut core, "no-such-item", &["work"]).text(),
+        recent(&mut core, &[]).text(),
+    ];
+    for text in &rendered {
+        for canary in ALL_CANARIES {
+            assert!(!text.contains(canary), "{canary} in {text}");
+        }
+    }
+
+    let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![sources];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs")
+                || name.contains("test")
+                || path.to_string_lossy().contains("/tests/")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for logging in [
+                "println!(",
+                "eprintln!(",
+                "tracing::",
+                "log::info",
+                "log::debug",
+                "dbg!(",
+            ] {
+                assert!(
+                    !source.contains(logging),
+                    "{} gained a logging call ({logging}); add a redaction test for it",
+                    path.display()
+                );
+            }
+        }
+    }
 }

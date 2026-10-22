@@ -2,7 +2,7 @@
 //! application code leaves behind. A canary may be readable only where the user asked to read it.
 
 use crate::core_boundary::{
-    file_names, MixedStore, OpenCore, PERSONAL_CANARY, PERSONAL_CORRECTED_CANARY,
+    file_names, MixedStore, OpenCore, Outcome, PERSONAL_CANARY, PERSONAL_CORRECTED_CANARY,
     PERSONAL_ORIGINAL_CANARY, PERSONAL_ROUTE, WORK_CANARY,
 };
 use crate::fixtures::{runner_config, setup_time, SteppedClock};
@@ -279,19 +279,68 @@ fn a_deleted_item_is_absent_from_every_export_and_from_the_application_directory
     assert!(!exported.contains(&personal), "a tombstone was exported");
     assert!(exported.contains(WORK_CANARY));
 
-    // No other file application code wrote holds the deleted text. The store's own file is
-    // covered by the logical dump in the read tests: SQLite may keep freed pages until reuse.
+    // No file application code wrote holds the deleted text, the store's own database,
+    // write-ahead log and journal included (secure_delete and the search index's secure-delete
+    // option overwrite freed content). The search tokenizer lowercases, so scan case-blind.
     drop(core);
     drop(database);
+    let needle = PERSONAL_CANARY.to_lowercase();
+    let mut scanned_store = false;
     for name in file_names(&store.root) {
         let path = store.root.join(&name);
-        if path.is_file() && !name.starts_with("ohand.db") {
+        if path.is_file() {
+            scanned_store |= name == "ohand.db";
             let bytes = std::fs::read(&path).unwrap();
-            let readable = String::from_utf8_lossy(&bytes);
+            let readable = String::from_utf8_lossy(&bytes).to_lowercase();
             assert!(
-                !readable.contains(PERSONAL_CANARY),
+                !readable.contains(&needle),
                 "{name} still holds deleted text"
             );
         }
     }
+    assert!(scanned_store, "the store file was not inspected");
+}
+
+#[test]
+fn an_export_cancelled_in_flight_leaves_no_file_unless_native_was_told_it_finished() {
+    let store = MixedStore::new();
+    let exports = store.root.join("exports");
+    std::fs::create_dir(&exports).unwrap();
+    let mut completed = 0;
+    let mut kept: Vec<String> = Vec::new();
+    for run in 0..60u64 {
+        let target = exports.join(format!("snapshot-{run}.jsonl"));
+        let mut core = OpenCore::open(&store.store_path);
+        let queued = core.submit(
+            ohand_core_start_export,
+            &export_request(&target, "authenticated", &["personal", "work"]),
+        );
+        assert!(queued.is_ok(), "{}", queued.text());
+        // Vary the point of cancellation from before the worker starts to after it finishes.
+        std::thread::sleep(std::time::Duration::from_micros((run % 20) * 400));
+        core.cancel();
+        let told = core.close_and_collect();
+        let reported = told.iter().any(Outcome::is_ok);
+
+        // Only exports native was told about may exist; a cancelled one leaves no temporary.
+        if reported {
+            kept.push(format!("snapshot-{run}.jsonl"));
+        }
+        let mut expected = kept.clone();
+        expected.sort();
+        assert_eq!(file_names(&exports), expected, "run {run}");
+        if reported {
+            completed += 1;
+            assert!(
+                target.exists(),
+                "run {run}: success reported without a file"
+            );
+        } else {
+            assert!(
+                !target.exists(),
+                "run {run}: file left after a cancelled export"
+            );
+        }
+    }
+    eprintln!("{completed} of 60 exports finished before cancel");
 }

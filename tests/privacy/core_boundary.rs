@@ -2,12 +2,12 @@
 //! export tests cross the same boundary Swift does. Only the store contents are synthetic.
 
 use ohand_core::ffi::core_handle::exports::{
-    ohand_core_close, ohand_core_open, ohand_core_result_free, ohand_core_set_event_callback,
-    OhandCoreHandle, OhandCoreResult,
+    ohand_core_cancel, ohand_core_close, ohand_core_open, ohand_core_result_free,
+    ohand_core_set_event_callback, OhandCoreHandle, OhandCoreResult,
 };
 use ohand_core::ffi::core_handle::failure::OHAND_CORE_STATUS_OK;
+use ohand_core::ffi::item_corrections::ohand_core_start_item_correction;
 use ohand_core::ingress::import_foreground_ingress;
-use ohand_core::retrieval::index::sync_item_in_tx;
 use ohand_core::store::captures::Capture;
 use ohand_core::store::schema::{Database, SystemClock};
 use rusqlite::types::ValueRef;
@@ -108,28 +108,31 @@ impl MixedStore {
             "personal",
             None,
         ));
+        // The correction goes through the real correction command, so the stored rows and the
+        // search index are what production writes, not hand-written approximations.
+        let revision: i64 = database
+            .conn()
+            .query_row(
+                "SELECT revision FROM items WHERE item_id = ?",
+                [&corrected_item],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(database);
         {
-            let transaction = database.immediate_transaction().unwrap();
-            transaction
-                .execute(
-                    "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value,
-                                              new_value, created_at)
-                     VALUES ('correction-1', ?, 1, 'text', ?, ?, '2026-10-08T10:00:00Z')",
-                    rusqlite::params![
-                        corrected_item,
-                        format!("draft {PERSONAL_ORIGINAL_CANARY}"),
-                        format!("final {PERSONAL_CORRECTED_CANARY}"),
-                    ],
-                )
-                .unwrap();
-            transaction
-                .execute(
-                    "UPDATE items SET revision = 1 WHERE item_id = ?",
-                    [&corrected_item],
-                )
-                .unwrap();
-            sync_item_in_tx(&transaction, &corrected_item).unwrap();
-            transaction.commit().unwrap();
+            let mut core = OpenCore::open(&store_path);
+            let outcome = core.run(
+                ohand_core_start_item_correction,
+                &serde_json::json!({
+                    "command": "correct_text",
+                    "command_id": "correction-1",
+                    "item_id": corrected_item,
+                    "expected_revision": revision,
+                    "text": format!("final {PERSONAL_CORRECTED_CANARY}"),
+                }),
+            );
+            assert!(outcome.is_ok(), "{}", outcome.text());
+            assert_eq!(outcome.json()["outcome"], "corrected");
         }
         MixedStore {
             _directory: directory,
@@ -264,6 +267,7 @@ pub struct OpenCore {
     _recorder: Box<Recorder>,
     receiver: Receiver<(u64, u32, Vec<u8>)>,
     next_operation: u64,
+    closed: bool,
 }
 
 impl OpenCore {
@@ -287,6 +291,7 @@ impl OpenCore {
             _recorder: recorder,
             receiver,
             next_operation: 1,
+            closed: false,
         }
     }
 
@@ -314,8 +319,44 @@ impl OpenCore {
     }
 }
 
+impl OpenCore {
+    /// Queue an operation without waiting for its outcome.
+    pub fn submit(
+        &mut self,
+        start: unsafe extern "C" fn(OhandCoreHandle, u64, *const u8, usize) -> OhandCoreResult,
+        request: &Value,
+    ) -> Outcome {
+        let operation_id = self.next_operation;
+        self.next_operation += 1;
+        let bytes = serde_json::to_vec(request).unwrap();
+        let (status, payload) =
+            consume(unsafe { start(self.handle, operation_id, bytes.as_ptr(), bytes.len()) });
+        Outcome { status, payload }
+    }
+
+    /// Cancel everything queued or running, as native does when the session ends.
+    pub fn cancel(&self) {
+        let (status, _) = consume(ohand_core_cancel(self.handle));
+        assert_eq!(status, OHAND_CORE_STATUS_OK);
+    }
+
+    /// Close the handle (which waits for its worker) and return every outcome native was told.
+    pub fn close_and_collect(&mut self) -> Vec<Outcome> {
+        if !self.closed {
+            self.closed = true;
+            let _ = consume(ohand_core_close(self.handle));
+        }
+        self.receiver
+            .try_iter()
+            .map(|(_, status, payload)| Outcome { status, payload })
+            .collect()
+    }
+}
+
 impl Drop for OpenCore {
     fn drop(&mut self) {
-        let _ = consume(ohand_core_close(self.handle));
+        if !self.closed {
+            let _ = consume(ohand_core_close(self.handle));
+        }
     }
 }
