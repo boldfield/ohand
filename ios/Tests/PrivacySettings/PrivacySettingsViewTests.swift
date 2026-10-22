@@ -110,6 +110,31 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertNil(rendered[Self.offer], "a granted capability is not offered again")
     }
 
+    func testAGrantForAnotherProviderStillOffersTheDefaultsVersionUntilItIsCovered() async throws {
+        controls.listing = .success(providerListing(
+            versions: [
+                (profile: "openai", version: "openai-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                (profile: "anthropic", version: "anthropic-v1", providerProtocol: "anthropic", revoked: false, supported: true),
+            ],
+            defaultVersion: "anthropic-v1"))
+        await reload([
+            privacyRoute(
+                id: "route-personal", name: "Local capture", scope: "personal",
+                grants: [("text_interpretation", ["cloud"])], covered: ["text_interpretation": ["openai-v1"]])
+        ])
+        let anthropicOffer = PrivacySettingsView.offerIdentifier("route-personal", "text_interpretation", "anthropic-v1")
+        XCTAssertNotNil(rendered[anthropicOffer], "the default's version is not covered, so its grant is offered")
+        XCTAssertNil(rendered[PrivacySettingsView.offerIdentifier("route-personal", "text_interpretation", "openai-v1")])
+
+        await reload([
+            privacyRoute(
+                id: "route-personal", name: "Local capture", scope: "personal",
+                grants: [("text_interpretation", ["cloud"])],
+                covered: ["text_interpretation": ["openai-v1", "anthropic-v1"]])
+        ])
+        XCTAssertNil(rendered[anthropicOffer], "once covered, the offer goes away")
+    }
+
     // MARK: Revocation, queued work and requeue
 
     private func grantedRoute(capability: String = "text_interpretation") -> RoutePolicyRoute {

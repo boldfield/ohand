@@ -3,10 +3,16 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
-func privacyRoute(id: String, name: String, scope: String, grants: [(String, [String])] = []) -> RoutePolicyRoute {
+func privacyRoute(
+    id: String, name: String, scope: String, grants: [(String, [String])] = [], covered: [String: [String]] = [:]
+) -> RoutePolicyRoute {
     let granted = grants.map { capability, classes in
         let list = classes.map { "\"\($0)\"" }.joined(separator: ",")
-        return #"{"capability":"\#(capability)","destination_classes":[\#(list)]}"#
+        guard let versions = covered[capability] else {
+            return #"{"capability":"\#(capability)","destination_classes":[\#(list)]}"#
+        }
+        let coveredList = versions.map { "\"\($0)\"" }.joined(separator: ",")
+        return #"{"capability":"\#(capability)","destination_classes":[\#(list)],"covered_profile_versions":[\#(coveredList)]}"#
     }.joined(separator: ",")
     let json = #"{"route_id":"\#(id)","route_name":"\#(name)","scope":"\#(scope)","granted_capabilities":[\#(granted)]}"#
     return try! JSONDecoder().decode(RoutePolicyRoute.self, from: Data(json.utf8))
@@ -215,6 +221,60 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertTrue(controls.grants.isEmpty)
         XCTAssertEqual(model.phase, .loaded)
         XCTAssertTrue(model.isLocalOnly)
+    }
+
+    /// OpenAI was allowed, then Anthropic became the default: the grant exists but does not cover the default's version.
+    private func makeSwitchedProviderModel(
+        covered: [String: [String]]
+    ) -> (PrivacySettingsModel, FakePrivacySettingsControls) {
+        let controls = FakePrivacySettingsControls(
+            routes: [
+                privacyRoute(
+                    id: "route-personal", name: "Local capture", scope: "personal",
+                    grants: [("text_interpretation", ["cloud"])], covered: covered)
+            ],
+            listing: providerListing(
+                versions: [
+                    (profile: "openai", version: "openai-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                    (profile: "anthropic", version: "anthropic-v1", providerProtocol: "anthropic", revoked: false, supported: true),
+                ],
+                defaultVersion: "anthropic-v1"))
+        return (PrivacySettingsModel(controls: controls, readScope: { [unowned self] in self.scope }), controls)
+    }
+
+    func testAGrantForOneProviderDoesNotCoverTheDefaultsVersionAndItsGrantStaysOffered() async throws {
+        let (model, controls) = makeSwitchedProviderModel(covered: ["text_interpretation": ["openai-v1"]])
+        await model.refresh()
+        XCTAssertTrue(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
+        XCTAssertTrue(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: "openai-v1"))
+        XCTAssertFalse(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: "anthropic-v1"))
+        XCTAssertEqual(
+            model.versionsToOffer(routeID: "route-personal", capability: "text_interpretation").map(\.version.profileVersion),
+            ["anthropic-v1"])
+
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: "anthropic-v1")
+        await model.confirm(try XCTUnwrap(model.proposal))
+        XCTAssertEqual(controls.grants, [["route-personal", "text_interpretation", "anthropic-v1"]])
+
+        controls.routes = .success([
+            privacyRoute(
+                id: "route-personal", name: "Local capture", scope: "personal",
+                grants: [("text_interpretation", ["cloud"])],
+                covered: ["text_interpretation": ["openai-v1", "anthropic-v1"]])
+        ])
+        await model.refresh()
+        XCTAssertTrue(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: "anthropic-v1"))
+        XCTAssertTrue(model.versionsToOffer(routeID: "route-personal", capability: "text_interpretation").isEmpty)
+    }
+
+    func testRouteListingWithoutCoveredVersionsReadsAsNothingCovered() async {
+        let (model, _) = makeSwitchedProviderModel(covered: [:])
+        await model.refresh()
+        XCTAssertFalse(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: "openai-v1"))
+        XCTAssertFalse(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: "anthropic-v1"))
+        XCTAssertEqual(
+            model.versionsToOffer(routeID: "route-personal", capability: "text_interpretation").map(\.version.profileVersion),
+            ["anthropic-v1"], "a missing field never reads as everything covered")
     }
 
     func testConfirmingGrantsExactlyTheShownCapabilityRouteAndVersion() async throws {
