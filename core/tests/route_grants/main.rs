@@ -740,6 +740,94 @@ fn the_listing_marks_destinations_no_profile_contacts_as_unknown_and_drops_revok
 }
 
 #[test]
+fn the_listing_reports_per_version_coverage_of_each_grant() {
+    let mut fixture = fresh_install();
+    fixture.add_route("route-a", "Capture", "[]");
+    fixture.openai("profile-openai");
+    fixture.openai("profile-openai-2");
+    fixture.anthropic("profile-anthropic");
+    fixture.self_hosted("profile-spark");
+    let covered = |fixture: &Fixture| -> Vec<Vec<String>> {
+        list_route_policy(fixture.db.conn()).unwrap()[0]
+            .granted_capabilities
+            .iter()
+            .map(|granted| granted.covered_profile_versions.clone())
+            .collect()
+    };
+
+    // An OpenAI-only grant covers every OpenAI version and no Anthropic or private one.
+    fixture
+        .grant("route-a", INTERPRET, "profile-openai")
+        .unwrap();
+    assert_eq!(
+        covered(&fixture),
+        vec![vec!["profile-openai", "profile-openai-2"]]
+    );
+
+    // The decision matches the listing: an Anthropic job stays denied until it is granted.
+    fixture.add_job(
+        "anthropic",
+        JOB_TYPE_INTERPRET,
+        "route-a",
+        Some("profile-anthropic"),
+    );
+    assert_eq!(
+        fixture.denial("anthropic"),
+        Some(DenialReason::DestinationNotInRoute)
+    );
+    fixture
+        .grant("route-a", INTERPRET, "profile-anthropic")
+        .unwrap();
+    assert_eq!(fixture.denial("anthropic"), None);
+    assert_eq!(
+        covered(&fixture),
+        vec![vec![
+            "profile-anthropic",
+            "profile-openai",
+            "profile-openai-2"
+        ]]
+    );
+
+    // A revoked version is not listed.
+    fixture.revoke_profile("profile-openai-2");
+    assert_eq!(
+        covered(&fixture),
+        vec![vec!["profile-anthropic", "profile-openai"]]
+    );
+
+    // Another capability's grant covers only what it was granted for.
+    fixture.grant("route-a", REVIEW, "profile-spark").unwrap();
+    let listing = list_route_policy(fixture.db.conn()).unwrap();
+    assert_eq!(
+        listing[0].granted_capabilities[0].covered_profile_versions,
+        vec!["profile-spark"]
+    );
+
+    // Revoking the grant empties the list.
+    fixture.revoke("route-a", INTERPRET).unwrap();
+    fixture.revoke("route-a", REVIEW).unwrap();
+    assert!(list_route_policy(fixture.db.conn()).unwrap()[0]
+        .granted_capabilities
+        .is_empty());
+}
+
+#[test]
+fn an_anthropic_only_grant_does_not_cover_an_openai_version() {
+    let mut fixture = fresh_install();
+    fixture.add_route("route-a", "Capture", "[]");
+    fixture.openai("profile-openai");
+    fixture.anthropic("profile-anthropic");
+    fixture
+        .grant("route-a", INTERPRET, "profile-anthropic")
+        .unwrap();
+    let listing = list_route_policy(fixture.db.conn()).unwrap();
+    assert_eq!(
+        listing[0].granted_capabilities[0].covered_profile_versions,
+        vec!["profile-anthropic"]
+    );
+}
+
+#[test]
 fn capability_keys_round_trip() {
     for capability in [
         ProcessingCapability::TextInterpretation,
