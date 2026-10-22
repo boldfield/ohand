@@ -10,6 +10,15 @@ struct StatusRenderedKey: PreferenceKey {
     }
 }
 
+/// The actions the screen's buttons run, keyed by accessibility identifier, so a hosted test can trigger them.
+struct StatusActionsKey: PreferenceKey {
+    static var defaultValue: [String: () -> Void] = [:]
+
+    static func reduce(value: inout [String: () -> Void], nextValue: () -> [String: () -> Void]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
 /// The status screen. Everything it shows comes from `StatusModel`; it is reachable but never required.
 struct StatusView: View {
     static let retryIdentifier = "status.retry"
@@ -29,6 +38,10 @@ struct StatusView: View {
     var makeProviderSettings: () -> AnyView = { AnyView(EmptyView()) }
     /// Lets a hosted test see what the screen shows; production leaves it unset.
     var renderReporter: (([String: String]) -> Void)?
+    /// Lets a hosted test run what a tap on each button runs; production leaves it unset.
+    var actionReporter: (([String: () -> Void]) -> Void)?
+
+    private var retryAction: () -> Void { { Task { await model.retry() } } }
 
     var body: some View {
         SettingsScreenChrome(title: "Status", infoTitle: "Status", infoParagraphs: Self.infoParagraphs) {
@@ -52,12 +65,13 @@ struct StatusView: View {
                 }
             }
             if model.facts.contains(where: { $0.action == .retry }) {
-                Button(StatusText.retryLabel) { Task { await model.retry() } }
+                Button(StatusText.retryLabel, action: retryAction)
                     .font(DSFont.rowLabel)
                     .padding(.horizontal, DSSpacing.md)
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.retryIdentifier)
                     .preference(key: StatusRenderedKey.self, value: [Self.retryIdentifier: StatusText.retryLabel])
+                    .preference(key: StatusActionsKey.self, value: [Self.retryIdentifier: retryAction])
             }
             if model.retryRequested {
                 Text(StatusText.retryRequestedNote)
@@ -92,6 +106,7 @@ struct StatusView: View {
                     .preference(key: StatusRenderedKey.self, value: [Self.refreshIdentifier: StatusText.refreshLabel])
         }
         .onPreferenceChange(StatusRenderedKey.self) { renderReporter?($0) }
+        .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0) }
         .task { await model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refresh() }

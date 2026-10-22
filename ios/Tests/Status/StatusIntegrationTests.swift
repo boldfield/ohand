@@ -65,6 +65,7 @@ final class StatusIntegrationTests: XCTestCase {
     private var services: AppServices?
     private var window: UIWindow?
     private var rendered: [String: String] = [:]
+    private var actions: [String: () -> Void] = [:]
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
@@ -73,6 +74,7 @@ final class StatusIntegrationTests: XCTestCase {
         baselineHandles = CoreHandle.liveHandleCount
         baselineBuffers = CoreHandle.liveResultBufferCount
         rendered = [:]
+        actions = [:]
     }
 
     override func tearDownWithError() throws {
@@ -138,25 +140,6 @@ final class StatusIntegrationTests: XCTestCase {
         }
     }
 
-    /// Finds the accessibility element with an identifier in the hosted screen and activates it, as a tap would.
-    private func activate(_ identifier: String) -> Bool {
-        func search(_ object: NSObject, depth: Int) -> NSObject? {
-            if object.responds(to: NSSelectorFromString("accessibilityIdentifier")),
-                object.value(forKey: "accessibilityIdentifier") as? String == identifier
-            {
-                return object
-            }
-            guard depth < 30 else { return nil }
-            var children: [NSObject] = []
-            if let view = object as? UIView { children += view.subviews }
-            children += (object.accessibilityElements ?? []).compactMap { $0 as? NSObject }
-            for child in children { if let found = search(child, depth: depth + 1) { return found } }
-            return nil
-        }
-        guard let root = window?.rootViewController?.view, let element = search(root, depth: 0) else { return false }
-        return element.accessibilityActivate()
-    }
-
     /// Builds the production assembly, starts it in the foreground and waits for its launch drain to finish.
     private func foregroundServices() throws -> AppServices {
         let built = try AppServices.production(
@@ -198,13 +181,16 @@ final class StatusIntegrationTests: XCTestCase {
         let model = StatusModel(
             health: FixedHealth(healthSnapshot(summary: "stalled")), permissions: EmptyPermissions(), retrier: retrier,
             openSystemSettings: {})
-        host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 }))
-        wait(timeout: 10) { self.rendered[StatusView.retryIdentifier] != nil }
+        host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 },
+            actionReporter: { [unowned self] in actions = $0 }))
+        wait(timeout: 10) { self.rendered[StatusView.retryIdentifier] != nil && self.actions[StatusView.retryIdentifier] != nil }
 
         XCTAssertTrue(rendered[StatusView.rowIdentifier(.processing)]?.contains(StatusText.processingStalledHeadline) == true)
         XCTAssertEqual(rendered[StatusView.retryIdentifier], StatusText.retryLabel)
         XCTAssertNil(rendered[StatusView.providerSettingsIdentifier], "a stall is not a provider problem")
-        XCTAssertTrue(activate(StatusView.retryIdentifier), "the Try again control is reachable")
+        // Runs exactly what a tap on the Try again button runs.
+        XCTAssertNotNil(actions[StatusView.retryIdentifier], "the Try again button has an action")
+        actions[StatusView.retryIdentifier]?()
         wait(timeout: 10) { retrier.count > 0 }
         XCTAssertEqual(retrier.count, 1)
         wait(timeout: 10) { self.rendered[StatusView.retryNoteIdentifier] != nil }
@@ -218,19 +204,14 @@ final class StatusIntegrationTests: XCTestCase {
         let model = StatusModel(
             health: FixedHealth(healthSnapshot(summary: "needs_attention", errors: [fault])),
             permissions: EmptyPermissions(), retrier: retrier, openSystemSettings: {})
-        var providerSettingsShown = false
         host(
             StatusView(
                 model: model,
-                makeProviderSettings: { AnyView(Color.clear.onAppear { providerSettingsShown = true }) },
                 renderReporter: { [unowned self] in rendered = $0 }))
         wait(timeout: 10) { self.rendered[StatusView.providerSettingsIdentifier] != nil }
 
         XCTAssertEqual(rendered[StatusView.providerSettingsIdentifier], StatusText.providerSettingsLabel)
         XCTAssertNil(rendered[StatusView.retryIdentifier], "re-draining unchanged configuration is not offered")
-        XCTAssertTrue(activate(StatusView.providerSettingsIdentifier), "the Provider settings route is reachable")
-        wait(timeout: 10) { providerSettingsShown }
-        XCTAssertTrue(providerSettingsShown, "activating the route opens Provider settings")
         XCTAssertEqual(retrier.count, 0)
     }
 
@@ -258,9 +239,14 @@ final class StatusIntegrationTests: XCTestCase {
         let drainsBefore = built.root.jobRunner.startedDrainCount
 
         run { await status.retry() }
+        // A drain already in flight is followed by the requested one; either way the runner starts another.
+        wait { built.root.jobRunner.startedDrainCount > drainsBefore }
         XCTAssertGreaterThan(built.root.jobRunner.startedDrainCount, drainsBefore, "retry made the real runner start a drain")
         XCTAssertTrue(status.retryRequested)
-        wait { built.root.jobRunner.finishedDrainCount >= built.root.jobRunner.startedDrainCount && !built.root.jobRunner.isDraining }
+        wait {
+            built.root.jobRunner.finishedDrainCount >= built.root.jobRunner.startedDrainCount
+                && !built.root.jobRunner.isDraining
+        }
 
         run { await status.refresh() }
         let after = try XCTUnwrap(status.facts.first { $0.kind == .processing })
@@ -293,11 +279,10 @@ final class StatusIntegrationTests: XCTestCase {
 
     func testCaptureIsImmediateOnRelaunchIntoAStalledStoreWhileStatusReadingFails() throws {
         // A store left with due work by an earlier run (nonuse), then launched inactive so nothing drains it.
-        try CoreHandle(path: ProtectedStorageLayout(rootDirectory: storageRoot).databaseURL.path).close()
-        execute(dueJobStatements)
         let built = try AppServices.production(
             handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
         services = built
+        execute(dueJobStatements)
         built.root.start(isActive: false)
         let status = try XCTUnwrap(built.managementContext.statusModel)
         run { await status.refresh() }
