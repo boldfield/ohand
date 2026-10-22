@@ -160,7 +160,7 @@ final class AppServicesTests: XCTestCase {
     func testReportsWithoutAReminderThatNeedsPermissionNeverAsk() async throws {
         let asker = ScriptedPermissionAsker(outcome: .asked(.usable))
         let services = try makeServices(notificationPermission: asker)
-        services.start(isActive: true)
+        services.start(isActive: false)
 
         services.handleReminderReport(reminderReport(nil))
         services.handleReminderReport(reminderReport(.undeliverable(.permissionDenied)))
@@ -191,7 +191,7 @@ final class AppServicesTests: XCTestCase {
         let asker = ScriptedPermissionAsker(outcome: .asked(.notRequested))
         let center = NotificationCenter()
         let services = try makeServices(notificationCenter: center, notificationPermission: asker)
-        services.start(isActive: true)
+        services.start(isActive: false)
         let report = reminderReport(.undeliverable(.permissionNotRequested))
 
         services.handleReminderReport(report)
