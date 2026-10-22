@@ -273,3 +273,22 @@ fn the_scan_detects_the_canary_when_secure_delete_is_off() {
         "without secure_delete the deleted text remains, so the scan can see it"
     );
 }
+
+#[test]
+fn an_export_with_no_callback_registered_leaves_no_file() {
+    let (directory, store_path) = export_fixture();
+    for run in 0..20 {
+        let output_path = directory.path().join(format!("silent-{run}.jsonl"));
+        let mut handle = 0;
+        must_succeed(unsafe {
+            ohand_core_open(store_path.as_ptr(), store_path.len(), &mut handle)
+        });
+        must_succeed(start_export(handle, &output_path));
+        std::thread::sleep(Duration::from_millis(run * 5));
+        must_succeed(ohand_core_close(handle));
+        assert!(
+            !output_path.exists(),
+            "run {run}: an export nobody was told about left a file"
+        );
+    }
+}

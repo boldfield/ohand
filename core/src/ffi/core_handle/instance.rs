@@ -106,14 +106,15 @@ impl Shared {
         DELIVERING_FOR.with(|slot| slot.get()) == Some(self.handle)
     }
 
-    /// Delivers `outcome`; false when it was dropped because the core was cancelled.
+    /// Delivers `outcome`; false when it was dropped because the core was cancelled or no
+    /// callback was registered.
     fn deliver(&self, operation_id: u64, outcome: Result<Vec<u8>, AbiFailure>) -> bool {
         let registration_guard = lock(&self.delivery);
         if self.cancelled.load(Ordering::SeqCst) {
             return false;
         }
         let Some(registration) = *registration_guard else {
-            return true;
+            return false;
         };
         let (status, payload) = match outcome {
             Ok(payload) => (OHAND_CORE_STATUS_OK, payload),
