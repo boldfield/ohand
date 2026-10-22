@@ -123,7 +123,7 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.firstGroupEntryIDs, from: catalog)),
                        ["prompt-settings", "voice-recovery"])
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.secondGroupEntryIDs, from: catalog)),
-                       ["provider-settings", "privacy-settings", "audio-retention"])
+                       ["provider-settings", "privacy-settings", "permissions-settings", "audio-retention"])
         XCTAssertEqual(SettingsRootView.secondGroupEntryIDs.last, SettingsRootView.exportEntryID)
     }
 
