@@ -1018,6 +1018,22 @@ fn apply_clock_proposal(
     instant: &str,
     item_span: &str,
 ) -> (Fixture, ReminderDisposition) {
+    apply_clock_proposal_with(
+        text,
+        quoted,
+        Some(instant),
+        TimeResolutionQuality::Explicit,
+        item_span,
+    )
+}
+
+fn apply_clock_proposal_with(
+    text: &str,
+    quoted: &str,
+    instant: Option<&str>,
+    quality: TimeResolutionQuality,
+    item_span: &str,
+) -> (Fixture, ReminderDisposition) {
     let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
     let lease = fixture.claim_job(0, capture_instant());
     let proposal = fixture
@@ -1025,9 +1041,9 @@ fn apply_clock_proposal(
         .with_item_type(Some(ItemType::Action))
         .with_source_spans(Some(vec![span_of(text, item_span)]))
         .with_reminder_proposal(Some(ReminderProposal {
-            instant: Some(instant.to_string()),
+            instant: instant.map(str::to_string),
             timezone_id: Some("America/New_York".to_string()),
-            quality: TimeResolutionQuality::Explicit,
+            quality,
             source_span: Some(span_of(text, quoted)),
         }));
     let outcome = fixture.apply(&lease, &proposal).unwrap();
@@ -2658,4 +2674,103 @@ fn a_reminder_request_on_a_corrected_text_resolves_against_the_correction() {
         fixture.reminder_effects().unwrap().2,
         vec![OperationType::Schedule]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hedged reminder requests (F29)
+// ---------------------------------------------------------------------------------------------
+
+fn assert_hedged_and_unscheduled(fixture: &Fixture, disposition: ReminderDisposition) {
+    let text = source_text_of(fixture);
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet),
+        "{text}"
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "not_scheduled_yet", "{text}");
+    assert_eq!(reminder.schedule_state, "not_scheduled", "{text}");
+    assert_eq!(reminder.resolved_instant, None, "{text}");
+    assert_eq!(
+        reminder.ambiguity_reason.as_deref(),
+        Some("the request is hedged"),
+        "{text}"
+    );
+    let (_, _, operations, _) = fixture.reminder_effects().expect("a reminder row");
+    assert_eq!(operations, vec![], "{text}");
+}
+
+#[test]
+fn the_maybe_friday_fixture_oracle_is_stored_as_an_ambiguous_reminder_needing_correction() {
+    let (fixture, disposition) = {
+        let text = "Maybe remind me Friday to water the plants?";
+        let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
+        let lease = fixture.claim_job(0, capture_instant());
+        let proposal = fixture
+            .proposal_for(&lease, 0)
+            .with_item_type(Some(ItemType::Action))
+            .with_source_spans(Some(vec![span_of(text, text)]))
+            .with_reminder_proposal(Some(ReminderProposal {
+                instant: None,
+                timezone_id: None,
+                quality: TimeResolutionQuality::Ambiguous,
+                source_span: Some(span_of(text, "Friday")),
+            }));
+        let outcome = fixture.apply(&lease, &proposal).unwrap();
+        (fixture, applied_reminder(outcome))
+    };
+    assert_hedged_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn a_hedged_request_with_a_clock_time_is_never_scheduled() {
+    for text in [
+        "Maybe remind me Friday at 3 p.m. to call Sam",
+        "perhaps remind me Friday at 3 p.m. to call Sam",
+        "Maybe please remind me Friday at 3 p.m. to call Sam",
+    ] {
+        // A proposal that quotes the time but claims no instant is stored as needing correction.
+        let (fixture, disposition) = apply_clock_proposal_with(
+            text,
+            "Friday at 3 p.m.",
+            None,
+            TimeResolutionQuality::Ambiguous,
+            "call Sam",
+        );
+        assert_hedged_and_unscheduled(&fixture, disposition);
+        // One claiming an explicit instant, right or wrong, is rejected as a contradiction.
+        for instant in ["2026-10-09T15:00:00-04:00", "2026-10-09T16:00:00-04:00"] {
+            let (fixture, disposition) =
+                apply_clock_proposal(text, "Friday at 3 p.m.", instant, "call Sam");
+            assert_rejected_and_unscheduled_for(text, &fixture, disposition);
+        }
+    }
+}
+
+#[test]
+fn a_hedge_does_not_turn_a_non_request_into_one() {
+    for text in [
+        "maybe Bob will remind me Friday at 3 p.m. to call Sam",
+        "maybe I reminded him Friday at 3 p.m. to call Sam",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call Sam",
+        );
+        assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+        assert_eq!(fixture.durable().reminders, 0, "{text}");
+    }
+}
+
+#[test]
+fn an_unhedged_clock_request_still_schedules() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me Friday at 3 p.m. to call Sam",
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Sam",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
 }

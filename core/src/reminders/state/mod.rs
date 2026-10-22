@@ -472,6 +472,30 @@ pub fn apply_derived_request(
     clock: &dyn Clock,
     request: &DerivedReminderRequest,
 ) -> Result<ReminderRecord, ReminderStateError> {
+    apply_derived_request_with_hedge(tx, clock, request, false)
+}
+
+/// Reason stored for a request the speaker hedged ("Maybe remind me Friday"): the request is
+/// real, but its timing is unconfirmed, so it is never scheduled from the phrase.
+pub const HEDGED_REQUEST_REASON: &str = "the request is hedged";
+
+/// Like [`apply_derived_request`], but for a hedged request: whatever the phrase resolves to,
+/// the reminder is stored as not scheduled yet and needing correction, with
+/// [`HEDGED_REQUEST_REASON`]. Recurrence and committed-time protections still apply.
+pub fn apply_hedged_request(
+    tx: &Transaction<'_>,
+    clock: &dyn Clock,
+    request: &DerivedReminderRequest,
+) -> Result<ReminderRecord, ReminderStateError> {
+    apply_derived_request_with_hedge(tx, clock, request, true)
+}
+
+fn apply_derived_request_with_hedge(
+    tx: &Transaction<'_>,
+    clock: &dyn Clock,
+    request: &DerivedReminderRequest,
+    hedged: bool,
+) -> Result<ReminderRecord, ReminderStateError> {
     let item = load_reminder_capable_item(tx, &request.item_id)?;
     check_revision(&item, request.source_revision)?;
     let context = load_capture_time_context(tx, &item.capture_id)?;
@@ -480,6 +504,10 @@ pub fn apply_derived_request(
     let outcome = match text_repeat_reason(&item, &context) {
         Some(reason) => TimeOutcome::UnsupportedRecurrence {
             reason,
+            timezone_id: context.timezone.clone(),
+        },
+        None if hedged => TimeOutcome::NeedsCorrection {
+            reason: HEDGED_REQUEST_REASON.to_string(),
             timezone_id: context.timezone.clone(),
         },
         None => resolve_phrase(&request.phrase, &context, clock.now())?,
