@@ -1,4 +1,4 @@
-use chrono::{prelude::*, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{prelude::*, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -53,6 +53,12 @@ pub struct TimeContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AmbiguityKind {
     MissingHour,
+    /// A clock time with no day part that is not later today ("at 9 a.m." captured at 10:00).
+    MissingDay,
+    /// An hour with no a.m./p.m. ("Friday at 3").
+    MissingMeridiem,
+    /// Text after the clock this grammar does not understand, such as a zone ("9 a.m. EST").
+    UnsupportedQualifier,
     DstGap,
     DstFold,
     Past,
@@ -90,6 +96,18 @@ pub enum ResolutionError {
     InconsistentContext(String),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Meridiem {
+    Am,
+    Pm,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClockPart {
+    Time { hour: u32, minute: u32 },
+    MissingMeridiem,
+}
+
 pub struct TimeResolver;
 
 impl TimeResolver {
@@ -115,6 +133,11 @@ impl TimeResolver {
 
         // Try natural language phrases
         if let Ok(result) = Self::parse_natural_language(&phrase_normalized, phrase, context) {
+            return Ok(result);
+        }
+
+        // Try a day part combined with a clock time
+        if let Some(result) = Self::parse_clock_phrase(&phrase_normalized, phrase, context) {
             return Ok(result);
         }
 
@@ -360,6 +383,226 @@ impl TimeResolver {
         Err(ResolutionError::InvalidDateFormat(
             original_phrase.to_string(),
         ))
+    }
+
+    /// Resolve a day part and/or a clock part ("Friday at 3 p.m.", "5 pm tomorrow", "at 5 p.m.").
+    /// Returns `None` when the phrase is not a clock phrase at all.
+    fn parse_clock_phrase(
+        phrase_normalized: &str,
+        original_phrase: &str,
+        context: &TimeContext,
+    ) -> Option<ResolutionResult> {
+        let tz = Self::get_tz(context).ok()?;
+        let tokens: Vec<&str> = phrase_normalized.split_whitespace().collect();
+        let (day, clock, rest) = Self::split_day_and_clock(&tokens, context, tz)?;
+
+        let ambiguous = |date: Option<NaiveDate>, kind: AmbiguityKind, reason: &str| {
+            let ref_date = context.reference_time.with_timezone(&tz).date_naive();
+            ResolutionResult {
+                original_phrase: original_phrase.to_string(),
+                resolved_date: date,
+                resolved_local: None,
+                resolved_time: None,
+                candidates: vec![],
+                is_ambiguous: true,
+                ambiguity_kind: Some(kind),
+                ambiguity_reason: Some(reason.to_string()),
+                is_past: date.is_some_and(|date| date < ref_date),
+                context: context.clone(),
+            }
+        };
+
+        if !rest.is_empty() {
+            return Some(ambiguous(
+                day,
+                AmbiguityKind::UnsupportedQualifier,
+                "Time zone or unrecognized qualifier after the time is not supported yet",
+            ));
+        }
+        let (hour, minute) = match clock {
+            ClockPart::Time { hour, minute } => (hour, minute),
+            ClockPart::MissingMeridiem => {
+                return Some(ambiguous(
+                    day,
+                    AmbiguityKind::MissingMeridiem,
+                    "Missing meridiem: say a.m. or p.m. for the hour",
+                ));
+            }
+        };
+        let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+        let ref_local_date = context.reference_time.with_timezone(&tz).date_naive();
+        let date = day.unwrap_or(ref_local_date);
+        let result = Self::handle_complete_datetime_result(
+            date.and_time(time),
+            original_phrase,
+            context,
+            tz,
+        )
+        .ok()?;
+        if day.is_none() {
+            let later_today = result
+                .resolved_time
+                .is_some_and(|instant| instant > context.reference_time)
+                && !result.is_ambiguous;
+            if !later_today {
+                return Some(ambiguous(
+                    None,
+                    AmbiguityKind::MissingDay,
+                    "Missing day: that time is not later today, so the day is unclear",
+                ));
+            }
+        }
+        Some(result)
+    }
+
+    /// Split tokens into an optional day and a clock, in either order, plus any unconsumed
+    /// trailing tokens (a zone qualifier or other text this grammar does not understand).
+    fn split_day_and_clock<'a>(
+        tokens: &[&'a str],
+        context: &TimeContext,
+        tz: Tz,
+    ) -> Option<(Option<NaiveDate>, ClockPart, Vec<&'a str>)> {
+        // Day first: <day> [at] <clock> [rest]
+        for split in 1..tokens.len() {
+            if let Some(date) = Self::parse_day_part(&tokens[..split], context, tz) {
+                if let Some((clock, used)) = Self::parse_clock_tokens(&tokens[split..], true) {
+                    return Some((Some(date), clock, tokens[split + used..].to_vec()));
+                }
+            }
+        }
+        // Clock first: [at] <clock> [day] [rest]
+        let (clock, used) = Self::parse_clock_tokens(tokens, true)?;
+        let after = &tokens[used..];
+        for take in (1..=after.len()).rev() {
+            if let Some(date) = Self::parse_day_part(&after[..take], context, tz) {
+                return Some((Some(date), clock, after[take..].to_vec()));
+            }
+        }
+        // A bare number with neither `at` nor a day part is not a clock ("3 days").
+        if matches!(clock, ClockPart::MissingMeridiem) && tokens.first() != Some(&"at") {
+            return None;
+        }
+        Some((None, clock, after.to_vec()))
+    }
+
+    fn parse_day_part(tokens: &[&str], context: &TimeContext, tz: Tz) -> Option<NaiveDate> {
+        let tokens = match tokens.first() {
+            Some(&"on") => &tokens[1..],
+            _ => tokens,
+        };
+        let day = tokens.join(" ");
+        if day.is_empty() {
+            return None;
+        }
+        if day == "today" {
+            return Some(context.reference_time.with_timezone(&tz).date_naive());
+        }
+        if let Ok(date) = NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
+            return Some(date);
+        }
+        match Self::parse_natural_language(&day, &day, context) {
+            Ok(result) if result.ambiguity_kind == Some(AmbiguityKind::MissingHour) => {
+                result.resolved_date
+            }
+            _ => None,
+        }
+    }
+
+    /// Parse a clock at the start of `tokens`, with an optional leading `at`. Returns the clock
+    /// and the number of tokens consumed.
+    fn parse_clock_tokens(tokens: &[&str], allow_bare_hour: bool) -> Option<(ClockPart, usize)> {
+        let (has_at, tokens) = match tokens.first() {
+            Some(&"at") => (true, &tokens[1..]),
+            _ => (false, tokens),
+        };
+        let at_len = usize::from(has_at);
+        let first = *tokens.first()?;
+        match first {
+            "noon" => {
+                return Some((
+                    ClockPart::Time {
+                        hour: 12,
+                        minute: 0,
+                    },
+                    at_len + 1,
+                ));
+            }
+            "midnight" => {
+                return Some((ClockPart::Time { hour: 0, minute: 0 }, at_len + 1));
+            }
+            _ => {}
+        }
+        let numeric_end = first
+            .find(|character: char| !(character.is_ascii_digit() || character == ':'))
+            .unwrap_or(first.len());
+        let (numeric, suffix) = first.split_at(numeric_end);
+        let (hour_text, minute_text) = match numeric.split_once(':') {
+            Some((hour_text, minute_text)) => (hour_text, Some(minute_text)),
+            None => (numeric, None),
+        };
+        if hour_text.is_empty()
+            || !hour_text
+                .chars()
+                .all(|character| character.is_ascii_digit())
+            || hour_text.len() > 2
+        {
+            return None;
+        }
+        let minute = match minute_text {
+            Some(text) => {
+                if text.len() != 2 || !text.chars().all(|character| character.is_ascii_digit()) {
+                    return None;
+                }
+                text.parse::<u32>().ok()?
+            }
+            None => 0,
+        };
+        let hour: u32 = hour_text.parse().ok()?;
+        if minute > 59 {
+            return None;
+        }
+        let (meridiem, meridiem_tokens) = if !suffix.is_empty() {
+            (Self::parse_meridiem(suffix)?, 0)
+        } else if let Some(meridiem) = tokens.get(1).and_then(|next| Self::parse_meridiem(next)) {
+            (meridiem, 1)
+        } else {
+            // No meridiem. A two-digit HH:MM is 24-hour; anything else is ambiguous. A bare
+            // number only counts as a clock after `at`.
+            if minute_text.is_some() && hour_text.len() == 2 {
+                if hour > 23 {
+                    return None;
+                }
+                return Some((ClockPart::Time { hour, minute }, at_len + 1));
+            }
+            if minute_text.is_none() && !has_at && !allow_bare_hour {
+                return None;
+            }
+            return Some((ClockPart::MissingMeridiem, at_len + 1));
+        };
+        if !(1..=12).contains(&hour) {
+            return None;
+        }
+        let hour_24 = match (hour, meridiem) {
+            (12, Meridiem::Am) => 0,
+            (12, Meridiem::Pm) => 12,
+            (hour, Meridiem::Am) => hour,
+            (hour, Meridiem::Pm) => hour + 12,
+        };
+        Some((
+            ClockPart::Time {
+                hour: hour_24,
+                minute,
+            },
+            at_len + 1 + meridiem_tokens,
+        ))
+    }
+
+    fn parse_meridiem(text: &str) -> Option<Meridiem> {
+        match text {
+            "a.m." | "a.m" | "am" => Some(Meridiem::Am),
+            "p.m." | "p.m" | "pm" => Some(Meridiem::Pm),
+            _ => None,
+        }
     }
 
     fn make_date_only_result(
