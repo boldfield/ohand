@@ -1372,10 +1372,15 @@ fn a_self_correction_to_a_relative_time_or_a_possessive_zone_is_held_for_correct
 }
 
 #[test]
-fn a_list_after_the_time_needs_correction_but_the_same_list_before_it_schedules() {
+fn a_list_in_the_content_needs_correction_in_either_order() {
+    // With the time last, the commas of the list are clause marks in the content before the
+    // time, which the whole-capture rule holds for correction. The explicit-intent check reads
+    // the comma between "remind me" and the time as a clause break, but only while the time
+    // could still be scheduled: once the timing is held, the request is kept.
     for text in [
         "Remind me tomorrow at 9 a.m., buy eggs, milk and bread",
         "Remind me tomorrow at 9 a.m. to buy eggs, milk and bread",
+        "Remind me to buy eggs, milk and bread tomorrow at 9 a.m.",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
@@ -1385,20 +1390,7 @@ fn a_list_after_the_time_needs_correction_but_the_same_list_before_it_schedules(
         );
         assert_held_for_correction(&fixture, disposition);
     }
-    // With the time last, the commas of the list are clause marks in the content before the
-    // time, which the whole-capture rule holds for correction (see the unit table in
-    // `core/src/time/expression.rs`). End to end the capture stops earlier: the explicit-intent
-    // check (I05) treats the comma between "remind me" and the time as a clause break, which is
-    // outside F28. The same list without commas schedules.
-    let text = "Remind me to buy eggs, milk and bread tomorrow at 9 a.m.";
-    let (fixture, disposition) = apply_clock_proposal(
-        text,
-        "tomorrow at 9 a.m.",
-        "2026-10-09T09:00:00-04:00",
-        "buy eggs",
-    );
-    assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
-    assert_eq!(fixture.reminder_effects(), None, "{text}");
+    // The same list without commas schedules.
     let text = "Remind me to buy eggs and milk and bread tomorrow at 9 a.m.";
     let (fixture, disposition) = apply_clock_proposal(
         text,
@@ -1680,22 +1672,11 @@ fn plain_words_after_the_time_are_task_content_with_or_without_to() {
 /// appear, and the content may hold no clause mark.
 #[test]
 fn a_clause_mark_in_the_content_before_the_time_is_held_for_correction() {
+    // A bracket or colon between the request and the time is a clause break too: while the
+    // timing is held, it does not drop the request.
     for text in [
         "Remind me to call the roofer - urgent - Friday at 3 p.m.",
         "Remind me to call the roofer \u{2014} urgent \u{2014} Friday at 3 p.m.",
-    ] {
-        let (fixture, disposition) = apply_clock_proposal(
-            text,
-            "Friday at 3 p.m.",
-            "2026-10-09T15:00:00-04:00",
-            "call the roofer",
-        );
-        assert_held_for_correction(&fixture, disposition);
-    }
-    // A bracket or colon between the request and the time is a clause break for the
-    // explicit-intent check (I05), which stops the capture before the guard runs; that check is
-    // outside F28. The guard's own verdict on these forms is pinned here and in the unit table.
-    for text in [
         "Remind me to call the roofer (urgent) Friday at 3 p.m.",
         "Remind me to call the roofer: Friday at 3 p.m.",
     ] {
@@ -1709,6 +1690,34 @@ fn a_clause_mark_in_the_content_before_the_time_is_held_for_correction() {
             "Friday at 3 p.m.",
             "2026-10-09T15:00:00-04:00",
             "call the roofer",
+        );
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // A semicolon, a sentence end and every word that detaches a time from the request still
+    // do, held timing or not.
+    for (text, item_span) in [
+        (
+            "Remind me to call Bob, who called Friday at 3 p.m.",
+            "call Bob",
+        ),
+        (
+            "Remind me why the quote failed: it expired Friday at 3 p.m.",
+            "the quote failed",
+        ),
+        (
+            "Remind me to call Bob; the quote expires Friday at 3 p.m.",
+            "call Bob",
+        ),
+        (
+            "Remind me to call Bob. The quote expires Friday at 3 p.m.",
+            "call Bob",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            item_span,
         );
         assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
         assert_eq!(fixture.durable().reminders, 0, "{text}");
@@ -1778,22 +1787,39 @@ fn a_temporal_token_in_another_sentence_is_held_for_correction() {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
         assert_held_for_correction(&fixture, disposition);
     }
-    // A retraction in the next sentence is dropped earlier by the explicit-intent check (I05),
-    // outside F28. The guard holds it on its own, so it stays covered if that check changes.
-    let text = "Remind me to call the roofer tomorrow at 9 a.m. No wait, 10 a.m.";
-    let span = span_of(text, "tomorrow at 9 a.m.");
-    assert!(
-        !span_covers_time_expression(text, span.start, span.end),
-        "{text}"
-    );
-    let (fixture, disposition) = apply_clock_proposal(
-        text,
-        "tomorrow at 9 a.m.",
-        "2026-10-09T09:00:00-04:00",
-        "call the roofer",
-    );
-    assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
-    assert_eq!(fixture.durable().reminders, 0, "{text}");
+    // A closing "no" followed by a new time corrects the time; it does not withdraw the request.
+    for text in [
+        "Remind me to call the roofer tomorrow at 9 a.m. No wait, 10 a.m.",
+        "Remind me to call the roofer tomorrow at 9 a.m., actually no, Saturday.",
+    ] {
+        let span = span_of(text, "tomorrow at 9 a.m.");
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "call the roofer",
+        );
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // A withdrawal is still a withdrawal, whatever comes after it.
+    for text in [
+        "Remind me to call the roofer tomorrow at 9 a.m., actually no",
+        "Remind me to call the roofer tomorrow at 9 a.m. No wait, cancel that. Saturday is busy.",
+        "Remind me to call the roofer tomorrow at 9 a.m., never mind, 10 a.m. is busy",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "tomorrow at 9 a.m.",
+            "2026-10-09T09:00:00-04:00",
+            "call the roofer",
+        );
+        assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+        assert_eq!(fixture.durable().reminders, 0, "{text}");
+    }
 }
 
 /// A dotted abbreviation outside the span ends its sentence like any other word: "Jan" and "sun"
@@ -1849,9 +1875,9 @@ fn a_correction_after_a_dotted_abbreviation_or_a_number_word_is_held_for_correct
     assert_scheduled_at(&fixture, disposition, "2026-10-09T15:00:00-04:00");
 }
 
-/// A time word carrying a "'s" clitic ("Saturday's better", with the ASCII or the typographic
-/// apostrophe that dictation produces) is still a temporal token in another sentence, for a span
-/// that names its day and for one that does not.
+/// A time word carrying any clitic ("Saturday's better", "Saturday'll work", "Tomorrow'd be
+/// better", with the ASCII or the typographic apostrophe that dictation produces) is still a
+/// temporal token in another sentence, for a span that names its day and for one that does not.
 #[test]
 fn a_correction_with_a_clitic_time_word_is_held_for_correction() {
     for (text, quoted, instant) in [
@@ -1880,6 +1906,31 @@ fn a_correction_with_a_clitic_time_word_is_held_for_correction() {
             "at 5 p.m.",
             "2026-10-08T17:00:00-04:00",
         ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday'll work.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday\u{2019}ll work.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Saturday'd be better.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Four'll do.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me at 5 p.m. to call the roofer. Tomorrow'd be better.",
+            "at 5 p.m.",
+            "2026-10-08T17:00:00-04:00",
+        ),
     ] {
         let span = span_of(text, quoted);
         assert!(
@@ -1893,6 +1944,9 @@ fn a_correction_with_a_clitic_time_word_is_held_for_correction() {
     for text in [
         "Remind me Friday at 3 p.m. to call the roofer. It's urgent.",
         "Remind me Friday at 3 p.m. to call the roofer. That\u{2019}s all.",
+        "Remind me Friday at 3 p.m. to call the roofer. Sam's roof leaks.",
+        "Remind me Friday at 3 p.m. to call the roofer. I'll bring the quote.",
+        "Remind me Friday at 3 p.m. to call the roofer. He\u{2019}d like that.",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
