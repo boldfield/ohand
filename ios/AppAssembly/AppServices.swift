@@ -128,10 +128,14 @@ final class AppServices {
                 overview: PermissionsOverview(
                     reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
                     memory: UserDefaultsPermissionMemory()),
-                openSystemSettings: {
-                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                    UIApplication.shared.open(url)
-                }))
+                openSystemSettings: Self.openSystemSettings),
+            statusModel: StatusModel(
+                health: LifecycleHealthReader(lifecycle: lifecycle),
+                permissions: PermissionsOverview(
+                    reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
+                    memory: UserDefaultsPermissionMemory()),
+                retrier: root.jobRunner, scheduling: RootReminderSchedulingReader(root: root),
+                openSystemSettings: Self.openSystemSettings))
         let homeRecents = HomeRecentsModel(
             source: RootHomeRecentsSource(
                 root: root,
@@ -232,6 +236,11 @@ final class AppServices {
     private func askForNotificationsIfPending() {
         guard notificationAskPending else { return }
         askForNotificationsAtReminderBoundary()
+    }
+
+    private static func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     private static let quietAuthenticationReason = "Show your recent captures."

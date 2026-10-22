@@ -45,6 +45,25 @@ private func error(kind: String, recovery: String) -> String {
     "{\"kind\":\"\(kind)\",\"reason\":\"synthetic\",\"recovery\":\"\(recovery)\",\"job_count\":1,\"oldest_age_seconds\":5,\"next_attempt_at\":null}"
 }
 
+private final class ScriptedScheduling: ReminderSchedulingReading {
+    var report: NotificationPermissionReport?
+    init(_ report: NotificationPermissionReport?) { self.report = report }
+    func lastReport() -> NotificationPermissionReport? { report }
+}
+
+private func schedulingReport(
+    _ outlooks: [ReminderOutlook], failure: ReminderReconciliationFailure? = nil
+) -> NotificationPermissionReport {
+    let reminders = outlooks.enumerated().map { index, outlook in
+        ReminderStatus(facts: ReminderFixtures.resolved("item-\(index)"), outlook: outlook)
+    }
+    return NotificationPermissionReport(
+        permission: .usable, transition: .unchanged, trigger: .explicit,
+        readiness: NotificationReadinessReport(permission: .usable, reminders: reminders),
+        promptsGranted: 0, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: failure,
+        converged: failure == nil)
+}
+
 private let notificationsGranted = [PermissionEntry(kind: .notifications, status: .granted, change: .unchanged)]
 
 final class StatusModelTests: XCTestCase {
@@ -56,6 +75,7 @@ final class StatusModelTests: XCTestCase {
         return (
             StatusModel(
                 health: scripted, permissions: ScriptedPermissions(permissions), retrier: retrier,
+                scheduling: ScriptedScheduling(scheduling),
                 openSystemSettings: {}),
             scripted, retrier
         )
@@ -107,13 +127,13 @@ final class StatusModelTests: XCTestCase {
         XCTAssertEqual(retrier.count, 1)
     }
 
-    func testProviderFaultNeedingUserPointsToSettingsAndOffersRetry() async {
+    func testProviderFaultNeedingUserRoutesToProviderSettingsNotRetry() async {
         let (status, _, _) = model(
             health: snapshot(
                 summary: "needs_attention", errors: [error(kind: "configuration_needed", recovery: "user_action")]))
         await status.refresh()
         XCTAssertEqual(fact(status, .processing).detail, StatusText.processingAttentionUserDetail)
-        XCTAssertEqual(fact(status, .processing).action, .retry)
+        XCTAssertEqual(fact(status, .processing).action, .openProviderSettings)
     }
 
     func testTerminalFaultOffersNoRetryAndKeepsSourceUntouched() async {
@@ -132,6 +152,7 @@ final class StatusModelTests: XCTestCase {
         XCTAssertEqual(fact(status, .processing).tone, .waiting)
         XCTAssertTrue(fact(status, .processing).detail.contains("network"))
         XCTAssertTrue(fact(status, .processing).detail.contains("by itself"))
+        XCTAssertEqual(fact(status, .processing).action, StatusAction.none, "waiting work resumes itself; no triage")
     }
 
     func testRetryReadsStatusAgainAfterRecovery() async {
@@ -149,7 +170,7 @@ final class StatusModelTests: XCTestCase {
             (.denied, .revoked, StatusText.notificationsRevokedHeadline, .openSettings),
             (.restricted, .unchanged, StatusText.notificationsOffHeadline, .none),
             (.notRequested, .unchanged, StatusText.notificationsNotAskedHeadline, .none),
-            (.granted, .unchanged, StatusText.notificationsOnHeadline, .none),
+            (.granted, .unchanged, StatusText.notificationsUncheckedHeadline, .none),
         ]
         for (permission, change, headline, action) in cases {
             let (status, _, _) = model(
@@ -159,6 +180,39 @@ final class StatusModelTests: XCTestCase {
             XCTAssertEqual(fact(status, .notifications).headline, headline)
             XCTAssertEqual(fact(status, .notifications).action, action)
         }
+    }
+
+    func testGrantedPermissionDoesNotImplyScheduling() async {
+        let cases: [(NotificationPermissionReport, String, StatusTone)] = [
+            (schedulingReport([.unscheduled(.capacityExceeded)]), StatusText.notificationsUnscheduledHeadline, .needsAttention),
+            (schedulingReport([.unscheduled(.installFailed), .scheduled]), StatusText.notificationsUnscheduledHeadline, .needsAttention),
+            (schedulingReport([.scheduled], failure: .reconciliationFailed), StatusText.notificationsPassFailedHeadline, .needsAttention),
+            (schedulingReport([.awaitingInstall]), StatusText.notificationsInstallingHeadline, .waiting),
+            (schedulingReport([.scheduled]), StatusText.notificationsScheduledHeadline, .good),
+            (schedulingReport([]), StatusText.notificationsNoneHeadline, .good),
+        ]
+        for (report, headline, tone) in cases {
+            let (status, _, _) = model(health: snapshot(summary: "idle"), scheduling: report)
+            await status.refresh()
+            XCTAssertEqual(fact(status, .notifications).headline, headline)
+            XCTAssertEqual(fact(status, .notifications).tone, tone)
+        }
+        let (unscheduled, _, _) = model(
+            health: snapshot(summary: "idle"), scheduling: schedulingReport([.unscheduled(.capacityExceeded)]))
+        await unscheduled.refresh()
+        XCTAssertTrue(fact(unscheduled, .notifications).detail.contains("not scheduled"))
+        XCTAssertFalse(fact(unscheduled, .notifications).detail.contains("will appear when they are due"))
+    }
+
+    func testRetryRequestIsAcknowledgedUntilNoRetryIsOffered() async {
+        let (status, health, _) = model(health: snapshot(summary: "stalled"))
+        await status.refresh()
+        XCTAssertFalse(status.retryRequested)
+        await status.retry()
+        XCTAssertTrue(status.retryRequested)
+        health.set(snapshot(summary: "idle"))
+        await status.refresh()
+        XCTAssertFalse(status.retryRequested)
     }
 
     func testFactsBeforeFirstReadDoNotClaimHealth() {

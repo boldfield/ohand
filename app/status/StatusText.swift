@@ -41,8 +41,39 @@ enum StatusText {
         "Captures are saved. This work continues by itself when the network, provider or capability it needs is back."
     static let processingWorkingHeadline = "Work is in progress"
 
-    static let notificationsOnHeadline = "Reminders can be delivered"
-    static let notificationsOnDetail = "Notifications are allowed, so saved reminders will appear when they are due."
+    static let notificationsUncheckedHeadline = "Reminder scheduling has not been checked yet"
+    static let notificationsUncheckedDetail =
+        "Notifications are allowed, but no reminder pass has finished since this version opened. Reminders are saved."
+    static let notificationsPassFailedHeadline = "Reminder scheduling did not finish"
+    static let notificationsPassFailedDetail =
+        "Reminders are saved, but the last attempt to schedule them failed. It is tried again when Oh And next opens."
+    static let notificationsUnscheduledHeadline = "Some reminders are not scheduled"
+    static let notificationsInstallingHeadline = "Reminders are being scheduled"
+    static let notificationsScheduledHeadline = "Reminders are scheduled"
+    static let notificationsNoneHeadline = "No reminders are waiting to be scheduled"
+    static let notificationsNoneDetail = "Notifications are allowed. Nothing is held back."
+
+    static func notificationsUnscheduledDetail(count: Int) -> String {
+        "\(count) saved \(count == 1 ? "reminder is" : "reminders are") not scheduled, so \(count == 1 ? "it" : "they") will not alert as things stand. The reminder itself is kept."
+    }
+
+    static func notificationsInstallingDetail(count: Int) -> String {
+        "\(count) saved \(count == 1 ? "reminder is" : "reminders are") waiting for the system to confirm scheduling."
+    }
+
+    static func notificationsScheduledDetail(count: Int) -> String {
+        "\(count) saved \(count == 1 ? "reminder is" : "reminders are") scheduled with the system. That is a schedule, not a promise that an alert is shown."
+    }
+
+    static func unscheduledReason(_ reason: ReminderUnscheduledReason) -> String {
+        switch reason {
+        case .capacityExceeded: return "The system holds only so many; the rest wait until there is room."
+        case .timeInPast: return "Its time has already passed."
+        case .permissionDenied: return "Notifications are off."
+        case .installFailed: return "The system did not accept it; it is tried again."
+        case .unrecognized: return "Its schedule could not be read."
+        }
+    }
     static let notificationsNotAskedHeadline = "Notifications have not been asked for yet"
     static let notificationsNotAskedDetail =
         "Reminders are saved. Oh And asks the first time one needs to be shown."
@@ -54,6 +85,9 @@ enum StatusText {
     static let notificationsRestrictedDetail =
         "A device policy prevents notifications, and Settings cannot change that. Reminders are still saved."
 
+    static let retryRequestedNote =
+        "Asked the waiting work to run again from the saved original. Check again in a moment to see where it stands."
+    static let providerSettingsLabel = "Open Provider settings"
     static let retryLabel = "Try again"
     static let openSettingsLabel = "Open iOS Settings"
     static let refreshLabel = "Check again"
