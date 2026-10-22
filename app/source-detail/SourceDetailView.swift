@@ -109,32 +109,20 @@ struct SourceDetailView: View {
         }
     }
 
-    /// The item changed somewhere else (a notification action, another screen, a reset) while it is shown, here or in
-    /// the search screen's pane: read it again so its text, type and state are current, and an item deleted meanwhile
-    /// says "Not here". A change made with this screen's own controls is left to them, so their result stays shown; an
-    /// item that is not shown (locked, gone or unreadable) is not read.
+    /// The item changed somewhere else (a notification action, another screen, a reset) while it is shown in the search
+    /// screen's pane, whose results are read again for the same change: read it again so the card's text, type and
+    /// state agree with them, and an item deleted meanwhile says "Not here" as its row disappears. The delete control
+    /// reads the revision the card now shows. The correction and reminder
+    /// editors keep the revision the person started from, so a save against it still meets the conflict that shows the
+    /// newer values and keeps what was typed. A change made with this screen's own controls is left to them, so their
+    /// result stays shown; an item that is not shown (locked, gone or unreadable) is not read.
     private func readAgainAfterChange() async {
-        guard model.content != nil else { return }
+        guard isInItemPane, model.content != nil else { return }
         let ownControlIsWorking = model.itemControls?.isWorking == true || model.reminderEditor?.isWorking == true
             || model.deletion?.isBusy == true
         if ownControlIsWorking { return }
         await model.load()
-        if let controls = model.itemControls, !controls.isWorking {
-            // Only drafts the person has not touched follow the stored values; anything typed stays.
-            await controls.load(resetting: Self.untouchedDrafts(of: controls))
-        }
-        await model.reminderEditor?.load()
-        // The deletion control applies against the revision it read, which the change may have moved on.
         await model.deletion?.prepare()
-    }
-
-    private static func untouchedDrafts(of controls: ItemControlsModel) -> Set<ItemControlsField> {
-        guard let snapshot = controls.snapshot else { return [.text, .type, .sessionTopic] }
-        var untouched: Set<ItemControlsField> = []
-        if controls.textDraft == (snapshot.text ?? "") { untouched.insert(.text) }
-        if controls.topicDraft == (snapshot.sessionTopic ?? "") { untouched.insert(.sessionTopic) }
-        if controls.pendingType == snapshot.itemType { untouched.insert(.type) }
-        return untouched
     }
 
     private var header: some View {

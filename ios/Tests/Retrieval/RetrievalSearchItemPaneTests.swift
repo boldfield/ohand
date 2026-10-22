@@ -209,33 +209,31 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let deletion = try XCTUnwrap(detail.deletion)
         XCTAssertEqual(detail.content?.lifecycleLabel, "Active")
 
-        // A text correction stored elsewhere: the pane shows the new words, and an untouched draft follows them.
+        // A text correction stored elsewhere: the pane shows the new words. The correction editor keeps the revision
+        // the person started from, so a save from it meets the conflict that shows the newer values.
         let corrected = RetrievalResultRow(
             reference: shown.reference, text: "synthetic words corrected elsewhere",
             originalText: "synthetic capture in the pane", basis: .corrected, matched: .current,
             snippet: RetrievalSnippet(text: "synthetic words corrected elsewhere", span: nil),
             scopeName: "Personal", capturedAt: shown.capturedAt, itemType: .note)
         searcher.page = RetrievalPage(totalAccessible: 1, rows: [corrected], offset: 0)
+        let startRevision = try revision(of: itemID)
         try correctText(itemID: itemID, to: "synthetic words corrected elsewhere")
         let correctedRevision = try revision(of: itemID)
         settle {
             detail.content?.currentText == "synthetic words corrected elsewhere"
-                && controls.snapshot?.revision == correctedRevision
                 && MainActor.assumeIsolated { deletion.revision == correctedRevision }
                 && searchModel.rows == [corrected]
         }
         XCTAssertEqual(detail.content?.currentText, "synthetic words corrected elsewhere", "the pane reads the item again")
         XCTAssertEqual(detail.content?.sections.last?.text, "synthetic words corrected elsewhere")
-        XCTAssertEqual(controls.textDraft, "synthetic words corrected elsewhere", "an untouched draft shows the new words")
         XCTAssertEqual(
             MainActor.assumeIsolated { deletion.revision }, correctedRevision,
-            "the delete control applies against the revision now stored")
+            "the delete control applies against the revision the pane now shows")
+        XCTAssertEqual(controls.snapshot?.revision, startRevision, "the editor keeps the revision it started from")
         XCTAssertEqual(searchModel.rows, [corrected])
 
-        // A completion stored elsewhere: the pane shows the item completed and offers no more actions, and words the
-        // person typed but did not save stay as typed.
-        controls.textDraft = "synthetic words typed but not saved"
-        let completedRevision = correctedRevision + 1
+        // A completion stored elsewhere, as a notification's Done stores it: the pane shows the item completed.
         var completed = false
         var failure: Error?
         Task {
@@ -244,15 +242,12 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             completed = true
         }
-        settle {
-            completed && detail.content?.lifecycleLabel == "Completed"
-                && controls.snapshot?.revision == completedRevision
-        }
+        settle { completed && detail.content?.lifecycleLabel == "Completed" }
         XCTAssertNil(failure)
         XCTAssertEqual(detail.content?.lifecycleLabel, "Completed", "the pane shows the stored state")
-        XCTAssertEqual(controls.snapshot?.lifecycleState, "completed")
-        XCTAssertFalse(controls.canAct, "a completed item offers no completion")
-        XCTAssertEqual(controls.textDraft, "synthetic words typed but not saved", "nothing typed is discarded")
+        let completedRevision = try revision(of: itemID)
+        settle { MainActor.assumeIsolated { deletion.revision == completedRevision } }
+        XCTAssertEqual(MainActor.assumeIsolated { deletion.revision }, completedRevision)
 
         // A deletion stored elsewhere: no deleted text stays in the pane, which says the item is not here.
         searcher.page = RetrievalPage(totalAccessible: 0, rows: [], offset: 0)
