@@ -26,10 +26,27 @@ public struct RoutePolicyGrant: Decodable, Equatable, Sendable {
     public let capability: String
     /// `cloud`, `private_server` or `unknown`.
     public let destinationClasses: [String]
+    /// Unrevoked profile versions whose every destination this grant allows. A grant for one provider does not cover
+    /// another's version. Older core output without the field decodes as empty: nothing is covered.
+    public let coveredProfileVersions: [String]
+
+    public init(capability: String, destinationClasses: [String], coveredProfileVersions: [String] = []) {
+        self.capability = capability
+        self.destinationClasses = destinationClasses
+        self.coveredProfileVersions = coveredProfileVersions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        capability = try container.decode(String.self, forKey: .capability)
+        destinationClasses = try container.decode([String].self, forKey: .destinationClasses)
+        coveredProfileVersions = try container.decodeIfPresent([String].self, forKey: .coveredProfileVersions) ?? []
+    }
 
     enum CodingKeys: String, CodingKey {
         case capability
         case destinationClasses = "destination_classes"
+        case coveredProfileVersions = "covered_profile_versions"
     }
 }
 

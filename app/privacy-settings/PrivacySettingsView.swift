@@ -144,10 +144,8 @@ struct PrivacySettingsView: View {
                 repinRow(route: route)
             }
             ForEach(PrivacySettingsModel.grantableCapabilities, id: \.self) { capability in
-                if !model.isGranted(routeID: route.routeID, capability: capability) {
-                    ForEach(model.offeredVersions(for: capability), id: \.version.profileVersion) { offer in
-                        offerRow(route: route, capability: capability, offer: offer)
-                    }
+                ForEach(model.versionsToOffer(routeID: route.routeID, capability: capability), id: \.version.profileVersion) { offer in
+                    offerRow(route: route, capability: capability, offer: offer)
                 }
             }
         }
