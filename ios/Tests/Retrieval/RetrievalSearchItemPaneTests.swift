@@ -23,6 +23,92 @@ private final class PaneSearcher: RetrievalSearching {
     }
 }
 
+/// Reads through the real item-detail service, but holds the answer to the first read, taken before anything changes,
+/// until the test releases it.
+private final class HeldFirstDetailReader: SourceDetailReading, @unchecked Sendable {
+    private let reader: SourceDetailReading
+    private let lock = NSLock()
+    private var readCount = 0
+    private var release: CheckedContinuation<Void, Never>?
+    private var heldFirstRead = false
+
+    init(reader: SourceDetailReading) { self.reader = reader }
+
+    var firstReadIsHeld: Bool { lock.withLock { heldFirstRead } }
+
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        let isFirst = lock.withLock { () -> Bool in
+            readCount += 1
+            return readCount == 1
+        }
+        let answer = try await reader.detail(itemID: itemID)
+        if isFirst {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    release = continuation
+                    heldFirstRead = true
+                }
+            }
+        }
+        return answer
+    }
+
+    func releaseFirstRead() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { release = nil }
+            return release
+        }
+        continuation?.resume()
+    }
+}
+
+/// The real reminder controls, except that a time correction waits for the test before it is sent.
+private final class HeldTimeReminderEditor: ReminderEditing, @unchecked Sendable {
+    private let editor: ReminderEditing
+    private let lock = NSLock()
+    private var release: CheckedContinuation<Void, Never>?
+    private var heldSave = false
+
+    init(editor: ReminderEditing) { self.editor = editor }
+
+    var saveIsHeld: Bool { lock.withLock { heldSave } }
+
+    func reminder(itemID: String) async throws -> ReminderReadAnswer {
+        try await editor.reminder(itemID: itemID)
+    }
+
+    func correctTime(
+        commandID: String, itemID: String, expectedRevision: Int, expectedReminderVersion: Int, instant: Date,
+        timeZoneID: String
+    ) async throws -> ReminderControlReceipt {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                release = continuation
+                heldSave = true
+            }
+        }
+        return try await editor.correctTime(
+            commandID: commandID, itemID: itemID, expectedRevision: expectedRevision,
+            expectedReminderVersion: expectedReminderVersion, instant: instant, timeZoneID: timeZoneID)
+    }
+
+    func cancel(
+        commandID: String, itemID: String, expectedRevision: Int, expectedReminderVersion: Int
+    ) async throws -> ReminderControlReceipt {
+        try await editor.cancel(
+            commandID: commandID, itemID: itemID, expectedRevision: expectedRevision,
+            expectedReminderVersion: expectedReminderVersion)
+    }
+
+    func releaseSave() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { release = nil }
+            return release
+        }
+        continuation?.resume()
+    }
+}
+
 /// Hosts the real app root with the production search entry and destinations over the real composition root and Rust
 /// core with synthetic data. At regular width a selected result opens the real source detail beside the kept results;
 /// at compact width it is pushed as before.
@@ -266,6 +352,106 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
     }
 
+    /// A change stored while the pane's first read is still in flight: that read, taken before the change, never
+    /// replaces the pane's answer; the pane shows the item as it now is.
+    func testAChangeStoredWhileThePanesFirstReadIsInFlightIsShownWhenThatReadEnds() throws {
+        let itemID = try saveCapture()
+        let heldReader = HeldFirstDetailReader(reader: root.itemDetails)
+        let shown = try showResult(
+            itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular,
+            makeDetail: { [unowned self] id in
+                let built = SourceDetailModel(
+                    itemID: id, reader: heldReader, opener: root.playback, readScope: { [unowned self] in root.readScope })
+                built.deletion = .assembled(itemID: id, root: root)
+                return built
+            })
+        searchModel.select(shown)
+        settle { heldReader.firstReadIsHeld }
+        XCTAssertTrue(heldReader.firstReadIsHeld, "the pane's first read is in flight")
+        let detail = try XCTUnwrap(detailModels.first)
+        XCTAssertNil(detail.content)
+
+        let corrected = RetrievalResultRow(
+            reference: shown.reference, text: "synthetic words corrected during the first read",
+            originalText: "synthetic capture in the pane", basis: .corrected, matched: .current,
+            snippet: RetrievalSnippet(text: "synthetic words corrected during the first read", span: nil),
+            scopeName: "Personal", capturedAt: shown.capturedAt, itemType: .note)
+        searcher.page = RetrievalPage(totalAccessible: 1, rows: [corrected], offset: 0)
+        try correctText(itemID: itemID, to: "synthetic words corrected during the first read")
+        settle { detail.content?.currentText == "synthetic words corrected during the first read" }
+
+        heldReader.releaseFirstRead()
+        settle { !detail.isLoading && searchModel.rows == [corrected] }
+        // Give the released read time to land, were it allowed to.
+        runMainLoop(for: 1)
+        XCTAssertEqual(
+            detail.content?.currentText, "synthetic words corrected during the first read",
+            "the read taken before the change does not replace the pane's answer")
+        XCTAssertEqual(detail.content?.sections.last?.text, "synthetic words corrected during the first read")
+        XCTAssertEqual(searchModel.rows, [corrected])
+        XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
+    }
+
+    /// A completion stored outside the pane, as a notification's Done stores it, while the pane's own reminder save is in
+    /// flight: the pane waits for its save to settle, keeps the save's answer, and then shows the item completed.
+    func testAChangeStoredWhileThePanesReminderSaveIsInFlightIsShownOnceTheSaveSettles() throws {
+        let itemID = try saveCapture()
+        try correctType(itemID: itemID, to: .action)
+        let heldEditor = HeldTimeReminderEditor(editor: root.reminderControls)
+        let shown = try showResult(
+            itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular,
+            makeDetail: { [unowned self] id in
+                let built = SourceDetailModel.assembled(itemID: id, root: root)
+                built.reminderEditor = ReminderEditModel(itemID: id, editor: heldEditor)
+                return built
+            })
+        searchModel.select(shown)
+        settle {
+            detailModels.first?.content != nil && detailModels.first?.reminderEditor?.hasRead == true
+                && detailModels.first?.reminderEditor?.isLoading == false
+                && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
+        }
+        let detail = try XCTUnwrap(detailModels.first)
+        let reminderEditor = try XCTUnwrap(detail.reminderEditor)
+        XCTAssertEqual(detail.content?.lifecycleLabel, "Active")
+
+        var saved = false
+        Task { @MainActor in
+            reminderEditor.draftDate = Date().addingTimeInterval(2 * 86_400)
+            reminderEditor.draftTimeZoneID = "UTC"
+            await reminderEditor.save()
+            saved = true
+        }
+        settle { heldEditor.saveIsHeld && reminderEditor.isWorking }
+        XCTAssertTrue(reminderEditor.isWorking, "the pane's reminder save is in flight")
+
+        var completed = false
+        var failure: Error?
+        let activeRevision = try revision(of: itemID)
+        Task {
+            do { _ = try await root.itemLifecycleControls.complete(
+                commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: activeRevision) }
+            catch { failure = error }
+            completed = true
+        }
+        settle { completed }
+        XCTAssertNil(failure)
+        // Longer than the screen's watch interval, so a read that did not wait would have landed.
+        runMainLoop(for: 1)
+        XCTAssertEqual(detail.content?.lifecycleLabel, "Active", "the read waits while the pane's own save works")
+
+        heldEditor.releaseSave()
+        settle { saved && detail.content?.lifecycleLabel == "Completed" }
+        XCTAssertTrue(saved)
+        XCTAssertEqual(detail.content?.lifecycleLabel, "Completed", "the pane reads the item once its save settles")
+        XCTAssertEqual(reminderEditor.message, .itemClosed, "the save's own answer stays shown")
+        let completedRevision = try revision(of: itemID)
+        settle { MainActor.assumeIsolated { detail.deletion?.revision == completedRevision } }
+        XCTAssertEqual(MainActor.assumeIsolated { detail.deletion?.revision }, completedRevision)
+        XCTAssertEqual(searchModel.selectedReference, shown.reference)
+        XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
+    }
+
     func testAtCompactWidthAResultIsStillPushedAndNoPaneIsShown() throws {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 390, height: 844), sizeClass: .compact)
@@ -286,7 +472,8 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
 
     /// Hosts the root, opens Search through the production entry and shows one result for the saved item.
     private func showResult(
-        itemID: String, size: CGSize, sizeClass: UserInterfaceSizeClass
+        itemID: String, size: CGSize, sizeClass: UserInterfaceSizeClass,
+        makeDetail: ((String) -> SourceDetailModel)? = nil
     ) throws -> RetrievalResultRow {
         let reference = try XCTUnwrap(RetrievalItemReference(candidate: itemID))
         let shown = RetrievalResultRow(
@@ -300,7 +487,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             providerSettings: services.managementContext.providerSettings,
             promptSettings: services.managementContext.promptSettings,
             sourceDetail: { [unowned self] id in
-                let built = SourceDetailModel.assembled(itemID: id, root: root)
+                let built = makeDetail?(id) ?? SourceDetailModel.assembled(itemID: id, root: root)
                 detailModels.append(built)
                 return built
             },
@@ -339,6 +526,15 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         } while !condition() && Date() < deadline
     }
 
+    /// Runs the main loop for a fixed time, for checks that something does not happen.
+    private func runMainLoop(for seconds: TimeInterval) {
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        while Date() < deadline {
+            retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        }
+    }
+
     private func saveCapture() throws -> String {
         var outcome: CompositionSaveOutcome?
         root.saveText(
@@ -359,6 +555,21 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         Task {
             do { _ = try await root.itemCorrections.correctText(
                 commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision, text: text) }
+            catch { failure = error }
+            finished = true
+        }
+        settle { finished }
+        XCTAssertNil(failure)
+    }
+
+    private func correctType(itemID: String, to itemType: ItemCorrectionItemType) throws {
+        let revision = try revision(of: itemID)
+        var finished = false
+        var failure: Error?
+        Task {
+            do { _ = try await root.itemCorrections.correctType(
+                commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision,
+                itemType: itemType) }
             catch { failure = error }
             finished = true
         }

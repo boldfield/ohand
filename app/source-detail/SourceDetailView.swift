@@ -54,6 +54,9 @@ struct SourceDetailView: View {
     /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
     /// never sets it, so it still says "Not here".
     @State private var deletedHere = false
+    /// A change to this item arrived while one of this screen's own controls was working; the item is read again once
+    /// they settle.
+    @State private var readAgainIsPending = false
 
     private var sideMargin: CGFloat { isInItemPane ? 0 : DSSpacing.sideMargin(for: horizontalSizeClass) }
 
@@ -105,6 +108,7 @@ struct SourceDetailView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 model.checkSession()
+                if readAgainIsPending && !ownControlIsWorking { await readAgainAfterChange() }
             }
         }
     }
@@ -114,15 +118,25 @@ struct SourceDetailView: View {
     /// state agree with them, and an item deleted meanwhile says "Not here" as its row disappears. The delete control
     /// reads the revision the card now shows. The correction and reminder
     /// editors keep the revision the person started from, so a save against it still meets the conflict that shows the
-    /// newer values and keeps what was typed. A change made with this screen's own controls is left to them, so their
-    /// result stays shown; an item that is not shown (locked, gone or unreadable) is not read.
+    /// newer values and keeps what was typed. A first read still in flight is superseded, so an answer read before the
+    /// change never replaces this one. While one of this screen's own controls is working the read waits until they
+    /// settle, so their result stays shown, and is then made. An item that is not shown (locked, gone or unreadable) is
+    /// not read.
     private func readAgainAfterChange() async {
-        guard isInItemPane, model.content != nil else { return }
-        let ownControlIsWorking = model.itemControls?.isWorking == true || model.reminderEditor?.isWorking == true
-            || model.deletion?.isBusy == true
-        if ownControlIsWorking { return }
+        guard isInItemPane else { return }
+        if ownControlIsWorking {
+            readAgainIsPending = true
+            return
+        }
+        readAgainIsPending = false
+        guard model.failure == nil || model.isLoading else { return }
         await model.load()
         await model.deletion?.prepare()
+    }
+
+    private var ownControlIsWorking: Bool {
+        model.itemControls?.isWorking == true || model.reminderEditor?.isWorking == true
+            || model.deletion?.isBusy == true
     }
 
     private var header: some View {
