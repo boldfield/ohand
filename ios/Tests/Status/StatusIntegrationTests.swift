@@ -42,6 +42,12 @@ final class StatusIntegrationTests: XCTestCase {
     override func tearDownWithError() throws {
         window?.isHidden = true
         window = nil
+        if let services {
+            // A save starts a drain; let it finish so no core result is still in flight when the root closes.
+            wait { !services.root.jobRunner.isDraining }
+            let settled = Date().addingTimeInterval(1.5)
+            wait(timeout: 2) { Date() >= settled }
+        }
         services?.shutDown()
         services = nil
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
