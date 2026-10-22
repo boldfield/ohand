@@ -55,7 +55,7 @@ final class RetrievalSearchModel: ObservableObject {
     private let calendar: Calendar
     private var generation = 0
     private var lastRequest: RetrievalSearchRequest?
-    /// The request whose answer is awaited, before any search has completed.
+    /// The request sent last; its answer is awaited while `phase` is `.searching`.
     private var inFlightRequest: RetrievalSearchRequest?
     private var handedOffToDetail = false
     /// True from leaving for a result's detail (search kept) until the screen is back.
@@ -155,9 +155,11 @@ final class RetrievalSearchModel: ObservableObject {
         if !isInDetail { runAgain() }
     }
 
-    /// Runs the last query again from its first result, keeping the item pane's selection.
+    /// Runs the query again from its first result, keeping the item pane's selection. While a search is running, that is
+    /// the one being awaited, whose words and filters are on screen; otherwise it is the last one that answered.
     private func runAgain() {
-        guard let request = lastRequest ?? (phase == .searching ? inFlightRequest : nil) else { return }
+        let awaited = phase == .searching ? inFlightRequest : nil
+        guard let request = awaited ?? lastRequest else { return }
         resultsMayBeStale = false
         var first = request
         first.offset = 0

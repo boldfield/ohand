@@ -168,6 +168,32 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertEqual(model.rows.map(\.id), [Self.firstID])
     }
 
+    func testAChangeWhileANewerSearchRunsRunsTheNewerSearchAgainNotTheOlderOne() {
+        showResults([row(Self.firstID), row(Self.secondID)])
+        let older = searcher.requests[0]
+        model.query = "plumber"
+        model.itemType = .note
+        model.search()
+        let newer = searcher.requests[1]
+        XCTAssertNotEqual(newer, older)
+
+        publish(.item(Self.firstID))
+        XCTAssertEqual(searcher.requests.count, 3)
+        XCTAssertEqual(searcher.requests[2], newer, "the words and filters on screen are the ones run again")
+        deliver(.success(page([row(Self.firstID, text: "older words")])), at: 1)
+        XCTAssertTrue(model.rows.isEmpty, "the answer asked before the change is not shown")
+        deliver(.success(page([row(Self.secondID, text: "plumber words")], total: 2)), at: 2)
+        XCTAssertEqual(model.rows.map(\.text), ["plumber words"])
+        XCTAssertEqual(model.phase, .results)
+
+        model.loadMore()
+        XCTAssertEqual(searcher.requests.count, 4)
+        XCTAssertEqual(searcher.requests[3].offset, 1)
+        publish(.item(Self.secondID))
+        XCTAssertEqual(searcher.requests.count, 5)
+        XCTAssertEqual(searcher.requests[4], newer, "the newer search, from its first result")
+    }
+
     func testAllItemsEmptiesTheResultsAndAsksAgain() {
         showResults([row(Self.firstID)])
         publish(.allItems)
