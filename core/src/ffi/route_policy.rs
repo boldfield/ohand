@@ -16,7 +16,10 @@
 //! Success events: grant `{"operation_id","disposition"}` (`granted` or `unchanged`), revoke
 //! `{"operation_id","disposition"}` (`revoked` or `unchanged`), list
 //! `{"operation_id","routes":[{"route_id","route_name","scope","granted_capabilities":
-//! [{"capability","destination_classes"}]}]}`.
+//! [{"capability","destination_classes","covered_profile_versions"}]}]}`.
+//! `covered_profile_versions` lists the unrevoked profile versions whose every origin the grant
+//! allows (ordered by version identifier), the same test `authorize_job` applies; a grant for one provider does not
+//! cover another's version.
 
 use super::capture::OHAND_CORE_MAX_CAPTURE_REQUEST_BYTES;
 use super::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
@@ -58,6 +61,7 @@ struct DispositionOutcome {
 struct ListedCapability {
     capability: &'static str,
     destination_classes: Vec<&'static str>,
+    covered_profile_versions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -171,6 +175,7 @@ fn list_job(operation_id: u64) -> JobFn {
                             .into_iter()
                             .map(|class| class.as_str())
                             .collect(),
+                        covered_profile_versions: granted.covered_profile_versions,
                     })
                     .collect(),
             })

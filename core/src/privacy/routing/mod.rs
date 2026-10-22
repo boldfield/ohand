@@ -305,7 +305,7 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
     let Some(granted_destinations) = parse_origin_list(&grant) else {
         return Ok(Denied(DenialReason::MalformedPolicy));
     };
-    if !is_subset(&destinations, &granted_destinations) {
+    if !grant_covers(&destinations, &granted_destinations) {
         return Ok(Denied(DenialReason::DestinationNotAuthorizedForCapability));
     }
 
@@ -425,6 +425,13 @@ fn parse_origin_list(stored: &str) -> Option<Vec<String>> {
         .iter()
         .map(|entry| normalize_origin(entry))
         .collect()
+}
+
+/// Whether a capability grant covers a profile version: every origin the version contacts is within
+/// the grant's authorized destinations. [`authorize_job`] and the route-policy listing both decide
+/// coverage here.
+fn grant_covers(version_destinations: &[String], granted_destinations: &[String]) -> bool {
+    is_subset(version_destinations, granted_destinations)
 }
 
 fn is_subset(required: &[String], allowed: &[String]) -> bool {
