@@ -194,6 +194,26 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertEqual(searcher.requests[4], newer, "the newer search, from its first result")
     }
 
+    func testAChangeAfterANewerSearchFailedRunsTheNewerSearchAgainNotTheOlderOne() {
+        showResults([row(Self.firstID), row(Self.secondID)])
+        let older = searcher.requests[0]
+        model.query = "plumber"
+        model.itemType = .note
+        model.search()
+        let newer = searcher.requests[1]
+        XCTAssertNotEqual(newer, older)
+        deliver(.failure(.temporarilyUnavailable), at: 1)
+        XCTAssertEqual(model.phase, .failed(.temporarilyUnavailable))
+
+        publish(.item(Self.firstID))
+        XCTAssertEqual(searcher.requests.count, 3)
+        XCTAssertEqual(searcher.requests[2], newer, "the words and filters on screen are the ones run again")
+        XCTAssertFalse(searcher.requests.dropFirst().contains(older), "the older search is never run again")
+        deliver(.success(page([row(Self.secondID, text: "plumber words")])), at: 2)
+        XCTAssertEqual(model.rows.map(\.text), ["plumber words"])
+        XCTAssertEqual(model.phase, .results)
+    }
+
     func testAllItemsEmptiesTheResultsAndAsksAgain() {
         showResults([row(Self.firstID)])
         publish(.allItems)

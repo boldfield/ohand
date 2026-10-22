@@ -55,8 +55,9 @@ final class RetrievalSearchModel: ObservableObject {
     private let calendar: Calendar
     private var generation = 0
     private var lastRequest: RetrievalSearchRequest?
-    /// The request sent last; its answer is awaited while `phase` is `.searching`.
-    private var inFlightRequest: RetrievalSearchRequest?
+    /// The last search sent from its first result: the words and filters on screen, whether its answer is awaited,
+    /// came back or failed. Loading more pages does not change it.
+    private var shownRequest: RetrievalSearchRequest?
     private var handedOffToDetail = false
     /// True from leaving for a result's detail (search kept) until the screen is back.
     private var awayInDetail = false
@@ -155,11 +156,10 @@ final class RetrievalSearchModel: ObservableObject {
         if !isInDetail { runAgain() }
     }
 
-    /// Runs the query again from its first result, keeping the item pane's selection. While a search is running, that is
-    /// the one being awaited, whose words and filters are on screen; otherwise it is the last one that answered.
+    /// Runs the query again from its first result, keeping the item pane's selection. That is the search whose words and
+    /// filters are on screen, even while it is still running or after it failed, never an older one that answered.
     private func runAgain() {
-        let awaited = phase == .searching ? inFlightRequest : nil
-        guard let request = awaited ?? lastRequest else { return }
+        guard let request = shownRequest else { return }
         resultsMayBeStale = false
         var first = request
         first.offset = 0
@@ -193,7 +193,7 @@ final class RetrievalSearchModel: ObservableObject {
         selectedReference = nil
         resultsMayBeStale = false
         awayInDetail = false
-        inFlightRequest = nil
+        shownRequest = nil
     }
 
     private func run(
@@ -219,7 +219,7 @@ final class RetrievalSearchModel: ObservableObject {
             canLoadMore = false
         }
         phase = .searching
-        inFlightRequest = request
+        if !appending { shownRequest = request }
         searcher.search(request) { [weak self] result in
             DispatchQueue.main.async {
                 self?.finish(
