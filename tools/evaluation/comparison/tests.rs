@@ -166,9 +166,10 @@ fn a_wrong_deadline_on_one_arm_is_that_arms_defect_and_a_separate_disagreement()
         report.disagreement.by_facet[&DisagreementFacet::Reminder],
         1
     );
-    // The guard drops the instant for both arms, so neither is objectively clean even though
-    // only B proposed a wrong deadline: objective cleanliness is not disagreement.
-    assert_eq!(report.paired_objective.neither_clean, 1);
+    // The resolver now schedules the correct instant, so only A is objectively clean while B's
+    // wrong deadline is rejected: objective cleanliness is not disagreement.
+    assert_eq!(report.paired_objective.neither_clean, 0);
+    assert_eq!(report.paired_objective.only_a_clean, 1);
     assert_eq!(report.paired_objective.only_b_clean, 0);
 }
 

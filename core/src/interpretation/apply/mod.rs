@@ -44,6 +44,7 @@ use crate::reminders::state::{
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
 use crate::time::resolver::{TimeContext, TimeResolver};
+use crate::time::{is_temporal_word, span_covers_time_expression};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
@@ -105,6 +106,9 @@ pub enum ReminderDisposition {
     NoExplicitIntent,
     /// The candidate contradicts the deterministic resolver (different instant or timezone, or a
     /// time the resolver itself calls ambiguous); nothing is scheduled and no reminder is created.
+    /// A span that quotes less than the capture's time expression is not a contradiction: the
+    /// request is recorded as not scheduled yet, needing correction, with the whole capture as
+    /// its phrase.
     CandidateRejected(&'static str),
     /// The reminder was already committed, recurring or cancelled; derived output cannot replace
     /// it, so it was left exactly as it was.
@@ -794,6 +798,16 @@ pub fn record_interpretation_failure_in_tx(
 /// reduce text with a repeat marker to a one-shot, never replaces a committed time, and records
 /// the schedule operation in the same transaction. Unparseable, ambiguous or recurring phrases
 /// are stored there as not scheduled with the phrase kept.
+///
+/// A quoted phrase that resolves but covers less than the capture's time expression
+/// ([`span_covers_time_expression`]) is kept the same way: the request goes to the API with the
+/// whole capture as its phrase. The resolver cannot reduce a text that asks to be reminded to
+/// one instant, so the API stores it as not scheduled yet, needing correction, and the claim is
+/// never used. Such a capture is still checked for intent, but with its timing already held
+/// ([`IntentReading::TimingHeld`]): a comma, colon or bracket between the request and the time
+/// ("Remind me to buy eggs, milk and bread tomorrow at 9 a.m.") does not drop the request, and a closing "no"
+/// that is followed by a new time ("... No wait, 10 a.m.") corrects the time rather than
+/// withdrawing the request.
 fn record_reminder(
     tx: &Transaction<'_>,
     proposal: &Proposal,
@@ -812,14 +826,23 @@ fn record_reminder(
     {
         return Ok(ReminderDisposition::NotRecorded);
     }
-    if !states_reminder_intent(basis_text, candidate.source_span) {
+    let phrase = quoted_phrase(candidate, basis_text);
+    let agreement = candidate_agreement(candidate, &phrase, basis_text, &source.time_context);
+    let reading = match agreement {
+        Agreement::SpanTruncated => IntentReading::TimingHeld,
+        Agreement::Agrees | Agreement::Contradicts(_) => IntentReading::Exact,
+    };
+    if !states_reminder_intent(basis_text, candidate.source_span, reading) {
         return Ok(ReminderDisposition::NoExplicitIntent);
     }
 
-    let phrase = quoted_phrase(candidate, basis_text);
-    if let Some(contradiction) = candidate_contradiction(candidate, &phrase, &source.time_context) {
-        return Ok(ReminderDisposition::CandidateRejected(contradiction));
-    }
+    let phrase = match agreement {
+        Agreement::Contradicts(contradiction) => {
+            return Ok(ReminderDisposition::CandidateRejected(contradiction));
+        }
+        Agreement::SpanTruncated => basis_text.to_string(),
+        Agreement::Agrees => phrase,
+    };
 
     let request = DerivedReminderRequest {
         item_id: item.item_id.clone(),
@@ -868,18 +891,40 @@ fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Why the model's claim cannot be trusted, or `None` when it agrees with the resolver or the
-/// resolver itself declines to produce one instant (ambiguous, unparseable or recurring phrases,
-/// which the reminder API stores as not scheduled without using the claim).
-fn candidate_contradiction(
+/// How the model's claim stands against the source.
+enum Agreement {
+    /// The claim agrees with the resolver, or the resolver itself declines to produce one instant
+    /// (ambiguous, unparseable or recurring phrases, which the reminder API stores as not
+    /// scheduled without using the claim).
+    Agrees,
+    /// The claim cannot be trusted, for the given reason.
+    Contradicts(&'static str),
+    /// The quoted phrase resolves, but covers less than the time expression around it, so what
+    /// it resolves to may not be what the capture says ("at 5 p.m." of "tomorrow at 5 p.m.",
+    /// "tomorrow at 9 a.m." of "... Tokyo time", "Friday at 3 p.m." of "... Actually, make it
+    /// Saturday"). The capture's timing is ambiguous and the claim is never used.
+    SpanTruncated,
+}
+
+fn candidate_agreement(
     candidate: &ReminderProposal,
     phrase: &str,
+    basis_text: &str,
     time_context: &TimeContext,
-) -> Option<&'static str> {
-    let resolution = TimeResolver::resolve(phrase, time_context).ok()?;
-    let resolved = resolution.resolved_time?;
+) -> Agreement {
+    let Ok(resolution) = TimeResolver::resolve(phrase, time_context) else {
+        return Agreement::Agrees;
+    };
+    let Some(resolved) = resolution.resolved_time else {
+        return Agreement::Agrees;
+    };
+    if let Some(span) = candidate.source_span {
+        if !span_covers_time_expression(basis_text, span.start, span.end) {
+            return Agreement::SpanTruncated;
+        }
+    }
     if candidate.quality == TimeResolutionQuality::Ambiguous {
-        return Some("the interpreter reported the time as ambiguous");
+        return Agreement::Contradicts("the interpreter reported the time as ambiguous");
     }
     let claimed = candidate
         .instant
@@ -887,21 +932,27 @@ fn candidate_contradiction(
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|instant| instant.with_timezone(&Utc));
     if claimed != Some(resolved) {
-        return Some("the proposed instant is not what the source phrase resolves to");
+        return Agreement::Contradicts(
+            "the proposed instant is not what the source phrase resolves to",
+        );
     }
     if candidate.timezone_id.as_deref() != Some(time_context.timezone.as_str()) {
-        return Some("the proposed timezone differs from the capture's timezone");
+        return Agreement::Contradicts("the proposed timezone differs from the capture's timezone");
     }
     if resolution.is_ambiguous && !resolution.is_past {
-        return Some("the resolver reports the time as ambiguous");
+        return Agreement::Contradicts("the resolver reports the time as ambiguous");
     }
-    None
+    Agreement::Agrees
 }
 
 struct IntentToken {
     text: String,
     quoted: bool,
     clause_break: bool,
+    /// A clause break that does not end its sentence or clause outright: a comma, colon or
+    /// bracket ("buy eggs, milk and bread", "the roofer: Friday", "(urgent)"), as opposed to `.`,
+    /// `;`, `!`, `?` or a line break.
+    in_sentence_break: bool,
     start: usize,
     end: usize,
 }
@@ -1459,6 +1510,7 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
                 text: std::mem::take(word),
                 quoted,
                 clause_break: false,
+                in_sentence_break: false,
                 start,
                 end,
             });
@@ -1488,6 +1540,7 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
                     text: String::new(),
                     quoted,
                     clause_break: true,
+                    in_sentence_break: matches!(character, ',' | ':' | '(' | ')'),
                     start: index,
                     end: index + 1,
                 });
@@ -1524,7 +1577,17 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 /// The rest of the capture after the quoted time (or after the cue, without a span) must not
 /// withdraw the request ([`retracted_after`]): "remind me to call the roofer 2026-01-16 09:00:00,
 /// actually don't remind me" ends with the intent not to schedule, so nothing is scheduled.
-fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
+///
+/// With [`IntentReading::TimingHeld`], the span guard has already held the capture's timing for
+/// correction, so no instant can come of it. A comma, colon or bracket between the cue and the
+/// span then no longer detaches the time (a sentence end, a semicolon and every detaching word
+/// still do), and a retracting negation that
+/// closes its clause is a correction, not a withdrawal, when the next clause names a time.
+fn states_reminder_intent(
+    text: &str,
+    time_span: Option<SourceSpan>,
+    reading: IntentReading,
+) -> bool {
     let tokens = tokenize_intent_text(text);
     (0..tokens.len()).any(|start| {
         REMINDER_CUES.iter().any(|cue| {
@@ -1544,8 +1607,10 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
                 return false;
             }
             let cue_end = window[cue.len() - 1].end;
-            let governs = time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span));
-            governs && !retracted_after(&tokens, time_span.map_or(cue_end, |span| span.end))
+            let governs =
+                time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span, reading));
+            governs
+                && !retracted_after(&tokens, time_span.map_or(cue_end, |span| span.end), reading)
         })
     })
 }
@@ -1566,7 +1631,7 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
 /// This is the bounded withdrawal grammar recorded for I05 in
 /// `docs/features/m1-task-refinement.md`; phrasings outside it belong to I05b. Rejecting too much
 /// is safe: the reminder stays unscheduled and the original intention is kept with the item.
-fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
+fn retracted_after(tokens: &[IntentToken], after: usize, reading: IntentReading) -> bool {
     let later: Vec<&IntentToken> = tokens.iter().filter(|token| token.start >= after).collect();
     (0..later.len()).any(|index| {
         let token = later[index];
@@ -1630,6 +1695,12 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             let text = next.text.as_str();
             !RETRACTION_FILLERS.contains(&text) && !ENDED_WORDS.contains(&text)
         });
+        if governed.is_none()
+            && reading == IntentReading::TimingHeld
+            && corrects_the_time(&later[index + 1 + same_clause.len()..])
+        {
+            return false;
+        }
         governed.is_none_or(|position| {
             let next = same_clause[position];
             let text = next.text.as_str();
@@ -2330,11 +2401,46 @@ fn shares_stem(word: &str, request_word: &str) -> bool {
 /// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
 /// span follows the cue and no token between them breaks the clause or disqualifies the time
 /// (negation, exclusion, recall sense, completed work or a past-tense event).
-fn request_governs_span(tokens: &[IntentToken], cue_end: usize, span: SourceSpan) -> bool {
+fn request_governs_span(
+    tokens: &[IntentToken],
+    cue_end: usize,
+    span: SourceSpan,
+    reading: IntentReading,
+) -> bool {
     span.start >= cue_end
-        && !tokens
-            .iter()
-            .any(|token| token.start >= cue_end && token.start < span.start && detaches_time(token))
+        && !tokens.iter().any(|token| {
+            token.start >= cue_end
+                && token.start < span.start
+                && !(token.in_sentence_break && reading == IntentReading::TimingHeld)
+                && detaches_time(token)
+        })
+}
+
+/// How [`states_reminder_intent`] reads a capture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntentReading {
+    /// The quoted time may become the reminder's instant, so the request must govern it exactly.
+    Exact,
+    /// The span guard has already held the capture's timing for correction
+    /// ([`Agreement::SpanTruncated`]): the request is kept with no instant, so only whether it was
+    /// made and not withdrawn matters.
+    TimingHeld,
+}
+
+/// Whether the clause that follows a closing negation (`rest` starts at its clause break) names
+/// a time, so the negation corrects the time ("No wait, 10 a.m.", "actually no, Saturday")
+/// rather than withdrawing the request. Only a break inside the sentence (a comma, colon or
+/// bracket) joins the negation to that clause: a negation that ends its sentence ("Actually no.
+/// Saturday is busy.") stays a withdrawal, whatever later sentences say.
+fn corrects_the_time(rest: &[&IntentToken]) -> bool {
+    let breaks: Vec<&&IntentToken> = rest.iter().take_while(|token| token.clause_break).collect();
+    if breaks.is_empty() || !breaks.iter().all(|token| token.in_sentence_break) {
+        return false;
+    }
+    rest.iter()
+        .skip_while(|token| token.clause_break)
+        .take_while(|token| !token.clause_break)
+        .any(|token| !token.quoted && is_temporal_word(&token.text))
 }
 
 fn detaches_time(token: &IntentToken) -> bool {
