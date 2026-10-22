@@ -2499,8 +2499,26 @@ fn request_hedge(tokens: &[IntentToken], cue_start: usize, verb: &str) -> Option
     {
         return None;
     }
-    let (clause_words, hedged) = skip_hedges(&clause_words);
-    is_first_person_request(clause_words, verb).then_some(hedged)
+    let (clause_words, hedged_near_cue) = skip_hedges(&clause_words);
+    let (clause_words, hedged_at_start) = trim_leading_hedges(clause_words);
+    is_first_person_request(clause_words, verb).then_some(hedged_near_cue || hedged_at_start)
+}
+
+/// Trims politeness and hedge words from the start of the clause (the end of the nearest-first
+/// slice) when the run holds a hedge, so a hedge before a requester phrase ("Maybe can you remind
+/// me", "Maybe I need you to remind me") counts like one next to the cue. Reports whether it did.
+fn trim_leading_hedges<'slice, 'word>(words: &'slice [&'word str]) -> (&'slice [&'word str], bool) {
+    let run = words
+        .iter()
+        .rev()
+        .take_while(|word| POLITENESS_WORDS.contains(word) || HEDGE_WORDS.contains(word))
+        .count();
+    let kept = words.len() - run;
+    if words[kept..].iter().any(|word| HEDGE_WORDS.contains(word)) {
+        (&words[..kept], true)
+    } else {
+        (words, false)
+    }
 }
 
 fn is_first_person_request(clause_words: &[&str], verb: &str) -> bool {

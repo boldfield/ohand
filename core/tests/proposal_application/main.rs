@@ -2728,6 +2728,13 @@ fn a_hedged_request_with_a_clock_time_is_never_scheduled() {
         "Maybe remind me Friday at 3 p.m. to call Sam",
         "perhaps remind me Friday at 3 p.m. to call Sam",
         "Maybe please remind me Friday at 3 p.m. to call Sam",
+        "possibly remind me Friday at 3 p.m. to call Sam",
+        "Maybe can you remind me Friday at 3 p.m. to call Sam",
+        "Perhaps can you remind me Friday at 3 p.m. to call Sam",
+        "Possibly you can remind me Friday at 3 p.m. to call Sam",
+        "Maybe could you please remind me Friday at 3 p.m. to call Sam",
+        "Maybe I need you to remind me Friday at 3 p.m. to call Sam",
+        "Maybe I'd like you to remind me Friday at 3 p.m. to call Sam",
     ] {
         // A proposal that quotes the time but claims no instant is stored as needing correction.
         let (fixture, disposition) = apply_clock_proposal_with(
