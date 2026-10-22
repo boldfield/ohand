@@ -169,7 +169,10 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle { detailModels.first?.content != nil && detailModels.first?.deletion?.revision != nil }
+        settle {
+            detailModels.first?.content != nil
+                && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
+        }
         searcher.page = RetrievalPage(totalAccessible: 0, rows: [], offset: 0)
         let deletion = try XCTUnwrap(detailModels.first?.deletion)
 
@@ -180,8 +183,11 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             finished = true
         }
 
-        settle { finished && deletion.isRecorded && searchModel.rows.isEmpty && detailModels.first?.content == nil }
-        XCTAssertTrue(deletion.isRecorded, "the pane shows the deletion result")
+        settle {
+            finished && MainActor.assumeIsolated { deletion.isRecorded } && searchModel.rows.isEmpty
+                && detailModels.first?.content == nil
+        }
+        XCTAssertTrue(MainActor.assumeIsolated { deletion.isRecorded }, "the pane shows the deletion result")
         XCTAssertTrue(searchModel.rows.isEmpty, "the row is gone")
         XCTAssertNil(detailModels.first?.content, "no deleted text stays in the pane")
         XCTAssertEqual(searchModel.selectedReference, shown.reference, "the pane keeps the item it was showing")
