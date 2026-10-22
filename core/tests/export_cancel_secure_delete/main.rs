@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-const CANARY: &str = "CANARY-RUTABAGA-4471";
+/// One lowercase token, so the search index's tokenizer stores it byte for byte and the raw scan
+/// can see it there as well as in the item and capture rows.
+const CANARY: &str = "rutabagacanary4471";
 const RACE_RUNS: u64 = 220;
 const ITEM_COUNT: usize = 150;
 
@@ -238,7 +240,10 @@ fn delete_canary_item(store_path: &str, secure: bool) {
     if !secure {
         database
             .conn()
-            .execute_batch("PRAGMA secure_delete = OFF;")
+            .execute_batch(
+                "PRAGMA secure_delete = OFF;
+                 INSERT INTO search_index(search_index, rank) VALUES('secure-delete', 0);",
+            )
             .unwrap();
     }
     // Neighbouring rows keep the pages in use, so freed content would otherwise stay readable.
@@ -262,6 +267,22 @@ fn deleted_text_is_absent_from_every_store_file() {
     let (_directory, store_path) = deletion_store();
     delete_canary_item(&store_path, true);
     assert!(!store_files_contain_canary(&store_path));
+}
+
+#[test]
+fn deleted_words_are_absent_from_the_search_index_segments() {
+    let (_directory, store_path) = deletion_store();
+    delete_canary_item(&store_path, true);
+    let database = open_store(&store_path);
+    let segments_holding_canary: i64 = database
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM search_index_data WHERE instr(block, CAST(?1 AS BLOB)) > 0",
+            [CANARY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(segments_holding_canary, 0);
 }
 
 #[test]
@@ -330,7 +351,7 @@ fn a_connection_opened_directly_on_the_store_also_sets_secure_delete() {
     assert!(store_files_contain_canary(&store_path));
     direct
         .execute(
-            "DELETE FROM synthetic_scratch WHERE text LIKE 'CANARY%'",
+            "DELETE FROM synthetic_scratch WHERE text LIKE 'rutabagacanary%'",
             [],
         )
         .unwrap();

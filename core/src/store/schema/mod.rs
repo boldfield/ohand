@@ -52,6 +52,37 @@ fn register_connection_pragmas_for_every_connection() {
     });
 }
 
+/// Turns on FTS5's own secure-delete for `search_index`, the full-text counterpart of the
+/// `secure_delete` pragma. Without it FTS5 records a deletion as a marker and keeps the deleted
+/// item's tokens in its index segments until a later merge. The setting is stored with the
+/// table, so it is written once; the first time, existing segments are also merged so that words
+/// deleted before the setting was on are dropped as well.
+fn enable_search_index_secure_delete(conn: &mut Connection) -> Result<()> {
+    let search_index_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_index')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !search_index_exists {
+        return Ok(());
+    }
+    let enabled: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM search_index_config WHERE k = 'secure-delete' AND v = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if enabled {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "INSERT INTO search_index(search_index, rank) VALUES('secure-delete', 1);
+         INSERT INTO search_index(search_index) VALUES('optimize');",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Injected clock for testability.
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
@@ -187,6 +218,7 @@ impl Database {
         {
             Self::apply_step(&mut conn, step, steps, &clock)?;
         }
+        enable_search_index_secure_delete(&mut conn)?;
 
         Ok(Database { conn })
     }
