@@ -8,7 +8,11 @@
 //!
 //! Scope: base provider authorization, transport, redirects, and queued or in-flight
 //! configuration changes. Optional Spark, shadow-review and preview requirements keep their own
-//! canaries with their owners. T04b (private reads, notifications and export) adds modules here.
+//! canaries with their owners. T04b adds private reads, generic notifications and export
+//! isolation as `read_tests` and `output_tests`; they never touch those canaries.
 
+mod core_boundary;
 mod fixtures;
 mod outbound_tests;
+mod output_tests;
+mod read_tests;
