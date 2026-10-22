@@ -113,6 +113,8 @@ final class StatusIntegrationTests: XCTestCase {
             handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
         services = built
         let status = try XCTUnwrap(built.managementContext.statusModel)
+        // The lifecycle coordinator attaches its health observer when the root starts, as it does at launch.
+        built.root.start(isActive: false)
 
         built.captureEntry.textModel.updateText("remind me to water the plants")
         built.captureEntry.saveText()
