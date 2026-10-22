@@ -206,15 +206,15 @@ final class StatusModel: ObservableObject {
                 + Set(unscheduledReasons.map(StatusText.unscheduledReason)).sorted()).joined(separator: " ")
             return fact(.needsAttention, StatusText.notificationsUnscheduledHeadline, detail, .none)
         }
-        if report.awaitingInstallCount > 0 {
+        if report.readiness.awaitingInstallCount > 0 {
             return fact(
                 .waiting, StatusText.notificationsInstallingHeadline,
-                StatusText.notificationsInstallingDetail(count: report.awaitingInstallCount), .none)
+                StatusText.notificationsInstallingDetail(count: report.readiness.awaitingInstallCount), .none)
         }
-        if report.scheduledCount > 0 {
+        if report.readiness.scheduledCount > 0 {
             return fact(
                 .good, StatusText.notificationsScheduledHeadline,
-                StatusText.notificationsScheduledDetail(count: report.scheduledCount), .none)
+                StatusText.notificationsScheduledDetail(count: report.readiness.scheduledCount), .none)
         }
         return fact(.good, StatusText.notificationsNoneHeadline, StatusText.notificationsNoneDetail, .none)
     }
