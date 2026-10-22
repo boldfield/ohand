@@ -1849,6 +1849,61 @@ fn a_correction_after_a_dotted_abbreviation_or_a_number_word_is_held_for_correct
     assert_scheduled_at(&fixture, disposition, "2026-10-09T15:00:00-04:00");
 }
 
+/// A time word carrying a "'s" clitic ("Saturday's better", with the ASCII or the typographic
+/// apostrophe that dictation produces) is still a temporal token in another sentence, for a span
+/// that names its day and for one that does not.
+#[test]
+fn a_correction_with_a_clitic_time_word_is_held_for_correction() {
+    for (text, quoted, instant) in [
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday's better.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday\u{2019}s better.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me Friday at 3 p.m. to call the roofer. Four's better.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Saturday's no good. Remind me Friday at 3 p.m. to call the roofer.",
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+        ),
+        (
+            "Remind me at 5 p.m. to call the roofer. Tomorrow's better.",
+            "at 5 p.m.",
+            "2026-10-08T17:00:00-04:00",
+        ),
+    ] {
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_held_for_correction(&fixture, disposition);
+    }
+    // The controls: a clitic on a word that names no time leaves the reminder scheduled.
+    for text in [
+        "Remind me Friday at 3 p.m. to call the roofer. It's urgent.",
+        "Remind me Friday at 3 p.m. to call the roofer. That\u{2019}s all.",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call the roofer",
+        );
+        assert_scheduled_at(&fixture, disposition, "2026-10-09T15:00:00-04:00");
+    }
+}
+
 /// Context in another sentence that holds no temporal token (a filler, a person, a place) is
 /// outside the guard's reach and still schedules.
 #[test]

@@ -704,7 +704,7 @@ fn is_request_word(word: &str) -> bool {
 /// right after `to` they continue the time ("Friday at 3 p.m. to later").
 fn is_relative_time_word(word: &str) -> bool {
     matches!(
-        word,
+        without_clitic(word),
         "after"
             | "afterwards"
             | "before"
@@ -783,19 +783,29 @@ fn is_temporal(word: &str) -> bool {
         )
 }
 
-/// Whether any part of a hyphenated word ("twenty-first", "mid-afternoon"), past an "-ish"
-/// suffix ("fourish") and a plural "s", is in one of `lists`.
+/// Whether any part of a hyphenated word ("twenty-first", "mid-afternoon"), past a "'s" clitic
+/// ("Saturday's"), an "-ish" suffix ("fourish") and a plural "s", is in one of `lists`.
 fn word_in(word: &str, lists: &[&[&str]]) -> bool {
-    word.split('-').filter(|part| !part.is_empty()).any(|part| {
-        let base = part
-            .strip_suffix("ish")
-            .filter(|stem| stem.len() >= 3)
-            .unwrap_or(part);
-        let singular = base.strip_suffix('s').unwrap_or(base);
-        lists
-            .iter()
-            .any(|list| list.contains(&base) || list.contains(&singular))
-    })
+    without_clitic(word)
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            let base = part
+                .strip_suffix("ish")
+                .filter(|stem| stem.len() >= 3)
+                .unwrap_or(part);
+            let singular = base.strip_suffix('s').unwrap_or(base);
+            lists
+                .iter()
+                .any(|list| list.contains(&base) || list.contains(&singular))
+        })
+}
+
+/// A word without a trailing "'s" clitic, possessive or contracted "is" ("Saturday's better",
+/// "Tomorrow's"), so the lexicons still see the time word. [`normalized_word`] has already turned
+/// the typographic apostrophe that dictation produces into an ASCII one.
+fn without_clitic(word: &str) -> &str {
+    word.strip_suffix("'s").unwrap_or(word)
 }
 
 #[cfg(test)]
@@ -1000,6 +1010,19 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. to call the roofer. Sorry, I mean the plumber",
+                "Friday at 3 p.m.",
+            ),
+            // A "'s" clitic on a word that names no time is still not temporal.
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. It's urgent.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. That\u{2019}s all.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call Sam. Sam's roof leaks.",
                 "Friday at 3 p.m.",
             ),
             // A span naming no day: only request words before it, no other time anywhere.
@@ -1535,6 +1558,35 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. to call the roofer. Billions, he said.",
+                "Friday at 3 p.m.",
+            ),
+            // A time word with a "'s" clitic is still a time word, with either apostrophe.
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday's better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday\u{2019}s better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Four's better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Saturday's no good. Remind me Friday at 3 p.m. to call the roofer.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me at 5 p.m. to call the roofer. Tomorrow's better.",
+                "at 5 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Later's fine too.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. October's busy.",
                 "Friday at 3 p.m.",
             ),
             (
