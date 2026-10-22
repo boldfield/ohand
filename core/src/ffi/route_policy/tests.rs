@@ -120,7 +120,11 @@ fn grant_list_and_revoke_through_the_exports() {
                 "route_name": "Capture",
                 "scope": "personal",
                 "granted_capabilities": [
-                    {"capability": "text_interpretation", "destination_classes": ["cloud"]}
+                    {
+                        "capability": "text_interpretation",
+                        "destination_classes": ["cloud"],
+                        "covered_profile_versions": ["profile-live"]
+                    }
                 ]
             }]
         })

@@ -137,16 +137,18 @@ final class WalkthroughUITests: XCTestCase {
                     goBack(to: app.staticTexts[screen.title], screen.title)
                 }
             }
-            if screen.title == "Audio" {
-                // Export is also linked from the audio screen, beside the other data settings. The link must open it.
-                let exportLink = app.buttons["data-settings.retention.export-link"]
-                XCTAssertTrue(exportLink.waitForExistence(timeout: screenTimeout), "Export link not found on Audio")
-                exportLink.tap()
-                XCTAssertTrue(waitForScreen("Export", leaving: exportLink, timeout: screenTimeout), "Export did not open from Audio")
-                goBack(to: app.staticTexts[screen.title], screen.title)
-            }
             goBack(to: settingsHeader, "Settings")
         }
+        // The "Erase everything" card on the Settings root must open the reset screen, which is captured. Nothing is confirmed.
+        let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
+        XCTAssertTrue(eraseCard.waitForExistence(timeout: screenTimeout), "Erase everything card not found on Settings")
+        if !eraseCard.isHittable { app.swipeUp() }
+        XCTAssertTrue(eraseCard.isHittable, "Erase everything card is not tappable")
+        eraseCard.tap()
+        let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
+        XCTAssertTrue(resetExplanation.waitForExistence(timeout: screenTimeout), "Erase everything did not open the reset screen")
+        capture(prefix, "erase everything")
+        goBack(to: settingsHeader, "Settings")
         goBack(to: homeLink(homeSearch), "home")
     }
 

@@ -2261,6 +2261,8 @@ Source pointers (baseline above): `docs/architecture/m1-contracts.md:139`, `AGEN
 
 **Amended (coordinator, 2026-10-20, after PR #317 round 1).** U06b now also depends on F30. Revocation must not trust a pre-read: a capture committed between the pre-read and the revoke is retired without ever being shown (review thread r4326522427). After the revoke, the screen shows the jobs that F30's `jobs_retired_by_revocation` lists for that version, and offers requeue from that list. The list is durable, so it is the same after a relaunch, and it pages instead of refusing more than 100 jobs. The pre-read may stay as a preview before the person confirms, but the result shown afterwards comes from the durable list. Add a real-core regression that queues a capture in the existing `beforeRevokeProfile` seam and shows that job in the result. U06b's owned paths do not change.
 
+**Sent counts (coordinator, 2026-10-21, after PR #317 round 4).** Both reviewers found the same defect: `sentShown` and `sentUnshown` come from the preview, which is read before `revokeProfile`, and the runner keeps dispatching in between (since F35, as soon as a capture is saved). "Of the 20 shown, N had already been sent" reads as exact and "Up to N … had already been sent" as an upper bound, and both can be too low. F30's `RetiredJob` does not record whether a job had been dispatched, and U06b does not own core, so no authoritative count exists. Do not show a number of sent requests derived from the preview. Say plainly that requests already being sent when the change took effect may have reached the provider and that their results are discarded. Per-row states may still show what the preview saw, labelled as seen before the change. Add the real-core regression both reviewers asked for: in the `beforeRevokeProfile` seam, move a job the preview listed as queued to running, and assert that the result screen makes no exact or upper-bound claim about sent requests that the stored state contradicts. U06b's owned paths do not change.
+
 Contributes to original U06 criteria: 1, 2.
 
 ### L05a
@@ -3192,6 +3194,21 @@ Acceptance:
 - **Accepted limit.** An aside with no punctuation at all, inside task content that follows the time, is out of this guard's reach. The model's own reading is the defence there. Reviewers may not block on unpunctuated variants; they may block on any punctuated case that the rule above lets through.
 - Tests add both round-8 self-corrections, "Friday at 3 p.m. my time", and the list case in both orders.
 
+**Whole-capture scope (coordinator, 2026-10-21, after the round-9 reviews of PR #323).** Round 9 found two more punctuated holes: a dash aside in content that comes before the time ("Remind me to call the roofer - urgent - Friday at 3 p.m."), and a correction in the next sentence ("…Friday at 3 p.m. Actually, make it 4."). Both are covered by applying the rule to the whole capture, not just the time's own sentence:
+
+- **The time's sentence.** The task content may contain no clause mark in either order (comma, semicolon, colon, dash, parenthesis or bracket), apart from the one boundary comma. This now applies to content that comes before the time as well as after it.
+- **Every other sentence in the capture.** If any other sentence, before or after, contains a temporal token, the timing is ambiguous. Temporal tokens are any digit, any number word, and any word in the resolver's existing closed day, month, relative-time, clock and zone-abbreviation lexicons. Reuse those lexicons; do not add place lists. A sentence boundary is `.`, `!` or `?` followed by whitespace or the end of the text.
+- **Accepted cost.** A capture that mentions any other time, date or number in another sentence ("Talked to Jim on Monday. Remind me Friday at 3 p.m. to call the roofer.") needs correction. Test it.
+- **Accepted limits.** Two cases are out of this guard's reach and are left to the model: context in other sentences that contains no temporal token (a place, a person), and unpunctuated asides. Reviewers may not block on either.
+- **Reviewers.** A blocking finding must be a capture that the rule, as written here, lets schedule. If a later round finds a class this rule does not cover, the coordinator splits F28 instead of extending it again.
+- Tests add both round-9 cases and the accepted-cost case.
+
+**Boundary and number words as written (coordinator, 2026-10-21, after PR #323 round 4).** Both findings are places where the code does not follow the rule above, not new classes, so F28 is not split.
+
+- **Sentence boundary.** `.` followed by whitespace ends a sentence, with two exceptions only: the dots of a meridiem (`a.m.`, `p.m.`) and any dot inside the quoted span itself. A dotted day, month or unit abbreviation outside the span ("call Jan. Actually…", "in from the sun. Make it…") ends the sentence. Remove the abbreviation exception in `ends_sentence` / `is_dotted_abbreviation` outside the span. If a dotted abbreviation in the span's own sentence but outside the span now splits a capture that used to resolve, that is the accepted cost.
+- **Number words.** "Any number word" is the complete cardinal set: zero to nineteen, the tens, hundred, thousand, million, billion and dozen. Add them to `NUMBERS` (it currently lacks zero).
+- **Tests.** Add proposal-application regressions for the three abbreviation captures in review thread r4341624478 and the "make it zero" capture in r4341132123, each held for correction. Keep the "call the roofer" control.
+
 ### F29
 
 Keep a hedged reminder request as one that needs correction instead of dropping it
@@ -3252,6 +3269,15 @@ Acceptance:
 3. Reset behaviour, confirmation and the credential choice are unchanged. This task moves the entry point only.
 4. Hosted view tests: the root card navigates to the reset screen when a reset model is present and is absent when it is not; the Audio screen no longer renders either link. Remove or update the existing tests that asserted those links on the Audio screen; do not weaken any other assertion.
 5. Exact-head macOS run linked. If the DS08 screenshot walkthrough shows the Audio screen, its expected content may change only by the two removed links.
+
+**Ownership for the removed links (coordinator, 2026-10-21, after the third rejection of PR #326).** Removing the two Audio links necessarily breaks two tests that reach them. F31 also owns the following:
+
+- **`ios/Tests/DataSettings/DeletionViewTests.swift`.** Move `testTheResetScreenIsReachedFromTheAudioSettingsScreen` to the Settings-root card: it must reach the reset screen from `management.settings.erase` and assert the same reset screen content.
+- **`ios/UITests/Walkthrough/WalkthroughUITests.swift`.** The Audio → Export step (lines 140-147) is a reachability check, not a capture. Replace it with a step that taps the Settings-root "Erase everything" card, waits for the reset screen, captures it in both appearances, and goes back without confirming anything.
+  - Export is still captured through its Settings-root row; that capture must stay.
+  - No other walkthrough step, helper or timeout changes.
+
+A worker may restart from closed PR #326 (branch `mr/e0b9d9dc`, head 7ce4384). Reviewers accepted everything else on it.
 
 ### F32
 
@@ -3429,3 +3455,68 @@ Acceptance:
 4. The Add provider form shows each field's problem only after the first Save attempt, or once that field has been edited, never on an untouched form.
 5. The model field has a placeholder showing the expected form of a model identifier (a generic example, not a recommendation). The info sheet says the identifier must match the provider's exactly.
 6. Hosted view tests for 1–4 in both appearances. Exact-head macOS run linked, with walkthrough screenshots of the Processing and Add provider screens.
+
+
+**Exact-destination grant read (coordinator, 2026-10-21, after the third rejection of PR #328).** Acceptance 2 cannot be met with an existing read. `list_route_policy` (`core/src/privacy/routing/grants.rs:307`) collapses granted origins into destination classes, so an OpenAI grant and an Anthropic grant both read as "cloud". `authorize_job` (`core/src/privacy/routing/mod.rs:293-310`) checks exact origins. F40 adds the read that matches authorization. F39 now depends on F40, and acceptance 2 is amended:
+
+- The footer clears exactly when F40's read reports the current default's profile version as covered for `text_interpretation` on the capture route. It shows when that version is not covered, and also when the read fails. A failed read never clears it.
+- Drop "an existing read, not a new one".
+- Everything else in F39 is unchanged. A worker may restart from closed PR #328 (head 7046539c), which reviewers accepted apart from this point.
+
+### F40
+
+Report which provider versions a route's grant actually covers, and offer a grant for an uncovered one
+
+Found while blocking F39 (2026-10-21). The Privacy screen and the Processing screen both decide whether a cloud provider is allowed from `list_route_policy`, which reports only destination classes. Authorization (`authorize_job`) checks exact origins. Suppose the person once allowed OpenAI and then makes Anthropic the default:
+
+- The Processing screen would say the provider is allowed.
+- `PrivacySettingsModel.isGranted` (`app/privacy-settings/PrivacySettingsModel.swift:97`) is capability-only, so `PrivacySettingsView` hides the grant offer for Anthropic.
+
+Every new note would stay on the phone, with no way to fix it.
+
+Owned paths:
+
+- `core/src/privacy/routing/grants.rs`, and `core/src/privacy/routing/mod.rs` only to share the coverage predicate;
+- `core/src/ffi/route_policy.rs` and its tests;
+- `ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift`;
+- `ios/Services/ProviderConfiguration/ProviderConfigurationService.swift`, decoding only;
+- `app/privacy-settings/`;
+- `ios/Tests/PrivacySettings/`.
+
+Dependencies: U06b, which edits `app/privacy-settings/`.
+
+Acceptance:
+
+1. **Core.** The route-policy read reports, for each route and granted capability, the unrevoked profile versions that the grant covers. The field is additive. "Covered" uses the same predicate `authorize_job` applies (every origin of the version is within the grant's authorized destinations). Move that predicate into one shared function; do not re-implement it. Existing fields and their meaning are unchanged. Rust tests show:
+   - an OpenAI-only grant does not cover an Anthropic version, and vice versa;
+   - a grant made for a version covers it;
+   - a revoked version is not listed;
+   - revoking the grant empties the list.
+2. **FFI and Swift.** The new field is decoded through the existing route-policy wrapper. Older JSON without the field decodes as "nothing covered", never as "everything covered".
+3. **Privacy screen.** Whether a grant exists for a version is answered per version. The screen keeps offering a grant for the current default's version while that version is not covered, even when the route already holds a grant for the same capability for another version. Granting it makes the version covered. Hosted view and model tests cover the OpenAI-then-Anthropic sequence against the real core.
+4. Exact-head macOS run linked.
+
+### F41
+
+Make cancelled exports leave nothing behind, and zero deleted text in the store
+
+Found by T04b (2026-10-21). T04b acceptance 2 says deleted records and cancelled exports leave nothing readable, and current core fails both:
+
+- **Cancelled exports.** `ohand_core_start_export` followed by `ohand_core_cancel` and close left a complete export containing the canary in 3 of 20 runs. `Shared::run_worker` (`core/src/ffi/core_handle/instance.rs`) checks `cancelled` only before a job starts. `run` in `core/src/ffi/export_snapshot.rs` never checks it and never removes its file.
+- **Deleted text.** The store opens SQLite without `secure_delete` (`core/src/store/schema/mod.rs:128` sets only `foreign_keys`). Freed pages therefore keep deleted text in the database file until they are reused.
+
+Owned paths:
+
+- `core/src/ffi/export_snapshot.rs` and `core/src/export/`;
+- `core/src/ffi/core_handle/instance.rs`, cancellation checks only;
+- `core/src/store/schema/mod.rs`, the connection pragmas only;
+- tests under `core/tests/` for these.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. An export checks for cancellation before writing, between batches, and after the write but before reporting success. On cancellation it removes every file it created, including the destination and any temporary, and reports cancelled, never success. A cancel that arrives after success is reported leaves the completed export alone, because the person already has it. A test races cancel against export at least 200 times over a synthetic store with a canary. No run may leave a readable file containing the canary unless that run reported success.
+2. Every store connection sets `PRAGMA secure_delete = ON` next to `foreign_keys`. A test writes a canary item, deletes it through the normal deletion path, closes the store, and scans the raw bytes of the database file and any `-journal` or `-wal` file. The canary is absent. The same test without the pragma shows that the test detects the canary; that variant may run only inside the test.
+3. Existing export and deletion tests still pass. Deletion keeps removing the item from the search index in the same transaction.
+4. `make check` and `make test` pass. No native change, so no macOS run.

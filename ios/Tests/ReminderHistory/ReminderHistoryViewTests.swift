@@ -83,6 +83,12 @@ final class ReminderHistoryViewTests: XCTestCase {
         for banned in ["fired", "missed", "seen"] { XCTAssertFalse(shown.lowercased().contains(banned), banned) }
     }
 
+    func testTheHeadingNamesTheReminderHistoryAndIsNotTheItemHistoryHeading() async throws {
+        XCTAssertEqual(ReminderHistoryList.headingText, "Reminder history")
+        XCTAssertNotEqual(ReminderHistoryList.headingText, SourceDetailView.itemHistoryHeading)
+        XCTAssertEqual(SourceDetailView.itemHistoryHeading, "Item history")
+    }
+
     func testEmptyLockedAndUnreadableStatesRenderTheirOwnWords() async throws {
         let empty = ReminderHistoryModel(itemID: "item-1", reader: ScriptedHistoryReader(.success(try answer(entries: "[]"))))
         await empty.load()
