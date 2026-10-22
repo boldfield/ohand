@@ -48,6 +48,9 @@ private final class ScriptedCorrectionCore: ItemCorrectionCore, @unchecked Senda
 private final class ScriptedActionCore: NotificationActionCore, @unchecked Sendable {
     let completeOutcome: String
     let resolvedItemID: String?
+    /// How many lookups fail before one answers.
+    var failingResolves = 0
+    private(set) var completions = 0
     init(completeOutcome: String, resolvedItemID: String? = nil) {
         self.completeOutcome = completeOutcome
         self.resolvedItemID = resolvedItemID
@@ -62,11 +65,16 @@ private final class ScriptedActionCore: NotificationActionCore, @unchecked Senda
     }
 
     func complete(notificationID: String, itemID: String?) async throws -> NotificationActionAnswer {
-        NotificationActionAnswer(outcome: completeOutcome)
+        completions += 1
+        return NotificationActionAnswer(outcome: completeOutcome)
     }
 
     func resolve(notificationID: String) async throws -> NotificationActionAnswer {
-        resolvedItemID.map { NotificationActionAnswer(outcome: "resolved", itemID: $0) }
+        if failingResolves > 0 {
+            failingResolves -= 1
+            throw CoreFailure(errorClass: .transient, code: "test_timeout", message: "no event for the operation")
+        }
+        return resolvedItemID.map { NotificationActionAnswer(outcome: "resolved", itemID: $0) }
             ?? NotificationActionAnswer(outcome: "unknown_notification")
     }
 }
@@ -177,5 +185,30 @@ final class ItemChangeSignalTests: XCTestCase {
         _ = try await unresolved.complete(notificationID: "n-2", itemID: nil)
         await flushMainQueue()
         XCTAssertEqual(recorder.changes, [.item("item-9")])
+    }
+
+    func testAFailedLookupCompletesNothingSoTheRetryCompletesAndAnnouncesTheItem() async throws {
+        let signal = ItemChangeSignal()
+        let recorder = ChangeRecorder()
+        _ = signal.observe { recorder.record($0) }
+        let base = ScriptedActionCore(completeOutcome: "completed", resolvedItemID: "item-9")
+        base.failingResolves = 1
+        let core = ChangePublishingNotificationActionCore(base: base, changes: signal)
+
+        do {
+            _ = try await core.complete(notificationID: "n-1", itemID: nil)
+            XCTFail("a failed lookup is reported, so the handler keeps the entry")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.errorClass, .transient, "the handler retains a transient failure for a retry")
+        }
+        await flushMainQueue()
+        XCTAssertEqual(base.completions, 0, "nothing was completed without knowing which item it was")
+        XCTAssertTrue(recorder.changes.isEmpty)
+
+        let answer = try await core.complete(notificationID: "n-1", itemID: nil)
+        await flushMainQueue()
+        XCTAssertEqual(answer.outcome, "completed")
+        XCTAssertEqual(base.completions, 1)
+        XCTAssertEqual(recorder.changes, [.item("item-9")], "the retried completion is announced")
     }
 }

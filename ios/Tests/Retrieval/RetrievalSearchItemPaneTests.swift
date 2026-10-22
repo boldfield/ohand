@@ -131,32 +131,57 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         XCTAssertEqual(detail.failure, .locked)
     }
 
-    func testACorrectionMadeWhileThePaneIsOpenReloadsThePaneToTheNewText() throws {
+    func testACorrectionMadeInThePaneShowsTheNewTextThereAndInTheResults() throws {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle { detailModels.first?.content != nil }
+        settle { detailModels.first?.content != nil && detailModels.first?.itemControls?.snapshot != nil }
         XCTAssertEqual(detailModels.first?.content?.sections.map(\.text), ["synthetic capture in the pane"])
+        let controls = try XCTUnwrap(detailModels.first?.itemControls)
+        let corrected = RetrievalResultRow(
+            reference: shown.reference, text: "synthetic words after the correction",
+            originalText: "synthetic capture in the pane", basis: .corrected, matched: .current,
+            snippet: RetrievalSnippet(text: "synthetic words after the correction", span: nil),
+            scopeName: "Personal", capturedAt: shown.capturedAt, itemType: .note)
+        searcher.page = RetrievalPage(totalAccessible: 1, rows: [corrected], offset: 0)
 
-        try correctText(itemID: itemID, to: "synthetic words after the correction")
+        var finished = false
+        Task { @MainActor in
+            controls.textDraft = "synthetic words after the correction"
+            await controls.saveText()
+            finished = true
+        }
 
-        settle { detailModels.first?.content?.sections.last?.text == "synthetic words after the correction" }
+        settle {
+            finished && searchModel.rows == [corrected]
+                && detailModels.first?.content?.sections.last?.text == "synthetic words after the correction"
+        }
+        XCTAssertEqual(controls.outcome, .saved(.text), "the pane keeps its confirmation")
         XCTAssertEqual(
             detailModels.first?.content?.sections.last?.text, "synthetic words after the correction",
             "the pane's own detail reads the item again")
+        XCTAssertEqual(searchModel.rows, [corrected], "the results were asked for again")
         XCTAssertEqual(searchModel.selectedReference, shown.reference)
+        XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
     }
 
-    func testADeletionMadeWhileThePaneIsOpenLeavesNoStaleTextAndKeepsThePaneSelected() throws {
+    func testADeletionMadeInThePaneLeavesNoStaleTextAndKeepsThePaneOnItsResult() throws {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle { detailModels.first?.content != nil }
+        settle { detailModels.first?.content != nil && detailModels.first?.deletion?.revision != nil }
         searcher.page = RetrievalPage(totalAccessible: 0, rows: [], offset: 0)
+        let deletion = try XCTUnwrap(detailModels.first?.deletion)
 
-        try deleteItem(itemID: itemID)
+        var finished = false
+        Task { @MainActor in
+            deletion.requestDeletion()
+            await deletion.confirmDeletion()
+            finished = true
+        }
 
-        settle { searchModel.rows.isEmpty && detailModels.first?.content == nil }
+        settle { finished && deletion.isRecorded && searchModel.rows.isEmpty && detailModels.first?.content == nil }
+        XCTAssertTrue(deletion.isRecorded, "the pane shows the deletion result")
         XCTAssertTrue(searchModel.rows.isEmpty, "the row is gone")
         XCTAssertNil(detailModels.first?.content, "no deleted text stays in the pane")
         XCTAssertEqual(searchModel.selectedReference, shown.reference, "the pane keeps the item it was showing")
@@ -256,19 +281,6 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         Task {
             do { _ = try await root.itemCorrections.correctText(
                 commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision, text: text) }
-            catch { failure = error }
-            finished = true
-        }
-        settle { finished }
-        XCTAssertNil(failure)
-    }
-
-    private func deleteItem(itemID: String) throws {
-        let revision = try XCTUnwrap(Int(scalar("SELECT revision FROM items WHERE item_id = '\(itemID)'")))
-        var finished = false
-        var failure: Error?
-        Task {
-            do { _ = try await root.itemDeletion.delete(itemID: itemID, expectedRevision: revision) }
             catch { failure = error }
             finished = true
         }

@@ -28,17 +28,7 @@ private struct ItemPanePlacementKey: EnvironmentKey {
     static let defaultValue = false
 }
 
-private struct ItemPaneRefreshKey: EnvironmentKey {
-    static let defaultValue = 0
-}
-
 extension EnvironmentValues {
-    /// Raised when the item shown in the pane changed; the detail reads the item again.
-    var itemPaneRefreshCount: Int {
-        get { self[ItemPaneRefreshKey.self] }
-        set { self[ItemPaneRefreshKey.self] = newValue }
-    }
-
     /// True for a view shown in the search screen's item pane, beside the results, rather than pushed on its own.
     var isInItemPane: Bool {
         get { self[ItemPanePlacementKey.self] }
@@ -176,7 +166,6 @@ struct RetrievalSearchView: View {
         if let reference = model.selectedReference, let makeItemPane {
             makeItemPane(reference.value)
                 .environment(\.isInItemPane, true)
-                .environment(\.itemPaneRefreshCount, model.paneRefreshCount)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .reportRendered(Self.itemPaneIdentifier, text: reference.value)
         } else {

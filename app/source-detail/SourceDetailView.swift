@@ -50,8 +50,6 @@ struct SourceDetailView: View {
     /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
     @Environment(\.isInItemPane) private var isInItemPane
 
-    @Environment(\.itemPaneRefreshCount) private var itemPaneRefreshCount
-
     /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
     /// never sets it, so it still says "Not here".
     @State private var deletedHere = false
@@ -96,10 +94,6 @@ struct SourceDetailView: View {
         .background(DSColor.surface0.color.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task { await model.load() }
-        .onChange(of: itemPaneRefreshCount) { _ in
-            // The item changed elsewhere; a deletion made here keeps its result instead.
-            if !deletedHere { Task { await model.load() } }
-        }
         .onDisappear { model.close() }
         .task {
             // Watches for a relock, deletion or the clip ending for as long as the screen is shown.

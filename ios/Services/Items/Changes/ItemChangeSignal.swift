@@ -77,10 +77,12 @@ struct ChangePublishingNotificationActionCore: NotificationActionCore {
 
     func complete(notificationID: String, itemID: String?) async throws -> NotificationActionAnswer {
         // A tap whose payload lost its target is still completed by notification id; ask the core which item that is
-        // before completing, so one completion announces one item and never the reset-only "all items".
+        // before completing, so one completion announces one item and never the reset-only "all items". A failed lookup
+        // throws before anything is completed, so the handler keeps the entry and both steps run again on retry; a
+        // completion committed without its item named would otherwise never be announced, since the retry finds it ended.
         var changedItemID = itemID
         if changedItemID == nil {
-            changedItemID = try? await base.resolve(notificationID: notificationID).itemID
+            changedItemID = try await base.resolve(notificationID: notificationID).itemID
         }
         let answer = try await base.complete(notificationID: notificationID, itemID: itemID)
         if answer.outcome == "completed", let changedItemID {

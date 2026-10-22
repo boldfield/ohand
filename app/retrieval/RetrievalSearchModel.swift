@@ -44,8 +44,6 @@ final class RetrievalSearchModel: ObservableObject {
     /// The result shown in the item pane beside the results. Only set while the session is authenticated and the row
     /// is on screen; a new search, a relock or leaving the screen drops it.
     @Published private(set) var selectedReference: RetrievalItemReference?
-    /// Raised each time the item shown in the pane changed, so the pane reads it again.
-    @Published private(set) var paneRefreshCount = 0
     /// Set by the screen while it has room to show an item beside the results (regular width with a pane).
     var presentsItemsInPane = false {
         didSet { if !presentsItemsInPane { selectedReference = nil } }
@@ -152,7 +150,6 @@ final class RetrievalSearchModel: ObservableObject {
         case .item(let itemID):
             let before = rows.count
             rows.removeAll { $0.reference.value == itemID.lowercased() }
-            if selectedReference?.value == itemID.lowercased() { paneRefreshCount += 1 }
             totalAccessible = max(0, totalAccessible - (before - rows.count))
         }
         if !isInDetail { runAgain() }

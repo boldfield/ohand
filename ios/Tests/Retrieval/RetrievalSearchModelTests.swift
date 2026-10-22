@@ -145,9 +145,8 @@ final class RetrievalSearchModelTests: XCTestCase {
         deliver(.success(page([row(Self.firstID)])), at: 1)
         XCTAssertEqual(model.selectedReference?.value, Self.firstID)
 
-        let refreshesBefore = model.paneRefreshCount
         publish(.item(Self.firstID))
-        XCTAssertEqual(model.paneRefreshCount, refreshesBefore + 1, "the pane reads the changed item again")
+        XCTAssertEqual(model.selectedReference?.value, Self.firstID, "the pane keeps its item while the query runs")
         XCTAssertFalse(model.rows.map(\.id).contains(Self.firstID), "the row is dropped at once")
         deliver(.success(page([])), at: 2)
         XCTAssertEqual(
@@ -159,13 +158,14 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertNil(model.selectedReference, "searching again drops it")
     }
 
-    func testAChangeToAnotherItemDoesNotRefreshThePane() {
+    func testAChangeToAnotherItemKeepsThePaneOnItsItem() {
         model.presentsItemsInPane = true
         showResults([row(Self.firstID), row(Self.secondID)])
         model.select(model.rows[0])
-        let refreshesBefore = model.paneRefreshCount
         publish(.item(Self.secondID))
-        XCTAssertEqual(model.paneRefreshCount, refreshesBefore)
+        deliver(.success(page([row(Self.firstID)])), at: 1)
+        XCTAssertEqual(model.selectedReference?.value, Self.firstID)
+        XCTAssertEqual(model.rows.map(\.id), [Self.firstID])
     }
 
     func testAllItemsEmptiesTheResultsAndAsksAgain() {

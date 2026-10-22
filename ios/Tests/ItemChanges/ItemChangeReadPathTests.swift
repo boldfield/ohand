@@ -1,5 +1,7 @@
 import Foundation
 import SQLite3
+import SwiftUI
+import UIKit
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -139,6 +141,67 @@ final class ItemChangeReadPathTests: XCTestCase {
         XCTAssertEqual(search.rows.count, reads)
     }
 
+    // MARK: deletion made on the detail screen
+
+    func testDeletingOnTheDetailScreenShowsTheDeletionResultWithoutTheNotHereMessage() throws {
+        let itemID = try saveCapture("synthetic roofer words to delete here")
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        var onScreen: Set<String> = []
+        var everShown: Set<String> = []
+        let window = hostDetail(model) { identifier, shown in
+            if shown {
+                onScreen.insert(identifier)
+                everShown.insert(identifier)
+            } else {
+                onScreen.remove(identifier)
+            }
+        }
+        defer {
+            window.isHidden = true
+            _ = pump(until: { false }, timeout: 0.2)
+        }
+        XCTAssertTrue(pump(until: {
+            window.rootViewController?.view.layoutIfNeeded()
+            return MainActor.assumeIsolated { model.content != nil && model.deletion?.revision != nil }
+        }), "the item loads and the delete control has read its revision")
+        let deletion = try XCTUnwrap(model.deletion)
+
+        try runOnMain {
+            deletion.requestDeletion()
+            await deletion.confirmDeletion()
+        }
+
+        XCTAssertTrue(pump(until: {
+            window.rootViewController?.view.layoutIfNeeded()
+            return MainActor.assumeIsolated { deletion.isRecorded && model.failure == .notFound }
+        }), "the screen reads the item again once the deletion is recorded")
+        _ = pump(until: { false }, timeout: 0.3)
+        XCTAssertNil(model.content)
+        XCTAssertFalse(everShown.contains(SourceDetailView.notFoundIdentifier), "the deletion result is the whole answer")
+        XCTAssertFalse(onScreen.contains(SourceDetailView.notFoundIdentifier))
+    }
+
+    func testOpeningAnItemThatWasDeletedEarlierStillSaysNotHere() throws {
+        let itemID = try saveCapture("synthetic roofer words deleted earlier")
+        let start = try revision(of: itemID)
+        let deletion = root.itemDeletion
+        _ = try run { try await deletion.delete(itemID: itemID, expectedRevision: start) }
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        var onScreen: Set<String> = []
+        let window = hostDetail(model) { identifier, shown in
+            if shown { onScreen.insert(identifier) } else { onScreen.remove(identifier) }
+        }
+        defer {
+            window.isHidden = true
+            _ = pump(until: { false }, timeout: 0.2)
+        }
+
+        XCTAssertTrue(pump(until: {
+            window.rootViewController?.view.layoutIfNeeded()
+            return onScreen.contains(SourceDetailView.notFoundIdentifier)
+        }), "an item deleted before the screen opened still says it is not here")
+    }
+
     // MARK: helpers
 
     private func showHomeAndSearch(expecting itemIDs: Set<String>) throws {
@@ -151,6 +214,25 @@ final class ItemChangeReadPathTests: XCTestCase {
         search.search()
         XCTAssertTrue(pump(until: { self.search.phase == .results && Set(self.search.rows.map(\.id)) == itemIDs }),
             "search lists the saved items")
+    }
+
+    /// Hosts the real detail screen and reports every identified element it shows or hides.
+    private func hostDetail(_ model: SourceDetailModel, onScreen: @escaping (String, Bool) -> Void) -> UIWindow {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            SourceDetailView(model: model, renderReporter: onScreen)
+        })
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    private func runOnMain(_ operation: @escaping @MainActor @Sendable () async -> Void) throws {
+        let box = ReadPathResultBox<Void>()
+        Task { @MainActor in
+            await operation()
+            box.set(.success(()))
+        }
+        XCTAssertTrue(pump(until: { box.value != nil }), "the call never completed")
     }
 
     private var databasePath: String { ProtectedStorageLayout(rootDirectory: storageRoot).databaseURL.path }
