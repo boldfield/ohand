@@ -10,6 +10,7 @@ struct ManagementContext {
     let sourceDetail: (String) -> SourceDetailModel
     let suggestion: SuggestionScreenModel
     let privacySettings: PrivacySettingsModel
+    var permissionsSettings: PermissionsSettingsModel?
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -96,6 +97,7 @@ enum ManagementCatalog {
         ManagementEntry(id: "provider-settings", title: "Providers", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
         ManagementEntry(id: "privacy-settings", title: "Privacy", systemImage: "hand.raised") { context in AnyView(PrivacySettingsView(model: context.privacySettings)) },
+        ManagementEntry(id: "permissions-settings", title: "Permissions", systemImage: "checkmark.shield") { context in context.permissionsSettings.map { AnyView(PermissionsSettingsView(model: $0)) } ?? AnyView(EmptyView()) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
@@ -161,13 +163,18 @@ struct SettingsRootView: View {
 
     /// The design's row order for the two groups. Rows missing from `sections` are skipped.
     static let firstGroupEntryIDs = ["prompt-settings", "voice-recovery"]
-    static let secondGroupEntryIDs = ["provider-settings", "privacy-settings", "audio-retention", exportEntryID]
+    static let secondGroupEntryIDs = ["provider-settings", "privacy-settings", "permissions-settings", "audio-retention", exportEntryID]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
     /// Lets a hosted test see each row's label and value; production leaves it unset.
     var renderReporter: (([String: String]) -> Void)?
+    /// Hosted tests cannot tap a SwiftUI control, so they ask the root to open the reset screen exactly as the card's
+    /// tap does and read the reset screen's own render report; production leaves both unset.
+    var opensResetOnAppear = false
+    var resetRenderReporter: (([String: RetentionRenderedElement]) -> Void)?
 
+    @State private var isResetShown = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -213,15 +220,24 @@ struct SettingsRootView: View {
                     group(firstGroup)
                     group(secondGroup)
                 }
-                // Presentation only: the erase action is wired by the reset task (U07c), so this card is not yet
-                // interactive.
-                DSCard {
-                    Text("Erase everything")
-                        .font(DSFont.button)
-                        .foregroundColor(DSColor.destructive.color)
-                        .frame(maxWidth: .infinity)
+                if let resetSettings = context.retention.resetSettings {
+                    Button {
+                        isResetShown = true
+                    } label: {
+                        DSCard {
+                            Text("Erase everything")
+                                .font(DSFont.button)
+                                .foregroundColor(DSColor.destructive.color)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(Self.eraseIdentifier)
+                    .navigationDestination(isPresented: $isResetShown) {
+                        ResetSettingsView(model: resetSettings, renderReporter: resetRenderReporter)
+                    }
+                    .preference(key: SettingsRootRenderedKey.self, value: [Self.eraseIdentifier: "Erase everything"])
                 }
-                .accessibilityIdentifier(Self.eraseIdentifier)
                 Text(versionText)
                     .font(DSFont.footer)
                     .foregroundColor(DSColor.inkMuted.color)
@@ -236,6 +252,7 @@ struct SettingsRootView: View {
         .toolbar(.hidden, for: .navigationBar)
         .onPreferenceChange(SettingsRootRenderedKey.self) { renderReporter?($0) }
         .task { await loadValues() }
+        .onAppear { if opensResetOnAppear { isResetShown = true } }
     }
 
     /// Reads the current values the rows show. The models keep their own read-scope rules: a locked session leaves

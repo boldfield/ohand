@@ -44,6 +44,8 @@ final class ReminderEditModel: ObservableObject {
     @Published private(set) var reminder: ReminderRecordAnswer?
     @Published private(set) var unavailable: ReminderEditUnavailable?
     @Published private(set) var isLoading = false
+    /// A successful read has said this item is an action, so the section has something true to show.
+    @Published private(set) var hasRead = false
     @Published private(set) var isWorking = false
     /// The item is completed or cancelled. The core refuses every edit to it, so none is offered.
     @Published private(set) var isClosed = false
@@ -90,7 +92,9 @@ final class ReminderEditModel: ObservableObject {
     var standing: ReminderStanding { .of(reminder, permission: permission, now: now()) }
     var canSave: Bool { unavailable == nil && !isClosed && !isLoading && !isWorking }
     var canCancel: Bool { canSave && standing.offersCancel }
-    var isShown: Bool { unavailable != .notAnAction }
+    /// Nothing is shown until a read has said the item can carry a reminder. A later locked or unreadable answer is
+    /// shown, but one that comes before any successful read is not.
+    var isShown: Bool { hasRead && unavailable != .notAnAction }
     /// The last edit's outcome, or the standing closed notice when the item can no longer carry a change.
     var shownMessage: ReminderEditMessage? { message ?? (isClosed ? .itemClosed : nil) }
 
@@ -128,10 +132,12 @@ final class ReminderEditModel: ObservableObject {
     @MainActor private func adopt(_ answer: ReminderReadAnswer) {
         guard answer.itemType == "action" else {
             clear()
+            hasRead = false
             unavailable = .notAnAction
             return
         }
         unavailable = nil
+        hasRead = true
         itemRevision = answer.itemRevision
         isClosed = answer.lifecycleState != "active"
         reminder = answer.reminder
@@ -142,11 +148,14 @@ final class ReminderEditModel: ObservableObject {
         clear()
         switch error as? ReminderControlError {
         case .some(.notAuthenticated): unavailable = .locked
-        case .some(.itemNotFound), .some(.itemCannotCarryReminder): unavailable = .notAnAction
+        case .some(.itemNotFound), .some(.itemCannotCarryReminder):
+            hasRead = false
+            unavailable = .notAnAction
         default: unavailable = .unreadable
         }
     }
 
+    /// Drops the shown reminder. `hasRead` is left alone: a failed read does not unsay an earlier Action answer.
     @MainActor private func clear() {
         reminder = nil
         message = nil

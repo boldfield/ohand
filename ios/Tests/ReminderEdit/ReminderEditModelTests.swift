@@ -150,6 +150,60 @@ final class ReminderEditModelTests: XCTestCase {
         XCTAssertEqual(model.draftDate, Date(timeIntervalSince1970: due.timeIntervalSince1970.rounded(.down)))
     }
 
+    func testTheSectionIsHiddenUntilTheReadSaysTheItemIsAnAction() async {
+        let editor = FakeReminderEditor(read: .success(read(nil, type: "note")))
+        let model = make(editor)
+        XCTAssertFalse(model.isShown)
+
+        await model.load()
+        XCTAssertFalse(model.isShown)
+
+        // The item became an action: a reload makes the section appear.
+        editor.setRead(.success(read(nil)))
+        await model.load()
+        XCTAssertTrue(model.isShown)
+
+        // The item stopped being an action: a reload removes it again.
+        editor.setRead(.success(read(nil, type: "note")))
+        await model.load()
+        XCTAssertFalse(model.isShown)
+    }
+
+    func testAReloadAfterTheItemClosesMakesTheReminderNotEditable() async {
+        let editor = FakeReminderEditor(read: .success(read(record(due: Self.clock.addingTimeInterval(7200)))))
+        let model = make(editor)
+        await model.load()
+        XCTAssertTrue(model.canSave)
+
+        editor.setRead(.success(read(record(due: Self.clock.addingTimeInterval(7200)), lifecycle: "completed")))
+        await model.load()
+
+        XCTAssertTrue(model.isShown)
+        XCTAssertTrue(model.isClosed)
+        XCTAssertFalse(model.canSave)
+        XCTAssertFalse(model.canCancel)
+    }
+
+    func testAFailedFirstReadDoesNotShowTheSectionButALaterFailureKeepsAnEarlierActionAnswer() async {
+        let editor = FakeReminderEditor(read: .failure(ReminderControlError.notAuthenticated))
+        let model = make(editor)
+        await model.load()
+        XCTAssertFalse(model.isShown, "no read has said the item can carry a reminder")
+
+        editor.setRead(.failure(ReminderControlError.unreadable))
+        await model.load()
+        XCTAssertFalse(model.isShown)
+
+        editor.setRead(.success(read(nil)))
+        await model.load()
+        XCTAssertTrue(model.isShown)
+
+        editor.setRead(.failure(ReminderControlError.notAuthenticated))
+        await model.load()
+        XCTAssertTrue(model.isShown, "a locked answer after an Action read is still shown")
+        XCTAssertEqual(model.unavailable, .locked)
+    }
+
     func testAnItemThatIsNotAnActionShowsNoSectionAndALockedReadShowsNoReminder() async {
         let notAction = make(FakeReminderEditor(read: .success(read(nil, type: "note"))))
         await notAction.load()

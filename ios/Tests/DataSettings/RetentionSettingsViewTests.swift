@@ -282,18 +282,13 @@ final class RetentionSettingsViewTests: XCTestCase {
         }
     }
 
-    func testTheExportLinkIsShownOnlyWhenTheAppAssemblesAnExportSection() async throws {
-        await withScreen(FakeRetentionControls(status: Self.status())) { _ in
-            XCTAssertNil(rendered[RetentionSettingsView.exportLinkIdentifier])
-        }
-
+    func testTheAudioScreenHoldsNoExportOrResetLink() async throws {
         let world = try ExportWorld()
         addTeardownBlock { world.tearDown() }
         let exportSettings = ExportSettingsModel(controls: world.makeService(), readScope: { .authenticated })
         await withScreen(FakeRetentionControls(status: Self.status()), exportSettings: exportSettings) { _ in
-            XCTAssertEqual(text(RetentionSettingsView.exportLinkIdentifier), "Export a copy of your notes")
-            assertTappable(RetentionSettingsView.exportLinkIdentifier)
-            XCTAssertEqual(world.core.requests, [], "showing the link reads nothing")
+            XCTAssertNil(rendered["data-settings.retention.export-link"])
+            XCTAssertNil(rendered["data-settings.retention.reset-link"])
         }
     }
 }

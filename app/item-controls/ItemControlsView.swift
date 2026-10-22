@@ -151,7 +151,7 @@ struct ItemControlsView: View {
                 .foregroundColor(DSColor.inkMuted.color)
             TextField("Corrected words", text: $model.textDraft, axis: .vertical)
                 .lineLimit(1...8)
-                .textFieldStyle(.roundedBorder)
+                .dsFieldStyle()
                 .accessibilityIdentifier(Self.textFieldIdentifier)
             Button("Save words") { Task { await model.saveText() } }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
@@ -234,7 +234,7 @@ struct ItemControlsView: View {
                 .font(DSFont.groupHeading)
                 .foregroundColor(DSColor.inkMuted.color)
             TextField("Topic", text: $model.topicDraft)
-                .textFieldStyle(.roundedBorder)
+                .dsFieldStyle()
                 .accessibilityIdentifier(Self.topicFieldIdentifier)
             Text(Self.topicFooter)
                 .font(DSFont.footer)
@@ -267,5 +267,17 @@ private extension View {
         accessibilityIdentifier(identifier)
             .onAppear { reporter?(identifier, true) }
             .onDisappear { reporter?(identifier, false) }
+    }
+}
+
+private extension View {
+    /// A text field drawn from design-system tokens, so it reads the same in light and dark appearance.
+    func dsFieldStyle() -> some View {
+        self
+            .font(DSFont.body)
+            .foregroundColor(DSColor.ink.color)
+            .padding(DSSpacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: DSRadius.field, style: .continuous).fill(DSColor.surface2.color))
     }
 }

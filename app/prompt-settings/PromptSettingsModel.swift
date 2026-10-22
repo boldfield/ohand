@@ -52,22 +52,31 @@ final class PromptSettingsModel: ObservableObject {
     @Published private(set) var hasLoaded = false
 
     private let controller: PromptSettingsControlling
+    private let notificationPermission: NotificationPermissionAsking?
     private let currentCalendar: () -> Calendar
     private var calendar: Calendar { currentCalendar() }
     private let nextPromptFormatter: ISO8601DateFormatter
 
     /// `currentCalendar` is read every time a local time is converted, so a time zone change while the app is running
     /// is followed; the default tracks the system zone, the same one the time picker renders in.
-    init(controller: PromptSettingsControlling, currentCalendar: @escaping () -> Calendar = { .autoupdatingCurrent }) {
+    /// `notificationPermission` is asked, once and only when the OS was never asked, as prompts are turned on.
+    init(
+        controller: PromptSettingsControlling,
+        notificationPermission: NotificationPermissionAsking? = nil,
+        currentCalendar: @escaping () -> Calendar = { .autoupdatingCurrent }
+    ) {
         self.controller = controller
+        self.notificationPermission = notificationPermission
         self.currentCalendar = currentCalendar
         nextPromptFormatter = ISO8601DateFormatter()
         nextPromptFormatter.formatOptions = [.withInternetDateTime]
         time = Self.date(hour: Self.defaultTime.hour, minute: Self.defaultTime.minute, calendar: currentCalendar())
     }
 
-    convenience init(controller: PromptSettingsControlling, calendar: Calendar) {
-        self.init(controller: controller, currentCalendar: { calendar })
+    convenience init(
+        controller: PromptSettingsControlling, notificationPermission: NotificationPermissionAsking? = nil, calendar: Calendar
+    ) {
+        self.init(controller: controller, notificationPermission: notificationPermission, currentCalendar: { calendar })
     }
 
     /// Reads the stored schedule. Reading changes nothing.
@@ -83,6 +92,7 @@ final class PromptSettingsModel: ObservableObject {
 
     @MainActor func setEnabled(_ enabled: Bool) async {
         guard !isBusy, enabled != isEnabled else { return }
+        if enabled { await askForNotificationsIfNeverRequested() }
         await apply(enabled ? timeSetting(for: time) : .off)
     }
 
@@ -96,6 +106,16 @@ final class PromptSettingsModel: ObservableObject {
     }
 
     // MARK: private
+
+    /// Turning prompts on is the feature boundary for notifications. The OS shows its prompt only if it was never shown;
+    /// a denial is respected, and the pass that follows the save reports it. The busy flag holds the switch still while
+    /// the prompt is up.
+    @MainActor private func askForNotificationsIfNeverRequested() async {
+        guard let notificationPermission else { return }
+        isBusy = true
+        defer { isBusy = false }
+        _ = await notificationPermission.askIfNeverRequested()
+    }
 
     private func timeSetting(for date: Date) -> PromptScheduleSetting {
         let components = calendar.dateComponents([.hour, .minute], from: date)
