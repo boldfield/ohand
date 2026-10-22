@@ -124,6 +124,40 @@ final class ItemChangeSignalTests: XCTestCase {
         XCTAssertTrue(recorder.allOnMainThread)
     }
 
+    func testEveryChangeIsAlsoPostedOnTheMainThreadCarryingOnlyTheChange() {
+        let center = NotificationCenter()
+        let signal = ItemChangeSignal(notificationCenter: center)
+        let recorder = ChangeRecorder()
+        let extraKeys = ChangeRecorder()
+        let token = center.addObserver(forName: ItemChangeSignal.didChangeNotification, object: signal, queue: nil) {
+            guard let change = ItemChangeSignal.change(in: $0) else { return }
+            recorder.record(change)
+            // Anything besides the change itself would be recorded here.
+            if ($0.userInfo?.count ?? 0) != 1 { extraKeys.record(change) }
+        }
+        defer { center.removeObserver(token) }
+
+        signal.publish(.item("item-3"))
+        let delivered = expectation(description: "delivered")
+        DispatchQueue.global().async {
+            signal.publish(.allItems)
+            DispatchQueue.main.async { delivered.fulfill() }
+        }
+        wait(for: [delivered], timeout: 5)
+
+        XCTAssertEqual(recorder.changes, [.item("item-3"), .allItems])
+        XCTAssertTrue(recorder.allOnMainThread)
+        XCTAssertEqual(extraKeys.changes, [], "the notification carries nothing but the change")
+        XCTAssertNil(ItemChangeSignal.change(
+            in: Notification(name: Notification.Name("other"), object: nil, userInfo: ["change": ItemChange.allItems])))
+    }
+
+    func testAChangeConcernsItsOwnItemInAnyCaseAndAResetConcernsEveryItem() {
+        XCTAssertTrue(ItemChange.item("ABC-1").concerns("abc-1"))
+        XCTAssertFalse(ItemChange.item("abc-1").concerns("abc-2"))
+        XCTAssertTrue(ItemChange.allItems.concerns("abc-2"))
+    }
+
     func testAStoredCorrectionPublishesOnlyTheItemIdentifier() async throws {
         let signal = ItemChangeSignal()
         let recorder = ChangeRecorder()

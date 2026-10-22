@@ -194,6 +194,83 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         XCTAssertNotNil(rendered[RetrievalSearchView.itemPaneIdentifier])
     }
 
+    /// A change stored outside the pane, as a notification's Done or another screen stores it, reaches the same signal
+    /// the pane's own controls do; the pane's detail reads its item again without being rebuilt.
+    func testAChangeStoredOutsideThePaneIsReadAgainByThePanesDetail() throws {
+        let itemID = try saveCapture()
+        let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
+        searchModel.select(shown)
+        settle {
+            detailModels.first?.content != nil && detailModels.first?.itemControls?.snapshot != nil
+                && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
+        }
+        let detail = try XCTUnwrap(detailModels.first)
+        let controls = try XCTUnwrap(detail.itemControls)
+        let deletion = try XCTUnwrap(detail.deletion)
+        XCTAssertEqual(detail.content?.lifecycleLabel, "Active")
+
+        // A text correction stored elsewhere: the pane shows the new words, and an untouched draft follows them.
+        let corrected = RetrievalResultRow(
+            reference: shown.reference, text: "synthetic words corrected elsewhere",
+            originalText: "synthetic capture in the pane", basis: .corrected, matched: .current,
+            snippet: RetrievalSnippet(text: "synthetic words corrected elsewhere", span: nil),
+            scopeName: "Personal", capturedAt: shown.capturedAt, itemType: .note)
+        searcher.page = RetrievalPage(totalAccessible: 1, rows: [corrected], offset: 0)
+        try correctText(itemID: itemID, to: "synthetic words corrected elsewhere")
+        let correctedRevision = try revision(of: itemID)
+        settle {
+            detail.content?.currentText == "synthetic words corrected elsewhere"
+                && controls.snapshot?.revision == correctedRevision
+                && MainActor.assumeIsolated { deletion.revision == correctedRevision }
+                && searchModel.rows == [corrected]
+        }
+        XCTAssertEqual(detail.content?.currentText, "synthetic words corrected elsewhere", "the pane reads the item again")
+        XCTAssertEqual(detail.content?.sections.last?.text, "synthetic words corrected elsewhere")
+        XCTAssertEqual(controls.textDraft, "synthetic words corrected elsewhere", "an untouched draft shows the new words")
+        XCTAssertEqual(
+            MainActor.assumeIsolated { deletion.revision }, correctedRevision,
+            "the delete control applies against the revision now stored")
+        XCTAssertEqual(searchModel.rows, [corrected])
+
+        // A completion stored elsewhere: the pane shows the item completed and offers no more actions, and words the
+        // person typed but did not save stay as typed.
+        controls.textDraft = "synthetic words typed but not saved"
+        let completedRevision = correctedRevision + 1
+        var completed = false
+        var failure: Error?
+        Task {
+            do { _ = try await root.itemLifecycleControls.complete(
+                commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: correctedRevision) }
+            catch { failure = error }
+            completed = true
+        }
+        settle {
+            completed && detail.content?.lifecycleLabel == "Completed"
+                && controls.snapshot?.revision == completedRevision
+        }
+        XCTAssertNil(failure)
+        XCTAssertEqual(detail.content?.lifecycleLabel, "Completed", "the pane shows the stored state")
+        XCTAssertEqual(controls.snapshot?.lifecycleState, "completed")
+        XCTAssertFalse(controls.canAct, "a completed item offers no completion")
+        XCTAssertEqual(controls.textDraft, "synthetic words typed but not saved", "nothing typed is discarded")
+
+        // A deletion stored elsewhere: no deleted text stays in the pane, which says the item is not here.
+        searcher.page = RetrievalPage(totalAccessible: 0, rows: [], offset: 0)
+        var deleted = false
+        Task {
+            do { _ = try await root.itemDeletion.delete(itemID: itemID, expectedRevision: completedRevision) }
+            catch { failure = error }
+            deleted = true
+        }
+        settle { deleted && detail.failure == .notFound && searchModel.rows.isEmpty }
+        XCTAssertNil(failure)
+        XCTAssertNil(detail.content, "no deleted text stays in the pane")
+        XCTAssertEqual(detail.failure, .notFound)
+        XCTAssertFalse(MainActor.assumeIsolated { deletion.isRecorded }, "the pane did not delete it")
+        XCTAssertEqual(searchModel.selectedReference, shown.reference)
+        XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
+    }
+
     func testAtCompactWidthAResultIsStillPushedAndNoPaneIsShown() throws {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 390, height: 844), sizeClass: .compact)
@@ -292,6 +369,10 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         }
         settle { finished }
         XCTAssertNil(failure)
+    }
+
+    private func revision(of itemID: String) throws -> Int {
+        try XCTUnwrap(Int(scalar("SELECT revision FROM items WHERE item_id = '\(itemID)'")))
     }
 
     private func scalar(_ sql: String) -> String {

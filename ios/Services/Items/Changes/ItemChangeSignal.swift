@@ -8,6 +8,14 @@ public enum ItemChange: Equatable, Sendable {
     case item(String)
     /// A reset completed: every item is gone.
     case allItems
+
+    /// True when this change may have changed the item named `itemID`.
+    public func concerns(_ itemID: String) -> Bool {
+        switch self {
+        case .allItems: return true
+        case .item(let changed): return changed.caseInsensitiveCompare(itemID) == .orderedSame
+        }
+    }
 }
 
 /// Where services say that something they stored changed an item.
@@ -22,11 +30,28 @@ protocol ItemChangePublishing: Sendable {
 /// * **Carries no content.** See `ItemChange`.
 /// * **Delivered on the main thread.** A publish from the main thread reaches subscribers before it returns; from any
 ///   other thread it is queued to the main queue, in publish order.
+/// * **Also posted as `didChangeNotification`**, after the subscribers, for a screen built without access to the root
+///   (an item's detail) that must read its own item again. The notification carries the same `ItemChange` and nothing
+///   else, under `changeKey`.
 public final class ItemChangeSignal: ItemChangePublishing, @unchecked Sendable {
+    /// Posted on the main thread, with `object` the signal, for every change.
+    public static let didChangeNotification = Notification.Name("OhAnd.ItemChangeSignal.didChange")
+    /// The `userInfo` key holding the `ItemChange`.
+    public static let changeKey = "change"
+
     private let lock = NSLock()
     private var subscribers: [UUID: @Sendable (ItemChange) -> Void] = [:]
+    private let notificationCenter: NotificationCenter
 
-    public init() {}
+    public init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+    }
+
+    /// The change a `didChangeNotification` carries, or nil for any other notification.
+    public static func change(in notification: Notification) -> ItemChange? {
+        guard notification.name == didChangeNotification else { return nil }
+        return notification.userInfo?[changeKey] as? ItemChange
+    }
 
     /// Calls `handler` for every later change. Returns the closure that removes the registration.
     public func observe(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void {
@@ -55,6 +80,7 @@ public final class ItemChangeSignal: ItemChangePublishing, @unchecked Sendable {
         let current = Array(subscribers.values)
         lock.unlock()
         current.forEach { $0(change) }
+        notificationCenter.post(name: Self.didChangeNotification, object: self, userInfo: [Self.changeKey: change])
     }
 }
 
