@@ -141,7 +141,11 @@ final class StatusIntegrationTests: XCTestCase {
     /// Finds the accessibility element with an identifier in the hosted screen and activates it, as a tap would.
     private func activate(_ identifier: String) -> Bool {
         func search(_ object: NSObject, depth: Int) -> NSObject? {
-            if object.accessibilityIdentifier == identifier { return object }
+            if object.responds(to: NSSelectorFromString("accessibilityIdentifier")),
+                object.value(forKey: "accessibilityIdentifier") as? String == identifier
+            {
+                return object
+            }
             guard depth < 30 else { return nil }
             var children: [NSObject] = []
             if let view = object as? UIView { children += view.subviews }
