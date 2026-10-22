@@ -133,7 +133,7 @@ final class AppServices {
                 health: LifecycleHealthReader(lifecycle: lifecycle),
                 permissions: PermissionsOverview(
                     reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
-                    memory: UserDefaultsPermissionMemory()),
+                    memory: StatusPermissionMemory()),
                 retrier: root.jobRunner, scheduling: RootReminderSchedulingReader(root: root),
                 openSystemSettings: Self.openSystemSettings))
         let homeRecents = HomeRecentsModel(

@@ -52,6 +52,25 @@ enum StatusText {
     static let notificationsScheduledHeadline = "Reminders are scheduled"
     static let notificationsNoneHeadline = "No reminders are waiting to be scheduled"
     static let notificationsNoneDetail = "Notifications are allowed. Nothing is held back."
+    static let notificationsAllowedDetail = "Notifications are allowed."
+    static let notificationsUnfinishedHeadline = "Some reminder scheduling did not go through"
+    static let notificationsUnfinishedDetail =
+        "Reminders are saved, but the system did not accept every change the last scheduling pass asked for. It is "
+        + "tried again when Oh And next opens."
+
+    /// Daily prompts the last pass did not schedule. Reminders always come first, so these never displace one.
+    static func heldBackPromptsDetail(deferred: Int, withheld: Int) -> [String] {
+        var details: [String] = []
+        if deferred > 0 {
+            details.append(
+                "\(deferred) daily \(deferred == 1 ? "prompt waits" : "prompts wait") for room with the system; reminders come first.")
+        }
+        if withheld > 0 {
+            details.append(
+                "\(withheld) daily \(withheld == 1 ? "prompt is" : "prompts are") held back until notifications can alert.")
+        }
+        return details
+    }
 
     static func notificationsUnscheduledDetail(count: Int) -> String {
         "\(count) saved \(count == 1 ? "reminder is" : "reminders are") not scheduled, so \(count == 1 ? "it" : "they") will not alert as things stand. The reminder itself is kept."

@@ -31,6 +31,17 @@ private final class FixedHealth: ProcessingHealthReading, @unchecked Sendable {
     func read() async -> ProcessingHealthOutcome { outcome }
 }
 
+private final class GrantedNotifications: PermissionsReading, @unchecked Sendable {
+    func refresh() async -> [PermissionEntry] {
+        [PermissionEntry(kind: .notifications, status: .granted, change: .unchanged)]
+    }
+}
+
+private final class StoredReminderReport: ReminderSchedulingReading {
+    var report: NotificationPermissionReport?
+    func lastReport() -> NotificationPermissionReport? { report }
+}
+
 private func healthSnapshot(summary: String, errors: [String] = []) -> ProcessingHealthOutcome {
     let json = """
         {"operation_id":1,"generated_at":"2026-10-22T00:00:00Z","summary":"\(summary)","stalled":\(summary == "stalled"),
@@ -251,6 +262,38 @@ final class StatusIntegrationTests: XCTestCase {
         actions[StatusView.retryIdentifier]?()
         wait(timeout: 10) { retrier.count > 0 }
         XCTAssertEqual(retrier.count, 1)
+    }
+
+    /// A pass through the production permission reconciler whose core run finished but one native schedule was not
+    /// accepted: the screen says scheduling did not go through, not that nothing is held back.
+    func testAReminderPassWithAFailedNativeEffectRendersAsNotGoneThrough() {
+        let reconciliation = RecordingReconciliation()
+        reconciliation.setOutcome(
+            ReminderReconciliationOutcome(
+                reminders: [ReminderFixtures.resolved("item-effect-failed")], promptsGranted: 0, promptsDeferred: 0,
+                converged: false))
+        let reconciler = NotificationPermissionReconciler(
+            center: FakeNotificationCenter(), reconciliation: reconciliation,
+            observations: InMemoryNotificationPermissionObservationStore())
+        let scheduling = StoredReminderReport()
+        run { scheduling.report = try? await reconciler.refresh(trigger: .foreground) }
+        XCTAssertNotNil(scheduling.report)
+        XCTAssertNil(scheduling.report?.reconciliationFailure, "the pass itself completed")
+        XCTAssertEqual(scheduling.report?.converged, false)
+
+        let model = StatusModel(
+            health: FixedHealth(healthSnapshot(summary: "idle")), permissions: GrantedNotifications(),
+            retrier: NoopRetrier(), scheduling: scheduling, openSystemSettings: {})
+        host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 }))
+        wait(timeout: 10) {
+            self.rendered[StatusView.rowIdentifier(.notifications)]?.contains(StatusText.notificationsUnfinishedHeadline) == true
+        }
+
+        let row = rendered[StatusView.rowIdentifier(.notifications)] ?? ""
+        XCTAssertTrue(row.contains(StatusText.notificationsUnfinishedHeadline), row)
+        XCTAssertTrue(row.contains(StatusText.notificationsUnfinishedDetail), row)
+        XCTAssertFalse(row.contains(StatusText.notificationsNoneDetail), row)
+        XCTAssertFalse(row.contains(StatusText.notificationsScheduledHeadline), row)
     }
 
     // MARK: the production assembly

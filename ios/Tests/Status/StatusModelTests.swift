@@ -52,7 +52,8 @@ private final class ScriptedScheduling: ReminderSchedulingReading {
 }
 
 private func schedulingReport(
-    _ outlooks: [ReminderOutlook], failure: ReminderReconciliationFailure? = nil
+    _ outlooks: [ReminderOutlook], failure: ReminderReconciliationFailure? = nil, converged: Bool? = nil,
+    promptsDeferred: Int = 0, promptsWithheld: Int = 0
 ) -> NotificationPermissionReport {
     let reminders = outlooks.enumerated().map { index, outlook in
         ReminderStatus(facts: ReminderFixtures.resolved("item-\(index)"), outlook: outlook)
@@ -60,8 +61,26 @@ private func schedulingReport(
     return NotificationPermissionReport(
         permission: .usable, transition: .unchanged, trigger: .explicit,
         readiness: NotificationReadinessReport(permission: .usable, reminders: reminders),
-        promptsGranted: 0, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: failure,
-        converged: failure == nil)
+        promptsGranted: 0, promptsDeferred: promptsDeferred, promptsWithheld: promptsWithheld,
+        reconciliationFailure: failure, converged: converged ?? (failure == nil))
+}
+
+/// Answers each permission from a script the test changes, as iOS Settings would.
+private final class SwitchablePermissionReader: PermissionStatusReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: PermissionStatus
+
+    init(_ status: PermissionStatus) { current = status }
+
+    func set(_ status: PermissionStatus) {
+        lock.lock(); defer { lock.unlock() }
+        current = status
+    }
+
+    func status(of kind: PermissionKind) async -> PermissionStatus {
+        lock.lock(); defer { lock.unlock() }
+        return current
+    }
 }
 
 private let notificationsGranted = [PermissionEntry(kind: .notifications, status: .granted, change: .unchanged)]
@@ -241,6 +260,83 @@ final class StatusModelTests: XCTestCase {
         await unscheduled.refresh()
         XCTAssertTrue(fact(unscheduled, .notifications).detail.contains("not scheduled"))
         XCTAssertFalse(fact(unscheduled, .notifications).detail.contains("will appear when they are due"))
+    }
+
+    func testAPassWhoseNativeEffectFailedIsNotShownAsHealthy() async {
+        // The core finished the pass (no reconciliation failure) but one schedule or cancel was not accepted.
+        let cases: [(NotificationPermissionReport, String)] = [
+            (schedulingReport([], converged: false), StatusText.notificationsUnfinishedHeadline),
+            (schedulingReport([.scheduled], converged: false), StatusText.notificationsUnfinishedHeadline),
+            (schedulingReport([.awaitingInstall], converged: false), StatusText.notificationsUnfinishedHeadline),
+            (schedulingReport([.unscheduled(.installFailed)], converged: false), StatusText.notificationsUnscheduledHeadline),
+        ]
+        for (report, headline) in cases {
+            let (status, _, _) = model(health: snapshot(summary: "idle"), scheduling: report)
+            await status.refresh()
+            let notifications = fact(status, .notifications)
+            XCTAssertEqual(notifications.headline, headline)
+            XCTAssertEqual(notifications.tone, .needsAttention)
+            XCTAssertTrue(notifications.detail.contains(StatusText.notificationsUnfinishedDetail))
+            XCTAssertFalse(notifications.detail.contains("Nothing is held back"))
+        }
+    }
+
+    func testHeldBackDailyPromptsAreNotDescribedAsNothingHeldBack() async {
+        let cases: [(NotificationPermissionReport, String, String)] = [
+            (schedulingReport([], promptsDeferred: 2), StatusText.notificationsNoneHeadline, "2 daily prompts wait for room"),
+            (schedulingReport([], promptsWithheld: 1), StatusText.notificationsNoneHeadline, "1 daily prompt is held back"),
+            (schedulingReport([.scheduled], promptsDeferred: 1), StatusText.notificationsScheduledHeadline, "1 daily prompt waits"),
+        ]
+        for (report, headline, prompts) in cases {
+            let (status, _, _) = model(health: snapshot(summary: "idle"), scheduling: report)
+            await status.refresh()
+            let notifications = fact(status, .notifications)
+            XCTAssertEqual(notifications.headline, headline)
+            XCTAssertEqual(notifications.tone, .waiting)
+            XCTAssertTrue(notifications.detail.contains(prompts), notifications.detail)
+            XCTAssertFalse(notifications.detail.contains("Nothing is held back"))
+        }
+        let (settled, _, _) = model(health: snapshot(summary: "idle"), scheduling: schedulingReport([]))
+        await settled.refresh()
+        XCTAssertEqual(fact(settled, .notifications).detail, StatusText.notificationsNoneDetail)
+        XCTAssertEqual(fact(settled, .notifications).tone, .good)
+    }
+
+    /// Status and Permissions each call a revocation out; neither reading uses up the other's callout.
+    func testOpeningStatusDoesNotConsumeThePermissionsScreensRevocationCallout() async throws {
+        for statusFirst in [true, false] {
+            let suite = "status-permission-memory-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let system = SwitchablePermissionReader(.granted)
+            let permissionsScreen = PermissionsSettingsModel(
+                overview: PermissionsOverview(reader: system, memory: UserDefaultsPermissionMemory(defaults: defaults)),
+                openSystemSettings: {})
+            let statusScreen = StatusModel(
+                health: ScriptedHealth(snapshot(summary: "idle")),
+                permissions: PermissionsOverview(reader: system, memory: StatusPermissionMemory(defaults: defaults)),
+                retrier: CountingRetrier(), openSystemSettings: {})
+            await permissionsScreen.refresh()
+            await statusScreen.refresh()
+
+            system.set(.denied)
+            if statusFirst {
+                await statusScreen.refresh()
+                await permissionsScreen.refresh()
+            } else {
+                await permissionsScreen.refresh()
+                await statusScreen.refresh()
+            }
+
+            let order = statusFirst ? "Status opened first" : "Permissions opened first"
+            XCTAssertEqual(
+                permissionsScreen.rows.first { $0.kind == .notifications }?.change, .revoked, order)
+            XCTAssertEqual(fact(statusScreen, .notifications).headline, StatusText.notificationsRevokedHeadline, order)
+            await permissionsScreen.refresh()
+            XCTAssertEqual(
+                permissionsScreen.rows.first { $0.kind == .notifications }?.change, .unchanged,
+                "Permissions still calls the revocation out once (\(order))")
+        }
     }
 
     func testRetryRequestIsAcknowledgedUntilNoRetryIsOffered() async {

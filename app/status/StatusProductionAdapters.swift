@@ -59,3 +59,36 @@ struct RootReminderSchedulingReader: ReminderSchedulingReading {
 
     func lastReport() -> NotificationPermissionReport? { root.lastReminderReport }
 }
+
+/// The status screen's own record of the permission status it last saw, under keys of its own. The Permissions screen
+/// calls a revocation or a restoration out once and then records it as seen; sharing its record would let either screen
+/// use up the other's callout. Holds no content.
+final class StatusPermissionMemory: PermissionMemory, @unchecked Sendable {
+    static let keyPrefix = "com.boldfield.ohand.status.permission.last-status."
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func lastStatus(of kind: PermissionKind) -> PermissionStatus? {
+        switch defaults.string(forKey: Self.keyPrefix + kind.rawValue) {
+        case "not_requested": return .notRequested
+        case "granted": return .granted
+        case "denied": return .denied
+        case "restricted": return .restricted
+        default: return nil
+        }
+    }
+
+    func record(_ status: PermissionStatus, for kind: PermissionKind) {
+        let value: String
+        switch status {
+        case .notRequested: value = "not_requested"
+        case .granted: value = "granted"
+        case .denied: value = "denied"
+        case .restricted: value = "restricted"
+        }
+        defaults.set(value, forKey: Self.keyPrefix + kind.rawValue)
+    }
+}

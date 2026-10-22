@@ -207,7 +207,8 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    /// Allowed notifications say nothing about scheduling, so this reads the last reminder pass itself.
+    /// Allowed notifications say nothing about scheduling, so this reads the last reminder pass itself. A pass that ran
+    /// but did not converge, and daily prompts it held back, are reported too; neither reads as "nothing held back".
     private static func grantedNotificationsFact(
         _ report: NotificationPermissionReport?,
         _ fact: (StatusTone, String, String, [StatusAction]) -> StatusFact
@@ -219,26 +220,39 @@ final class StatusModel: ObservableObject {
             return fact(
                 .needsAttention, StatusText.notificationsPassFailedHeadline, StatusText.notificationsPassFailedDetail, [])
         }
+        let unfinished = report.converged ? [] : [StatusText.notificationsUnfinishedDetail]
+        let heldBackPrompts = StatusText.heldBackPromptsDetail(
+            deferred: report.promptsDeferred, withheld: report.promptsWithheld)
+        func joined(_ first: [String]) -> String { (first + unfinished + heldBackPrompts).joined(separator: " ") }
+
         let reminders = report.readiness.reminders
         let unscheduledReasons = reminders.compactMap { status -> ReminderUnscheduledReason? in
             if case .unscheduled(let reason) = status.outlook { return reason }
             return nil
         }
         if !unscheduledReasons.isEmpty {
-            let detail = ([StatusText.notificationsUnscheduledDetail(count: unscheduledReasons.count)]
-                + Set(unscheduledReasons.map(StatusText.unscheduledReason)).sorted()).joined(separator: " ")
+            let detail = joined(
+                [StatusText.notificationsUnscheduledDetail(count: unscheduledReasons.count)]
+                    + Set(unscheduledReasons.map(StatusText.unscheduledReason)).sorted())
             return fact(.needsAttention, StatusText.notificationsUnscheduledHeadline, detail, [])
         }
+        if !report.converged {
+            return fact(.needsAttention, StatusText.notificationsUnfinishedHeadline, joined([]), [])
+        }
+        let settledTone: StatusTone = heldBackPrompts.isEmpty ? .good : .waiting
         if report.readiness.awaitingInstallCount > 0 {
             return fact(
                 .waiting, StatusText.notificationsInstallingHeadline,
-                StatusText.notificationsInstallingDetail(count: report.readiness.awaitingInstallCount), [])
+                joined([StatusText.notificationsInstallingDetail(count: report.readiness.awaitingInstallCount)]), [])
         }
         if report.readiness.scheduledCount > 0 {
             return fact(
-                .good, StatusText.notificationsScheduledHeadline,
-                StatusText.notificationsScheduledDetail(count: report.readiness.scheduledCount), [])
+                settledTone, StatusText.notificationsScheduledHeadline,
+                joined([StatusText.notificationsScheduledDetail(count: report.readiness.scheduledCount)]), [])
         }
-        return fact(.good, StatusText.notificationsNoneHeadline, StatusText.notificationsNoneDetail, [])
+        return fact(
+            settledTone, StatusText.notificationsNoneHeadline,
+            heldBackPrompts.isEmpty ? StatusText.notificationsNoneDetail : joined([StatusText.notificationsAllowedDetail]),
+            [])
     }
 }
