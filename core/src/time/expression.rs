@@ -280,6 +280,13 @@ const RELATIVE_DAY_WORDS: &[&str] = &[
     "fortnightly",
 ];
 
+/// Whether one word of a capture is a temporal token as the whole-capture rule counts them (a
+/// digit, a number word, a day, month, clock or zone word, or a relative time word other than a
+/// plain preposition), past surrounding punctuation and any clitic ("Saturday's", "10").
+pub fn is_temporal_word(raw: &str) -> bool {
+    is_temporal_token(&normalized_word(raw))
+}
+
 /// Whether `span` (character offsets into `basis_text`) covers the whole time expression around
 /// it, under the rule described at the top of this module. It is `false` when the span starts or
 /// ends inside a word.
@@ -741,7 +748,7 @@ fn is_relative_time_word(word: &str) -> bool {
 /// Lowercased, without surrounding punctuation or a trailing dot.
 fn normalized_word(raw: &str) -> String {
     raw.to_lowercase()
-        .replace('\u{2019}', "'")
+        .replace(['\u{2019}', '\u{2032}', '`'], "'")
         .trim_matches(|c: char| {
             ",;:!?()[]{}\"'\u{201c}\u{201d}\u{2018}\u{2019}\u{2026}".contains(c)
         })
@@ -783,29 +790,37 @@ fn is_temporal(word: &str) -> bool {
         )
 }
 
-/// Whether any part of a hyphenated word ("twenty-first", "mid-afternoon"), past a "'s" clitic
-/// ("Saturday's"), an "-ish" suffix ("fourish") and a plural "s", is in one of `lists`.
+/// Whether any part of a hyphenated word ("twenty-first", "mid-afternoon"), as written or past a
+/// clitic ("Saturday's", "Saturday'll"), an "-ish" suffix ("fourish") and a plural "s", is in one
+/// of `lists`. The word as written is tried too, so "o'clock" still matches.
 fn word_in(word: &str, lists: &[&[&str]]) -> bool {
-    without_clitic(word)
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .any(|part| {
-            let base = part
-                .strip_suffix("ish")
-                .filter(|stem| stem.len() >= 3)
-                .unwrap_or(part);
-            let singular = base.strip_suffix('s').unwrap_or(base);
-            lists
-                .iter()
-                .any(|list| list.contains(&base) || list.contains(&singular))
-        })
+    [word, without_clitic(word)].iter().any(|candidate| {
+        candidate
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .any(|part| {
+                let base = part
+                    .strip_suffix("ish")
+                    .filter(|stem| stem.len() >= 3)
+                    .unwrap_or(part);
+                let singular = base.strip_suffix('s').unwrap_or(base);
+                lists
+                    .iter()
+                    .any(|list| list.contains(&base) || list.contains(&singular))
+            })
+    })
 }
 
-/// A word without a trailing "'s" clitic, possessive or contracted "is" ("Saturday's better",
-/// "Tomorrow's"), so the lexicons still see the time word. [`normalized_word`] has already turned
-/// the typographic apostrophe that dictation produces into an ASCII one.
+/// A word without anything from its last apostrophe on, so a contraction or possessive clitic
+/// ('s, 'll, 'd, 're, 've, 'm) never hides a time word from the lexicons ("Saturday's better",
+/// "Saturday'll work", "Tomorrow'd be better"). [`normalized_word`] has already turned the
+/// typographic apostrophe that dictation produces, and the prime and backtick sometimes typed for
+/// one, into an ASCII one.
 fn without_clitic(word: &str) -> &str {
-    word.strip_suffix("'s").unwrap_or(word)
+    match word.rfind('\'') {
+        Some(apostrophe) if apostrophe > 0 => &word[..apostrophe],
+        _ => word,
+    }
 }
 
 #[cfg(test)]
@@ -1023,6 +1038,14 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. to call Sam. Sam's roof leaks.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call Sam. I'll bring the quote, he'd like it.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call Sam. Sam\u{2019}ll know, we've asked.",
                 "Friday at 3 p.m.",
             ),
             // A span naming no day: only request words before it, no other time anywhere.
@@ -1587,6 +1610,43 @@ mod tests {
             ),
             (
                 "Remind me Friday at 3 p.m. to call the roofer. October's busy.",
+                "Friday at 3 p.m.",
+            ),
+            // Any clitic, not only "'s", and any apostrophe dictation or typing produces.
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday'll work.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Actually, Saturday\u{2019}ll work.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Saturday'd be better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Four'll do.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me at 5 p.m. to call the roofer. Tomorrow'd be better.",
+                "at 5 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Saturday've been better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Saturday\u{2032}s better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Saturday`s better.",
+                "Friday at 3 p.m.",
+            ),
+            (
+                "Remind me Friday at 3 p.m. to call the roofer. Four o'clock's better.",
                 "Friday at 3 p.m.",
             ),
             (
