@@ -42,6 +42,14 @@ final class AppServices {
     /// Whether this foreground stay has already made its one quiet attempt, so a launch that is also a foreground, or a
     /// repeated activation, never prompts twice even when an attempt finishes synchronously. Reset on background.
     private var quietAttemptSpent = false
+    private let notificationPermission: NotificationPermissionAsking
+    private let isForeground: () -> Bool
+    /// A reminder pass found reminders that cannot alert because notifications were never asked for, but the app was not in
+    /// the foreground. The ask happens when it next becomes active.
+    private var notificationAskPending = false
+    private var notificationAskInFlight = false
+    /// The OS was already asked during this foreground stay, so a prompt that left the state undecided is not repeated.
+    private var notificationAskSpent = false
 
     /// Builds the production root over the app's own storage, with the lifecycle coordinator attached.
     static func production(
@@ -66,11 +74,16 @@ final class AppServices {
         notificationHooks: NotificationHooks = .live,
         notificationCenter: NotificationCenter = .default,
         timeSources: TimeSources = .system,
+        notificationPermission: NotificationPermissionAsking = NotificationPermissionAsker(
+            center: SystemNotificationCenter(), requester: SystemNotificationAuthorizationRequester()),
+        isForeground: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
         isProtectedDataAvailable: @escaping () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     ) {
         self.root = root
         self.lifecycle = lifecycle
         self.notificationHooks = notificationHooks
+        self.notificationPermission = notificationPermission
+        self.isForeground = isForeground
         lifecycleCenter = notificationCenter
         timeChange = TimeChangeCoordinator(
             lifecycle: lifecycle, notificationCenter: notificationCenter, sources: timeSources)
@@ -106,10 +119,19 @@ final class AppServices {
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
             retention: .assembled(root: root),
             providerSettings: .assembled(root: root),
-            promptSettings: PromptSettingsModel(controller: root.promptSchedule),
+            promptSettings: PromptSettingsModel(
+                controller: root.promptSchedule, notificationPermission: notificationPermission),
             sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) },
             suggestion: SuggestionScreenModel(responder: root.suggestionResponses),
-            privacySettings: .assembled(root: root))
+            privacySettings: .assembled(root: root),
+            permissionsSettings: PermissionsSettingsModel(
+                overview: PermissionsOverview(
+                    reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
+                    memory: UserDefaultsPermissionMemory()),
+                openSystemSettings: {
+                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                    UIApplication.shared.open(url)
+                }))
         let homeRecents = HomeRecentsModel(
             source: RootHomeRecentsSource(
                 root: root,
@@ -138,6 +160,9 @@ final class AppServices {
         root.setOpenSuggestionHandler { [weak self] event in
             DispatchQueue.main.async { self?.routePromptTap(event) }
         }
+        root.setReminderReportObserver { [weak self] report in
+            DispatchQueue.main.async { self?.handleReminderReport(report) }
+        }
         notificationHooks.installDelegate(root.notificationCenterDelegate)
         root.start(isActive: isActive)
         timeChange.start()
@@ -151,10 +176,16 @@ final class AppServices {
         lifecycleTokens = [
             lifecycleCenter.addObserver(
                 forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
-            ) { [weak self] _ in self?.requestQuietAuthentication(isActive: true) },
+            ) { [weak self] _ in
+                self?.requestQuietAuthentication(isActive: true)
+                self?.askForNotificationsIfPending()
+            },
             lifecycleCenter.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
-            ) { [weak self] _ in self?.quietAttemptSpent = false },
+            ) { [weak self] _ in
+                self?.quietAttemptSpent = false
+                self?.notificationAskSpent = false
+            },
         ]
     }
 
@@ -167,6 +198,40 @@ final class AppServices {
         root.requestQuietReadAuthentication(reason: Self.quietAuthenticationReason) { [weak self] _ in
             self?.captureEntry.refreshAccess()
         }
+    }
+
+    /// A reminder cannot alert because the OS was never asked: this is the one point, besides turning on the daily prompt,
+    /// where the app asks. It never asks at launch, and only in the foreground; otherwise it waits for the next activation.
+    func handleReminderReport(_ report: NotificationPermissionReport) {
+        guard report.readiness.reminders.contains(where: { $0.outlook == .undeliverable(.permissionNotRequested) }) else {
+            return
+        }
+        askForNotificationsAtReminderBoundary()
+    }
+
+    private func askForNotificationsAtReminderBoundary() {
+        guard isForeground() else {
+            notificationAskPending = true
+            return
+        }
+        notificationAskPending = false
+        guard !notificationAskInFlight, !notificationAskSpent else { return }
+        notificationAskInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.notificationPermission.askIfNeverRequested()
+            self.notificationAskInFlight = false
+            guard case .asked(let state) = outcome else { return }
+            self.notificationAskSpent = true
+            // Only a pass under a new answer can change anything; a prompt that left the state undecided would just report
+            // the same outlook again.
+            if state != .notRequested { _ = try? await self.root.reconcileReminders() }
+        }
+    }
+
+    private func askForNotificationsIfPending() {
+        guard notificationAskPending else { return }
+        askForNotificationsAtReminderBoundary()
     }
 
     private static let quietAuthenticationReason = "Show your recent captures."
