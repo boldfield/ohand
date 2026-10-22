@@ -12,7 +12,8 @@
 //! Failures are fixed codes that never echo the request.
 
 use super::{
-    contacted_destinations, load_profile, parse_origin_list, ProcessingCapability, StoredProfile,
+    contacted_destinations, grant_covers, load_profile, parse_origin_list, ProcessingCapability,
+    StoredProfile,
 };
 use crate::providers::contracts::ProviderProtocol;
 use crate::store::schema::Database;
@@ -117,6 +118,9 @@ impl ListedDestinationClass {
 pub struct GrantedCapability {
     pub capability: ProcessingCapability,
     pub destination_classes: Vec<ListedDestinationClass>,
+    /// Unrevoked profile versions whose every origin is within this grant, ordered by version identifier. Empty when
+    /// the stored grant cannot be read.
+    pub covered_profile_versions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +310,7 @@ pub fn revoke_route_capability(
 /// destinations it may use), ordered by route id then capability key. Read only.
 pub fn list_route_policy(conn: &Connection) -> Result<Vec<RoutePolicy>> {
     let classes_by_origin = destination_classes_by_origin(conn)?;
+    let live_versions = live_version_destinations(conn)?;
 
     let mut grants_by_route: BTreeMap<String, Vec<(String, GrantedCapability)>> = BTreeMap::new();
     let mut statement = conn
@@ -328,22 +333,31 @@ pub fn list_route_policy(conn: &Connection) -> Result<Vec<RoutePolicy>> {
         let Some(capability) = capability_from_key(&key) else {
             continue;
         };
-        let classes: BTreeSet<ListedDestinationClass> =
-            match parse_origin_list(&stored_destinations) {
-                Some(origins) if !origins.is_empty() => origins
-                    .iter()
-                    .flat_map(|origin| match classes_by_origin.get(origin) {
-                        Some(classes) => classes.iter().copied().collect::<Vec<_>>(),
-                        None => vec![ListedDestinationClass::Unknown],
-                    })
-                    .collect(),
-                _ => BTreeSet::from([ListedDestinationClass::Unknown]),
-            };
+        let granted_origins = parse_origin_list(&stored_destinations);
+        let covered_profile_versions: Vec<String> = match &granted_origins {
+            Some(granted) => live_versions
+                .iter()
+                .filter(|(_, destinations)| grant_covers(destinations, granted))
+                .map(|(version, _)| version.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        let classes: BTreeSet<ListedDestinationClass> = match granted_origins {
+            Some(origins) if !origins.is_empty() => origins
+                .iter()
+                .flat_map(|origin| match classes_by_origin.get(origin) {
+                    Some(classes) => classes.iter().copied().collect::<Vec<_>>(),
+                    None => vec![ListedDestinationClass::Unknown],
+                })
+                .collect(),
+            _ => BTreeSet::from([ListedDestinationClass::Unknown]),
+        };
         grants_by_route.entry(route_id).or_default().push((
             key,
             GrantedCapability {
                 capability,
                 destination_classes: classes.into_iter().collect(),
+                covered_profile_versions,
             },
         ));
     }
@@ -394,6 +408,41 @@ fn profile_destinations(conn: &Connection, profile_version: &str) -> Result<Opti
     Ok(protocol_of(&profile.provider_type)
         .and_then(|protocol| contacted_destinations(protocol, &profile))
         .filter(|destinations| !destinations.is_empty()))
+}
+
+/// Each unrevoked profile version with the origins a dispatch with it contacts, ordered by version identifier.
+/// Versions with an unknown provider type or no valid origin are left out: they can never be
+/// authorized, so no grant covers them.
+fn live_version_destinations(conn: &Connection) -> Result<Vec<(String, Vec<String>)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT profile_version, provider_type, endpoint, authorized_destinations \
+             FROM provider_profiles WHERE revoked_at IS NULL ORDER BY profile_version",
+        )
+        .context("preparing live profile listing")?;
+    let profiles = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                StoredProfile {
+                    provider_type: row.get(1)?,
+                    endpoint: row.get(2)?,
+                    authorized_destinations: row.get(3)?,
+                },
+            ))
+        })
+        .context("listing live profiles")?;
+    let mut versions = Vec::new();
+    for profile in profiles {
+        let (version, profile) = profile.context("reading live profile")?;
+        let destinations = protocol_of(&profile.provider_type)
+            .and_then(|protocol| contacted_destinations(protocol, &profile))
+            .filter(|destinations| !destinations.is_empty());
+        if let Some(destinations) = destinations {
+            versions.push((version, destinations));
+        }
+    }
+    Ok(versions)
 }
 
 fn destinations_of_remaining_grants(conn: &Connection, route_id: &str) -> Result<BTreeSet<String>> {

@@ -283,6 +283,34 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(after.grantedCapabilities.map(\.destinationClasses), [["cloud"]])
     }
 
+    func testAllowingOpenAIThenMakingAnthropicTheDefaultOffersAndThenCoversTheAnthropicVersion() async throws {
+        let model = try await makeModel()
+        let openAIVersion = try await createProfile("openai-profile", providerProtocol: "open_ai")
+        let anthropicVersion = try await createProfile("anthropic-profile", providerProtocol: "anthropic")
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: openAIVersion)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        XCTAssertTrue(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: openAIVersion))
+        XCTAssertFalse(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: anthropicVersion))
+
+        try await root.providerConfiguration.setDefault(capability: "text_interpretation", profileVersion: anthropicVersion)
+        await model.refresh()
+        XCTAssertTrue(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
+        XCTAssertFalse(
+            model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: anthropicVersion),
+            "the OpenAI grant does not cover the Anthropic version")
+        XCTAssertEqual(
+            model.versionsToOffer(routeID: "route-personal", capability: "text_interpretation").map(\.version.profileVersion),
+            [anthropicVersion])
+
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: anthropicVersion)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        XCTAssertTrue(
+            model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: anthropicVersion))
+        XCTAssertTrue(model.isCovered(routeID: "route-personal", capability: "text_interpretation", profileVersion: openAIVersion))
+        XCTAssertTrue(model.versionsToOffer(routeID: "route-personal", capability: "text_interpretation").isEmpty)
+    }
+
     func testARevocationWhileWorkIsQueuedStopsDispatchAndSurvivesARelaunch() async throws {
         var model = try await makeModel()
         let version = try await createDispatchableDefault()

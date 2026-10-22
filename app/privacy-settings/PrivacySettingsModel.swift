@@ -334,6 +334,27 @@ final class PrivacySettingsModel: ObservableObject {
         routes.first { $0.routeID == routeID }?.grantedCapabilities.contains { $0.capability == capability } ?? false
     }
 
+    /// Whether the route's grant for `capability` covers this stored version, as the core reports it. A grant made for
+    /// one provider does not cover another's version, so this is answered per version, never from the capability alone.
+    func isCovered(routeID: String, capability: String, profileVersion: String) -> Bool {
+        routes.first { $0.routeID == routeID }?.grantedCapabilities
+            .first { $0.capability == capability }?.coveredProfileVersions.contains(profileVersion) ?? false
+    }
+
+    /// The versions to offer for `capability` on the route. While the route holds no grant for it, every offered version.
+    /// Once it does, only the capability's current default version, and only while that grant does not cover it: this is
+    /// what lets a person who allowed one provider and then made another the default fix the held-back notes.
+    func versionsToOffer(routeID: String, capability: String) -> [PrivacyOfferedVersion] {
+        let offered = offeredVersions(for: capability)
+        guard isGranted(routeID: routeID, capability: capability) else { return offered }
+        guard let defaultVersion = listing?.defaults.first(where: { $0.capability == capability })?.profileVersion
+        else { return [] }
+        return offered.filter {
+            $0.version.profileVersion == defaultVersion
+                && !isCovered(routeID: routeID, capability: capability, profileVersion: defaultVersion)
+        }
+    }
+
     /// Unrevoked stored versions that declare `capability` as supported or unverified, with their profile names, newest first.
     func offeredVersions(for capability: String) -> [PrivacyOfferedVersion] {
         guard let listing else { return [] }
