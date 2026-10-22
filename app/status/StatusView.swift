@@ -10,12 +10,19 @@ struct StatusRenderedKey: PreferenceKey {
     }
 }
 
-/// The actions the screen's buttons run, keyed by accessibility identifier, so a hosted test can trigger them.
-struct StatusActionsKey: PreferenceKey {
-    static var defaultValue: [String: () -> Void] = [:]
+/// The actions the screen's buttons run, keyed by accessibility identifier, so a hosted test can trigger them. Two
+/// values are equal when they hold the same buttons: each action only calls the one model the screen was built over.
+struct StatusRenderedActions: Equatable {
+    var byIdentifier: [String: () -> Void] = [:]
 
-    static func reduce(value: inout [String: () -> Void], nextValue: () -> [String: () -> Void]) {
-        value.merge(nextValue()) { _, latest in latest }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.byIdentifier.keys == rhs.byIdentifier.keys }
+}
+
+struct StatusActionsKey: PreferenceKey {
+    static var defaultValue = StatusRenderedActions()
+
+    static func reduce(value: inout StatusRenderedActions, nextValue: () -> StatusRenderedActions) {
+        value.byIdentifier.merge(nextValue().byIdentifier) { _, latest in latest }
     }
 }
 
@@ -71,7 +78,7 @@ struct StatusView: View {
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.retryIdentifier)
                     .preference(key: StatusRenderedKey.self, value: [Self.retryIdentifier: StatusText.retryLabel])
-                    .preference(key: StatusActionsKey.self, value: [Self.retryIdentifier: retryAction])
+                    .preference(key: StatusActionsKey.self, value: StatusRenderedActions(byIdentifier: [Self.retryIdentifier: retryAction]))
             }
             if model.retryRequested {
                 Text(StatusText.retryRequestedNote)
@@ -106,7 +113,7 @@ struct StatusView: View {
                     .preference(key: StatusRenderedKey.self, value: [Self.refreshIdentifier: StatusText.refreshLabel])
         }
         .onPreferenceChange(StatusRenderedKey.self) { renderReporter?($0) }
-        .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0) }
+        .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0.byIdentifier) }
         .task { await model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refresh() }
