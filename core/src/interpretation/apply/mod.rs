@@ -2429,8 +2429,14 @@ enum IntentReading {
 
 /// Whether the clause that follows a closing negation (`rest` starts at its clause break) names
 /// a time, so the negation corrects the time ("No wait, 10 a.m.", "actually no, Saturday")
-/// rather than withdrawing the request.
+/// rather than withdrawing the request. Only a break inside the sentence (a comma, colon or
+/// bracket) joins the negation to that clause: a negation that ends its sentence ("Actually no.
+/// Saturday is busy.") stays a withdrawal, whatever later sentences say.
 fn corrects_the_time(rest: &[&IntentToken]) -> bool {
+    let breaks: Vec<&&IntentToken> = rest.iter().take_while(|token| token.clause_break).collect();
+    if breaks.is_empty() || !breaks.iter().all(|token| token.in_sentence_break) {
+        return false;
+    }
     rest.iter()
         .skip_while(|token| token.clause_break)
         .take_while(|token| !token.clause_break)

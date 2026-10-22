@@ -1810,6 +1810,10 @@ fn a_temporal_token_in_another_sentence_is_held_for_correction() {
         "Remind me to call the roofer tomorrow at 9 a.m., actually no",
         "Remind me to call the roofer tomorrow at 9 a.m. No wait, cancel that. Saturday is busy.",
         "Remind me to call the roofer tomorrow at 9 a.m., never mind, 10 a.m. is busy",
+        // A negation that ends its sentence is not joined to a time in the next one.
+        "Remind me to call the roofer tomorrow at 9 a.m. Actually no. Saturday is busy.",
+        "Remind me to call the roofer tomorrow at 9 a.m., actually no! Saturday works better for Sam.",
+        "Remind me to call the roofer tomorrow at 9 a.m. No. 10 a.m. is when I'm out.",
     ] {
         let (fixture, disposition) = apply_clock_proposal(
             text,
