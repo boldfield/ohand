@@ -56,6 +56,17 @@ final class StatusIntegrationTests: XCTestCase {
         }
     }
 
+    /// Runs an async status call from a synchronous test. The production root provisions its route by turning the main
+    /// run loop, which an async test method on the main actor would never do.
+    private func run(_ operation: @escaping @MainActor () async -> Void) {
+        let finished = expectation(description: "status call")
+        Task { @MainActor in
+            await operation()
+            finished.fulfill()
+        }
+        self.wait(for: [finished], timeout: 30)
+    }
+
     private func scalar(_ sql: String) -> String {
         var database: OpaquePointer?
         let path = ProtectedStorageLayout(rootDirectory: storageRoot).databaseURL.path
@@ -97,7 +108,7 @@ final class StatusIntegrationTests: XCTestCase {
 
     // MARK: the production assembly
 
-    func testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged() async throws {
+    func testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged() throws {
         let built = try AppServices.production(
             handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
         services = built
@@ -108,25 +119,25 @@ final class StatusIntegrationTests: XCTestCase {
         wait { built.captureEntry.acknowledgment?.savedItemID != nil }
         XCTAssertNotNil(built.captureEntry.acknowledgment?.savedItemID)
 
-        await status.refresh()
+        run { await status.refresh() }
         let processing = try XCTUnwrap(status.facts.first { $0.kind == .processing })
         XCTAssertNotEqual(processing.headline, StatusText.processingUnknownHeadline, "the real core answered the read")
         XCTAssertNotEqual(processing.headline, StatusText.processingCheckingHeadline)
 
         let before = scalar("SELECT text FROM captures")
         XCTAssertEqual(before, "remind me to water the plants")
-        await status.retry()
+        run { await status.retry() }
         XCTAssertEqual(scalar("SELECT text FROM captures"), before, "retry never rewrites the saved source")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM captures"), "1")
     }
 
-    func testCaptureIsImmediateWhileTheStatusReadIsFailingAndAfterAnErrorState() async throws {
+    func testCaptureIsImmediateWhileTheStatusReadIsFailingAndAfterAnErrorState() throws {
         let built = try AppServices.production(
             handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
         services = built
         let failing = StatusModel(
             health: FailedHealth(), permissions: EmptyPermissions(), retrier: NoopRetrier(), openSystemSettings: {})
-        await failing.refresh()
+        run { await failing.refresh() }
         XCTAssertEqual(failing.facts.first { $0.kind == .processing }?.headline, StatusText.processingUnknownHeadline)
 
         built.captureEntry.textModel.updateText("call the dentist")
