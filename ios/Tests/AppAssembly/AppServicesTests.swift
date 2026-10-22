@@ -20,6 +20,38 @@ private final class TimeChangePassLog: @unchecked Sendable {
     }
 }
 
+/// Stands in for the OS notification prompt: records how often it was asked and answers as scripted, optionally only
+/// after a gate opens so concurrent reports can overlap.
+private final class ScriptedPermissionAsker: NotificationPermissionAsking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var open: Bool
+    private let outcome: NotificationPermissionAskOutcome
+
+    init(outcome: NotificationPermissionAskOutcome, gated: Bool = false) {
+        self.outcome = outcome
+        open = !gated
+    }
+
+    var askCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+
+    func openGate() {
+        lock.lock(); open = true; lock.unlock()
+    }
+
+    func askIfNeverRequested() async -> NotificationPermissionAskOutcome {
+        lock.lock(); count += 1; lock.unlock()
+        while true {
+            lock.lock(); let isOpen = open; lock.unlock()
+            if isOpen { return outcome }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+}
+
 final class AppServicesTests: XCTestCase {
     private var storageRoot: URL!
     private var baselineHandles = 0
@@ -55,7 +87,10 @@ final class AppServicesTests: XCTestCase {
         notificationCenter: NotificationCenter = NotificationCenter(),
         voice: VoiceCaptureServices? = nil,
         timeSources: TimeSources = .system,
-        protectedDataAvailable: Bool = true
+        protectedDataAvailable: Bool = true,
+        notificationPermission: NotificationPermissionAsking = ScriptedPermissionAsker(
+            outcome: .alreadyDecided(.usable)),
+        isForeground: @escaping () -> Bool = { true }
     ) throws -> AppServices {
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
@@ -65,9 +100,114 @@ final class AppServicesTests: XCTestCase {
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationCenter: notificationCenter,
             timeSources: timeSources,
+            notificationPermission: notificationPermission,
+            isForeground: isForeground,
             isProtectedDataAvailable: { protectedDataAvailable })
         created.append(services)
         return services
+    }
+
+    // MARK: notification permission at the reminder boundary
+
+    private func reminderReport(_ outlook: ReminderOutlook?) -> NotificationPermissionReport {
+        let reminders = outlook.map { [ReminderStatus(facts: ReminderFixtures.resolved("item-1"), outlook: $0)] } ?? []
+        return NotificationPermissionReport(
+            permission: .notRequested, transition: .unchanged, trigger: .explicit,
+            readiness: NotificationReadinessReport(permission: .notRequested, reminders: reminders),
+            promptsGranted: 0, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: nil, converged: true)
+    }
+
+    private func settle() async {
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+
+    func testAReminderThatCannotAlertAsksOnceInTheForegroundThenRunsAReminderPass() async throws {
+        let asker = ScriptedPermissionAsker(outcome: .asked(.usable))
+        let services = try makeServices(notificationPermission: asker)
+        XCTAssertNil(services.root.lastReminderReport)
+
+        services.handleReminderReport(reminderReport(.undeliverable(.permissionNotRequested)))
+
+        let passed = await eventually { services.root.lastReminderReport != nil }
+        XCTAssertTrue(passed, "a reminder pass follows the answer")
+        XCTAssertEqual(asker.askCount, 1)
+    }
+
+    func testTheAskWaitsForTheForegroundAndHappensOnTheNextActivation() async throws {
+        let asker = ScriptedPermissionAsker(outcome: .asked(.usable))
+        var foreground = false
+        let center = NotificationCenter()
+        let services = try makeServices(
+            notificationCenter: center, notificationPermission: asker, isForeground: { foreground })
+        services.start(isActive: false)
+
+        services.handleReminderReport(reminderReport(.undeliverable(.permissionNotRequested)))
+        await settle()
+        XCTAssertEqual(asker.askCount, 0, "nothing is asked while backgrounded")
+
+        foreground = true
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let asked = await eventually { asker.askCount == 1 }
+        XCTAssertTrue(asked, "the pending ask happens on activation")
+        let passed = await eventually { services.root.lastReminderReport != nil }
+        XCTAssertTrue(passed)
+
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await settle()
+        XCTAssertEqual(asker.askCount, 1, "an answered ask is not pending any more")
+    }
+
+    func testReportsWithoutAReminderThatNeedsPermissionNeverAsk() async throws {
+        let asker = ScriptedPermissionAsker(outcome: .asked(.usable))
+        let services = try makeServices(notificationPermission: asker)
+        services.start(isActive: false)
+
+        services.handleReminderReport(reminderReport(nil))
+        services.handleReminderReport(reminderReport(.undeliverable(.permissionDenied)))
+        services.handleReminderReport(reminderReport(.scheduled))
+        await settle()
+
+        XCTAssertEqual(asker.askCount, 0, "launch and non-qualifying reports ask nothing")
+    }
+
+    func testConcurrentReportsShareOneAsk() async throws {
+        let asker = ScriptedPermissionAsker(outcome: .asked(.denied), gated: true)
+        let services = try makeServices(notificationPermission: asker)
+        let report = reminderReport(.undeliverable(.permissionNotRequested))
+
+        services.handleReminderReport(report)
+        services.handleReminderReport(report)
+        services.handleReminderReport(report)
+        let asked = await eventually { asker.askCount >= 1 }
+        XCTAssertTrue(asked)
+        asker.openGate()
+        let passed = await eventually { services.root.lastReminderReport != nil }
+        XCTAssertTrue(passed, "the answer is followed by one reminder pass")
+
+        XCTAssertEqual(asker.askCount, 1)
+    }
+
+    func testAPromptThatLeavesThePermissionUndecidedDoesNotLoopOrReconcile() async throws {
+        let asker = ScriptedPermissionAsker(outcome: .asked(.notRequested))
+        let center = NotificationCenter()
+        let services = try makeServices(notificationCenter: center, notificationPermission: asker)
+        services.start(isActive: false)
+        let report = reminderReport(.undeliverable(.permissionNotRequested))
+
+        services.handleReminderReport(report)
+        let asked = await eventually { asker.askCount == 1 }
+        XCTAssertTrue(asked)
+        await settle()
+        services.handleReminderReport(report)
+        await settle()
+
+        XCTAssertEqual(asker.askCount, 1, "one ask per foreground stay")
+        XCTAssertNil(services.root.lastReminderReport, "no pass ran, so no report can ask again")
+
+        center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        services.handleReminderReport(report)
+        let askedAgain = await eventually { asker.askCount == 2 }
+        XCTAssertTrue(askedAgain, "the next foreground stay may ask again")
     }
 
     // MARK: real services

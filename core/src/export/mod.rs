@@ -100,6 +100,8 @@ pub enum ExportError {
     Storage(#[from] anyhow::Error),
     #[error("export output could not be written: {0}")]
     Write(#[source] std::io::Error),
+    #[error("export was cancelled")]
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,14 +347,33 @@ pub fn write_snapshot(
     snapshot: &CoreSnapshot,
     output: &mut dyn Write,
 ) -> Result<ExportSummary, ExportError> {
+    write_snapshot_until(snapshot, output, &|| false)
+}
+
+/// Like `write_snapshot`, but asks `is_cancelled` before each line and stops with
+/// `ExportError::Cancelled` as soon as it returns true.
+pub fn write_snapshot_until(
+    snapshot: &CoreSnapshot,
+    output: &mut dyn Write,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ExportSummary, ExportError> {
     let mut digest = Sha256::new();
+    if is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
     write_line(
         output,
         Some(&mut digest),
         &RecordRef::Header(&snapshot.header),
     )?;
     for item in &snapshot.items {
+        if is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         write_line(output, Some(&mut digest), &RecordRef::Item(item))?;
+    }
+    if is_cancelled() {
+        return Err(ExportError::Cancelled);
     }
     let footer = SnapshotFooter {
         item_count: snapshot.items.len(),
