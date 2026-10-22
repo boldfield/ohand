@@ -16,12 +16,22 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
     private(set) var statusReadItemIDs: [String] = []
     /// When set, a read waits until `releaseHeldReads()`, so a test can relock while it is outstanding.
     var holdsReads = false
+    /// How many of the next reads to hold until `releaseHeldReads()`. Each answers with the page as it stood when the read
+    /// was made, the way a core read that started before a change returns what it saw.
+    var heldSnapshotReads = 0
     private var heldReads: [CheckedContinuation<Void, Never>] = []
     private var handlers: [@Sendable () -> Void] = []
     private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
     func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
         readCursors.append(cursor)
+        if heldSnapshotReads > 0 {
+            heldSnapshotReads -= 1
+            let pageAsCalled = pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
+            await withCheckedContinuation { heldReads.append($0) }
+            if let failure { throw failure }
+            return pageAsCalled
+        }
         if holdsReads {
             await withCheckedContinuation { heldReads.append($0) }
         }
@@ -512,6 +522,63 @@ final class HomeRecentsModelTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(model.entries.map(\.id), ["a"])
+    }
+
+    func testAPollPageReadBeforeADeletionNeverBringsTheItemBack() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: nil)
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("a"), item("b")], nextCursor: nil)
+        await settle()
+
+        source.heldSnapshotReads = 1
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertEqual(source.readCursors.count, 3, "the poll's read is held with the page before the deletion")
+
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("b")], nextCursor: nil)
+        source.publish(.item("a"))
+        await settle()
+        XCTAssertEqual(model.entries.map(\.id), ["new", "b"], "the reload after the deletion has landed")
+
+        source.releaseHeldReads()
+        await settle()
+        XCTAssertEqual(model.entries.map(\.id), ["new", "b"], "the poll's older page never restores the deleted item")
+    }
+
+    func testARefreshPageReadBeforeACorrectionNeverRestoresTheOldText() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "old words")], nextCursor: nil)
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        await settle()
+
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("a", text: "old words")],
+            nextCursor: nil)
+        source.heldSnapshotReads = 1
+        model.captureDidSave(itemID: "new", interpretationIsResolved: true)
+        await settle()
+
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("a", text: "new words")],
+            nextCursor: nil)
+        source.publish(.item("a"))
+        await settle()
+        XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "the reload after the correction has landed")
+
+        source.releaseHeldReads()
+        await settle()
+        XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "the refresh's older page never restores old text")
+        XCTAssertFalse(model.entries[0].isSorting, "the refresh still ends the sorting state with a current page")
+        XCTAssertTrue(model.justSaved.isEmpty)
     }
 
     func testAChangeAfterShutdownDoesNothing() async {

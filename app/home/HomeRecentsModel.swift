@@ -76,6 +76,9 @@ final class HomeRecentsModel: ObservableObject {
     private var reloadFirstPageWhenDone = false
     /// Items that changed while the first page was being read; that page may still hold them in their old state.
     private var changedDuringFirstRead: Set<String> = []
+    /// Raised at every item change. A first-page read started before the latest change may hold an item in its old
+    /// state, so the poll and the post-interpretation refresh merge only a page read entirely after it.
+    private var itemChangeCount = 0
 
     /// Waits before the given poll attempt; tests replace it so no real time passes.
     private let pause: (TimeInterval) async -> Void
@@ -184,6 +187,7 @@ final class HomeRecentsModel: ObservableObject {
     /// needs nothing. A shown one is dropped at once, so a deleted item is gone before the read returns, and the first
     /// page is read again so a changed one comes back current.
     func itemsDidChange(_ change: ItemChange) {
+        itemChangeCount += 1
         guard !isShutDown, bodyState == .unlocked else { return }
         switch change {
         case .allItems:
@@ -412,8 +416,11 @@ final class HomeRecentsModel: ObservableObject {
                 guard let self, !Task.isCancelled, startedIn == self.generation, !self.justSaved.isEmpty else { break }
                 delay = min(delay * 2, Self.longestPollDelay)
                 do {
+                    let changesBeforeRead = self.itemChangeCount
                     let page = try await self.readPage(cursor: nil)
                     guard startedIn == self.generation, self.source.isAuthenticated else { break }
+                    // An item changed under the read: the page may hold it as it was, so leave it to the next round.
+                    guard changesBeforeRead == self.itemChangeCount else { continue }
                     self.merge(firstPage: page)
                     try await self.clearFinishedInterpretations(startedIn: startedIn)
                 } catch {
@@ -430,12 +437,18 @@ final class HomeRecentsModel: ObservableObject {
     @MainActor
     private func refreshAfterInterpretation(itemID: String) async {
         let startedIn = generation
-        guard !Task.isCancelled else { return }
         do {
-            let page = try await readPage(cursor: nil)
-            guard startedIn == generation, source.isAuthenticated else { return }
-            merge(firstPage: page)
-            justSaved.removeValue(forKey: itemID)
+            while true {
+                guard !Task.isCancelled, startedIn == generation else { return }
+                let changesBeforeRead = itemChangeCount
+                let page = try await readPage(cursor: nil)
+                guard startedIn == generation, source.isAuthenticated else { return }
+                // An item changed under the read: the page may hold it as it was, so read it again.
+                guard changesBeforeRead == itemChangeCount else { continue }
+                merge(firstPage: page)
+                justSaved.removeValue(forKey: itemID)
+                return
+            }
         } catch {
             handleFailure(error, startedIn: startedIn)
         }
