@@ -18,6 +18,11 @@ enum ProviderSettingsText {
     static let defaultChangeNote =
         "Changing the default only affects work created afterwards. Work already waiting keeps the provider version "
         + "it was created with, and saved captures are never changed."
+    static let privacyAllowanceNotice = "Allow it under Privacy to start sending notes."
+    static let ownServerUnavailableNotice = "Not available in this build, so it cannot be the default."
+    static let formNeedsAttention = "Fix the marked fields to save."
+    static let modelPlaceholder = "Model identifier, e.g. example-model-1"
+    static let modelNote = "The model identifier must match the provider's exactly."
     static let capabilityNote = "Each profile serves text interpretation. No other capability can be selected."
     static let credentialNote =
         "The secret is stored in this device's secure storage and is never shown again. The profile holds only an "
@@ -96,7 +101,7 @@ enum ProviderSettingsText {
 
     static func protocolName(_ providerProtocol: String) -> String {
         switch providerProtocol {
-        case "open_ai": return "OpenAI-compatible"
+        case "open_ai": return "OpenAI"
         case "anthropic": return "Anthropic"
         case "self_hosted": return "Private server"
         default: return "Unknown provider"

@@ -20,6 +20,8 @@ final class ProviderSettingsViewTests: XCTestCase {
     private let sweep = FakeProviderSettingsSweep()
     private var navigation = ProviderSettingsNavigation()
     private var textSize = DynamicTypeSize.large
+    private var appearance = UIUserInterfaceStyle.light
+    private var offersOwnServer = true
 
     private static let mixedListing = providerListing(
         supportLevels: [
@@ -43,7 +45,8 @@ final class ProviderSettingsViewTests: XCTestCase {
         buffers = [:]
         navigation = ProviderSettingsNavigation()
         let model = ProviderSettingsModel(
-            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
+            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope },
+            offersOwnServer: offersOwnServer, captureRouteID: "r")
         let hosting = UIHostingController(
             rootView: NavigationStack {
                 switch screen {
@@ -65,6 +68,7 @@ final class ProviderSettingsViewTests: XCTestCase {
             .environment(\.dynamicTypeSize, textSize))
         let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         shown.rootViewController = hosting
+        shown.overrideUserInterfaceStyle = appearance
         shown.makeKeyAndVisible()
         window = shown
         await settle()
@@ -125,8 +129,8 @@ final class ProviderSettingsViewTests: XCTestCase {
     func testTheFormInputSaveAndDefaultFlowShowsEachStepOnScreen() async {
         let controls = FakeProviderSettingsControls(listing: Self.mixedListing)
         await withScreen(controls) { model in
-            assertTappable(ProviderSettingsView.saveIdentifier, enabled: false)
-            XCTAssertNotNil(rendered[ProviderSettingsView.issuesIdentifier], "an empty form lists what is missing")
+            assertTappable(ProviderSettingsView.saveIdentifier)
+            XCTAssertNil(rendered[ProviderSettingsView.fieldIssueIdentifier(.model)], "an untouched form lists nothing")
 
             model.draft = ProviderSettingsDraft(
                 profileName: "work", providerProtocol: .openAI, endpoint: "", model: "synthetic-model",
@@ -135,7 +139,7 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertEqual(text(ProviderSettingsView.nameFieldIdentifier), "work")
             XCTAssertEqual(text(ProviderSettingsView.modelFieldIdentifier), "synthetic-model")
             XCTAssertEqual(text(ProviderSettingsView.credentialFieldIdentifier), "cred-1")
-            XCTAssertNil(rendered[ProviderSettingsView.issuesIdentifier])
+            XCTAssertNil(rendered[ProviderSettingsView.fieldIssueIdentifier(.model)])
             assertTappable(ProviderSettingsView.saveIdentifier)
 
             await model.save()
@@ -149,6 +153,87 @@ final class ProviderSettingsViewTests: XCTestCase {
                 text(ProviderSettingsView.defaultStateIdentifier), ProviderSettingsActionState.defaultChanged.message)
             XCTAssertEqual(controls.defaultsSet, ["hosted-v1"])
         }
+    }
+
+    // MARK: M1 F39, in both appearances
+
+    private func inBothAppearances(_ run: (UIUserInterfaceStyle) async throws -> Void) async rethrows {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            appearance = style
+            try await run(style)
+        }
+        appearance = .light
+    }
+
+    private static let anthropicListing = providerListing(
+        supportLevels: [
+            ("cloud", "cloud-v1", "anthropic", false, "supported"),
+            ("private", "private-v1", "self_hosted", false, "supported"),
+        ], defaultVersion: "cloud-v1")
+
+    func testOwnServerIsNotOfferedButASavedOneIsListedAndCannotBeTheDefault() async {
+        await inBothAppearances { style in
+            offersOwnServer = false
+            await withScreen(FakeProviderSettingsControls(listing: Self.anthropicListing), showing: .main) { _ in
+                XCTAssertNil(rendered[ProviderSettingsView.choiceIdentifier(.ownServer)], "\(style)")
+                XCTAssertNotNil(rendered[ProviderSettingsView.choiceIdentifier(.cloudProvider)], "\(style)")
+            }
+            await withScreen(FakeProviderSettingsControls(listing: Self.anthropicListing), showing: .advanced) { _ in
+                XCTAssertNotNil(rendered[ProviderSettingsView.versionIdentifier("private-v1")] ?? rendered[ProviderSettingsView.checkConnectionIdentifier("private-v1")], "\(style)")
+                XCTAssertEqual(
+                    text(ProviderSettingsView.ownServerUnavailableIdentifier("private-v1")),
+                    ProviderSettingsText.ownServerUnavailableNotice, "\(style)")
+                XCTAssertNil(rendered[ProviderSettingsView.makeDefaultIdentifier("private-v1")], "\(style)")
+            }
+            offersOwnServer = true
+        }
+    }
+
+    func testTheAllowanceLineShowsWhileACloudDefaultIsNotAllowedAndGoesOnceGranted() async {
+        await inBothAppearances { style in
+            let controls = FakeProviderSettingsControls(listing: Self.anthropicListing)
+            await withScreen(controls, showing: .main) { model in
+                XCTAssertEqual(
+                    text(ProviderSettingsView.privacyAllowanceIdentifier), ProviderSettingsText.privacyAllowanceNotice, "\(style)")
+                XCTAssertEqual(ProviderSettingsText.privacyAllowanceNotice, "Allow it under Privacy to start sending notes.")
+
+                let granted = #"[{"route_id":"r","route_name":"Local capture","scope":"personal","granted_capabilities":[{"capability":"text_interpretation","destination_classes":["cloud"],"covered_profile_versions":["cloud-v1"]}]}]"#
+                controls.routePolicy = .success(try! JSONDecoder().decode([RoutePolicyRoute].self, from: Data(granted.utf8)))
+                await model.refresh()
+                await settle()
+                XCTAssertNil(rendered[ProviderSettingsView.privacyAllowanceIdentifier], "\(style)")
+            }
+        }
+    }
+
+    func testTheAddFormShowsAProblemOnlyAfterSaveOrAnEditAndLabelsTheTypes() async {
+        await inBothAppearances { style in
+            await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), showing: .add) { model in
+                XCTAssertEqual(model.draft.providerProtocol, .anthropic, "\(style)")
+                XCTAssertEqual(ProviderSettingsText.protocolName("open_ai"), "OpenAI")
+                XCTAssertEqual(ProviderSettingsProtocol.offered(offersOwnServer: model.offersOwnServer).count, model.offersOwnServer ? 3 : 2)
+                for field in [ProviderSettingsField.profileName, .model, .credential] {
+                    XCTAssertNil(rendered[ProviderSettingsView.fieldIssueIdentifier(field)], "\(style) \(field)")
+                }
+
+                model.draft.model = " "
+                await settle()
+                XCTAssertEqual(text(ProviderSettingsView.fieldIssueIdentifier(.model)), ProviderSettingsText.issue(.modelRequired), "\(style)")
+                XCTAssertNil(rendered[ProviderSettingsView.fieldIssueIdentifier(.profileName)], "\(style)")
+
+                await model.save()
+                await settle()
+                XCTAssertEqual(
+                    text(ProviderSettingsView.fieldIssueIdentifier(.profileName)), ProviderSettingsText.issue(.profileNameRequired), "\(style)")
+                XCTAssertEqual(
+                    text(ProviderSettingsView.fieldIssueIdentifier(.credential)), ProviderSettingsText.issue(.credentialRequired), "\(style)")
+            }
+        }
+    }
+
+    func testTheModelFieldGivesAGenericExampleAndTheInfoNoteSaysItMustMatch() {
+        XCTAssertTrue(ProviderSettingsText.modelPlaceholder.contains("e.g."))
+        XCTAssertTrue(ProviderSettingsText.modelNote.contains("match the provider's exactly"))
     }
 
     func testAStoredUnverifiedDefaultIsShownAsUnableToProcess() async {
@@ -238,7 +323,7 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertNotNil(rendered[ProviderSettingsView.nameFieldIdentifier])
             XCTAssertNotNil(rendered[ProviderSettingsView.modelFieldIdentifier])
             assertTappable(ProviderSettingsView.storeSecretIdentifier)
-            assertTappable(ProviderSettingsView.saveIdentifier, enabled: false)
+            assertTappable(ProviderSettingsView.saveIdentifier)
             XCTAssertNil(rendered[ProviderSettingsView.checkSecretIdentifier])
             XCTAssertNil(rendered[ProviderSettingsView.checkConnectionIdentifier("hosted-v1")])
         }
@@ -274,7 +359,7 @@ final class ProviderSettingsViewTests: XCTestCase {
             await settle()
             XCTAssertNil(rendered[ProviderSettingsView.endpointFieldIdentifier], "a hosted provider takes no address")
             XCTAssertEqual(model.draft.endpoint, "")
-            XCTAssertNil(rendered[ProviderSettingsView.issuesIdentifier], "no hidden value blocks saving")
+            XCTAssertNil(rendered[ProviderSettingsView.fieldIssueIdentifier(.endpoint)], "no hidden value blocks saving")
             assertTappable(ProviderSettingsView.saveIdentifier)
 
             await model.save()
