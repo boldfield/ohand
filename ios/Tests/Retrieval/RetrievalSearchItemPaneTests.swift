@@ -357,11 +357,13 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
     func testAChangeStoredWhileThePanesFirstReadIsInFlightIsShownWhenThatReadEnds() throws {
         let itemID = try saveCapture()
         let heldReader = HeldFirstDetailReader(reader: root.itemDetails)
+        // Held strongly, as the production assembly holds it: the screen can outlive this test's teardown.
+        let root: ServiceCompositionRoot = self.root
         let shown = try showResult(
             itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular,
-            makeDetail: { [unowned self] id in
+            makeDetail: { id in
                 let built = SourceDetailModel(
-                    itemID: id, reader: heldReader, opener: root.playback, readScope: { [unowned self] in root.readScope })
+                    itemID: id, reader: heldReader, opener: root.playback, readScope: { root.readScope })
                 built.deletion = .assembled(itemID: id, root: root)
                 return built
             })
@@ -398,9 +400,10 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let itemID = try saveCapture()
         try correctType(itemID: itemID, to: .action)
         let heldEditor = HeldTimeReminderEditor(editor: root.reminderControls)
+        let root: ServiceCompositionRoot = self.root
         let shown = try showResult(
             itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular,
-            makeDetail: { [unowned self] id in
+            makeDetail: { id in
                 let built = SourceDetailModel.assembled(itemID: id, root: root)
                 built.reminderEditor = ReminderEditModel(itemID: id, editor: heldEditor)
                 return built
