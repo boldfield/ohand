@@ -33,7 +33,6 @@ enum StatusTone: Equatable {
 }
 
 enum StatusAction: Equatable {
-    case none
     /// Run the queued work again from its saved source.
     case retry
     /// The permission can be switched on in iOS Settings.
@@ -55,7 +54,8 @@ struct StatusFact: Equatable, Identifiable {
     let tone: StatusTone
     let headline: String
     let detail: String
-    let action: StatusAction
+    /// Every recovery that applies, most direct first. Empty when nothing needs doing.
+    let actions: [StatusAction]
 
     var id: StatusFactKind { kind }
 }
@@ -99,7 +99,7 @@ final class StatusModel: ObservableObject {
         facts = Self.facts(
             health: outcome, notifications: entries.first { $0.kind == .notifications }, scheduling: scheduling.lastReport())
         hasLoaded = true
-        if !facts.contains(where: { $0.action == .retry }) { retryRequested = false }
+        if !facts.contains(where: { $0.actions.contains(.retry) }) { retryRequested = false }
     }
 
     /// Runs the waiting work again from its saved source, then reads the status once more. The drain is asynchronous,
@@ -120,21 +120,21 @@ final class StatusModel: ObservableObject {
         [
             StatusFact(
                 kind: .capture, tone: .good, headline: StatusText.captureHeadline,
-                detail: StatusText.captureDetail, action: .none),
+                detail: StatusText.captureDetail, actions: []),
             processingFact(health),
             notificationsFact(notifications, scheduling),
             StatusFact(
                 kind: .sync, tone: .waiting, headline: StatusText.syncHeadline,
-                detail: StatusText.syncDetail, action: .none),
+                detail: StatusText.syncDetail, actions: []),
             StatusFact(
                 kind: .remoteInterpretation, tone: .waiting, headline: StatusText.remoteHeadline,
-                detail: StatusText.remoteDetail, action: .none),
+                detail: StatusText.remoteDetail, actions: []),
         ]
     }
 
     private static func processingFact(_ outcome: ProcessingHealthOutcome?) -> StatusFact {
-        func fact(_ tone: StatusTone, _ headline: String, _ detail: String, _ action: StatusAction = .none) -> StatusFact {
-            StatusFact(kind: .processing, tone: tone, headline: headline, detail: detail, action: action)
+        func fact(_ tone: StatusTone, _ headline: String, _ detail: String, _ actions: [StatusAction] = []) -> StatusFact {
+            StatusFact(kind: .processing, tone: tone, headline: headline, detail: detail, actions: actions)
         }
         guard let outcome else {
             return fact(.waiting, StatusText.processingCheckingHeadline, StatusText.processingCheckingDetail)
@@ -154,18 +154,41 @@ final class StatusModel: ObservableObject {
             let detail = ([StatusText.processingWaitingDetail] + Array(Set(reasons)).sorted()).joined(separator: " ")
             return fact(.waiting, StatusText.processingWaitingHeadline, detail)
         case .stalled:
-            return fact(.needsAttention, StatusText.processingStalledHeadline, StatusText.processingStalledDetail, .retry)
-        case .needsAttention:
-            let needsUser = snapshot.errors.contains { $0.recovery == .userAction }
-            let detail = needsUser ? StatusText.processingAttentionUserDetail : StatusText.processingAttentionTerminalDetail
+            // The core puts a stall ahead of needing attention, but its error list still carries any fault that needs
+            // the person or has ended. Those stay visible next to the stall, with their own route.
             return fact(
-                .needsAttention, StatusText.processingAttentionHeadline, detail, needsUser ? .openProviderSettings : .none)
+                .needsAttention, StatusText.processingStalledHeadline,
+                ([StatusText.processingStalledDetail] + attentionDetails(snapshot)).joined(separator: " "),
+                [.retry] + attentionActions(snapshot))
+        case .needsAttention:
+            let details = attentionDetails(snapshot)
+            return fact(
+                .needsAttention, StatusText.processingAttentionHeadline,
+                details.isEmpty ? StatusText.processingAttentionTerminalDetail : details.joined(separator: " "),
+                attentionActions(snapshot))
         }
     }
 
+    /// What the reported faults that will not clear by themselves mean for the person, one sentence per recovery path.
+    private static func attentionDetails(_ snapshot: ProcessingHealth) -> [String] {
+        var details: [String] = []
+        if snapshot.errors.contains(where: { $0.recovery == .userAction }) {
+            details.append(StatusText.processingAttentionUserDetail)
+        }
+        if snapshot.errors.contains(where: { $0.recovery == .terminal }) {
+            details.append(StatusText.processingAttentionTerminalDetail)
+        }
+        return details
+    }
+
+    /// Re-running the queue cannot repair a destination, so a fault needing the person routes to Provider settings.
+    private static func attentionActions(_ snapshot: ProcessingHealth) -> [StatusAction] {
+        snapshot.errors.contains(where: { $0.recovery == .userAction }) ? [.openProviderSettings] : []
+    }
+
     private static func notificationsFact(_ entry: PermissionEntry?, _ report: NotificationPermissionReport?) -> StatusFact {
-        func fact(_ tone: StatusTone, _ headline: String, _ detail: String, _ action: StatusAction = .none) -> StatusFact {
-            StatusFact(kind: .notifications, tone: tone, headline: headline, detail: detail, action: action)
+        func fact(_ tone: StatusTone, _ headline: String, _ detail: String, _ actions: [StatusAction] = []) -> StatusFact {
+            StatusFact(kind: .notifications, tone: tone, headline: headline, detail: detail, actions: actions)
         }
         guard let entry else {
             return fact(.waiting, StatusText.notificationsNotAskedHeadline, StatusText.notificationsNotAskedDetail)
@@ -175,7 +198,7 @@ final class StatusModel: ObservableObject {
             return fact(.waiting, StatusText.notificationsNotAskedHeadline, StatusText.notificationsNotAskedDetail)
         case .denied:
             let headline = entry.change == .revoked ? StatusText.notificationsRevokedHeadline : StatusText.notificationsOffHeadline
-            return fact(.needsAttention, headline, StatusText.notificationsOffDetail, .openSettings)
+            return fact(.needsAttention, headline, StatusText.notificationsOffDetail, [.openSettings])
         case .restricted:
             return fact(
                 .needsAttention, StatusText.notificationsOffHeadline, StatusText.notificationsRestrictedDetail)
@@ -187,14 +210,14 @@ final class StatusModel: ObservableObject {
     /// Allowed notifications say nothing about scheduling, so this reads the last reminder pass itself.
     private static func grantedNotificationsFact(
         _ report: NotificationPermissionReport?,
-        _ fact: (StatusTone, String, String, StatusAction) -> StatusFact
+        _ fact: (StatusTone, String, String, [StatusAction]) -> StatusFact
     ) -> StatusFact {
         guard let report else {
-            return fact(.waiting, StatusText.notificationsUncheckedHeadline, StatusText.notificationsUncheckedDetail, .none)
+            return fact(.waiting, StatusText.notificationsUncheckedHeadline, StatusText.notificationsUncheckedDetail, [])
         }
         if report.reconciliationFailure != nil {
             return fact(
-                .needsAttention, StatusText.notificationsPassFailedHeadline, StatusText.notificationsPassFailedDetail, .none)
+                .needsAttention, StatusText.notificationsPassFailedHeadline, StatusText.notificationsPassFailedDetail, [])
         }
         let reminders = report.readiness.reminders
         let unscheduledReasons = reminders.compactMap { status -> ReminderUnscheduledReason? in
@@ -204,18 +227,18 @@ final class StatusModel: ObservableObject {
         if !unscheduledReasons.isEmpty {
             let detail = ([StatusText.notificationsUnscheduledDetail(count: unscheduledReasons.count)]
                 + Set(unscheduledReasons.map(StatusText.unscheduledReason)).sorted()).joined(separator: " ")
-            return fact(.needsAttention, StatusText.notificationsUnscheduledHeadline, detail, .none)
+            return fact(.needsAttention, StatusText.notificationsUnscheduledHeadline, detail, [])
         }
         if report.readiness.awaitingInstallCount > 0 {
             return fact(
                 .waiting, StatusText.notificationsInstallingHeadline,
-                StatusText.notificationsInstallingDetail(count: report.readiness.awaitingInstallCount), .none)
+                StatusText.notificationsInstallingDetail(count: report.readiness.awaitingInstallCount), [])
         }
         if report.readiness.scheduledCount > 0 {
             return fact(
                 .good, StatusText.notificationsScheduledHeadline,
-                StatusText.notificationsScheduledDetail(count: report.readiness.scheduledCount), .none)
+                StatusText.notificationsScheduledDetail(count: report.readiness.scheduledCount), [])
         }
-        return fact(.good, StatusText.notificationsNoneHeadline, StatusText.notificationsNoneDetail, .none)
+        return fact(.good, StatusText.notificationsNoneHeadline, StatusText.notificationsNoneDetail, [])
     }
 }

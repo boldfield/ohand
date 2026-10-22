@@ -56,6 +56,21 @@ private let dueJobStatements = [
         + "'2020-01-01T00:00:00Z')",
 ]
 
+/// SQL that leaves one provider job ended for want of authorization, on its own saved capture.
+private let unauthorizedJobStatements = [
+    "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, utc_offset_minutes, locale, "
+        + "calendar, item_scope, route_id, entry_locked, created_at) VALUES ('capture-unauthorized', "
+        + "'ask the landlord about the boiler', '2020-01-01T00:00:00Z', 'UTC', 0, 'en', 'gregorian', "
+        + "'personal', 'route-1', 0, '2020-01-01T00:00:00Z')",
+    "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, "
+        + "processing_state, transcription_state, created_at, updated_at) VALUES ('item-unauthorized', "
+        + "'capture-unauthorized', 0, 'active', 'saved_local', 'not_configured', 'unprocessed', 'not_applicable', "
+        + "'2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+    "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, status, failure_reason, "
+        + "attempt_count, created_at) VALUES ('job-unauthorized', 1, 'item-unauthorized', 'interpret', 0, 'failed', "
+        + "'unauthorized', 1, '2020-01-01T00:00:00Z')",
+]
+
 /// The status screen over the real core and the production assembly, and hosted rendering of the screen itself.
 @MainActor
 final class StatusIntegrationTests: XCTestCase {
@@ -215,6 +230,29 @@ final class StatusIntegrationTests: XCTestCase {
         XCTAssertEqual(retrier.count, 0)
     }
 
+    func testAStallWithAProviderFaultRendersBothTryAgainAndOpenProviderSettings() {
+        let retrier = CountingRetrier()
+        let fault = "{\"kind\":\"configuration_needed\",\"reason\":\"synthetic\",\"recovery\":\"user_action\","
+            + "\"job_count\":1,\"oldest_age_seconds\":5,\"next_attempt_at\":null}"
+        let model = StatusModel(
+            health: FixedHealth(healthSnapshot(summary: "stalled", errors: [fault])),
+            permissions: EmptyPermissions(), retrier: retrier, openSystemSettings: {})
+        host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 },
+            actionReporter: { [unowned self] in actions = $0 }))
+        wait(timeout: 10) {
+            self.rendered[StatusView.retryIdentifier] != nil && self.rendered[StatusView.providerSettingsIdentifier] != nil
+        }
+
+        let row = rendered[StatusView.rowIdentifier(.processing)] ?? ""
+        XCTAssertTrue(row.contains(StatusText.processingStalledHeadline))
+        XCTAssertTrue(row.contains(StatusText.processingAttentionUserDetail), "the stall does not hide the provider fault")
+        XCTAssertEqual(rendered[StatusView.retryIdentifier], StatusText.retryLabel)
+        XCTAssertEqual(rendered[StatusView.providerSettingsIdentifier], StatusText.providerSettingsLabel)
+        actions[StatusView.retryIdentifier]?()
+        wait(timeout: 10) { retrier.count > 0 }
+        XCTAssertEqual(retrier.count, 1)
+    }
+
     // MARK: the production assembly
 
     func testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged() throws {
@@ -231,7 +269,7 @@ final class StatusIntegrationTests: XCTestCase {
         run { await status.refresh() }
         let stalled = try XCTUnwrap(status.facts.first { $0.kind == .processing })
         XCTAssertEqual(stalled.headline, StatusText.processingStalledHeadline, "the real core reported the stall")
-        XCTAssertEqual(stalled.action, .retry)
+        XCTAssertEqual(stalled.actions, [.retry])
 
         let sourceBefore = scalar("SELECT text FROM captures WHERE capture_id = 'capture-stalled'")
         XCTAssertEqual(sourceBefore, "call the roofer about the leak")
@@ -251,7 +289,7 @@ final class StatusIntegrationTests: XCTestCase {
         run { await status.refresh() }
         let after = try XCTUnwrap(status.facts.first { $0.kind == .processing })
         XCTAssertNotEqual(after.headline, StatusText.processingStalledHeadline, "the drain took the waiting work up")
-        XCTAssertNotEqual(after.action, .retry)
+        XCTAssertFalse(after.actions.contains(.retry))
         XCTAssertEqual(
             scalar("SELECT text FROM captures WHERE capture_id = 'capture-stalled'"), sourceBefore,
             "retry never rewrites the saved source")
@@ -302,5 +340,26 @@ final class StatusIntegrationTests: XCTestCase {
         XCTAssertNotNil(built.captureEntry.acknowledgment?.savedItemID)
         XCTAssertLessThan(Date().timeIntervalSince(started), 3, "capture is immediate after nonuse")
         XCTAssertEqual(scalar("SELECT text FROM captures WHERE text = 'book the vet'"), "book the vet")
+    }
+
+    func testTheRealCoreReportsAStallTogetherWithAProviderFaultAndTheScreenKeepsBoth() throws {
+        // Launched inactive so nothing drains the due job: the core reports the stall ahead of the ended provider job.
+        let built = try AppServices.production(
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
+        services = built
+        execute(dueJobStatements + unauthorizedJobStatements)
+        built.root.start(isActive: false)
+        let status = try XCTUnwrap(built.managementContext.statusModel)
+        run { await status.refresh() }
+
+        let processing = try XCTUnwrap(status.facts.first { $0.kind == .processing })
+        XCTAssertEqual(processing.headline, StatusText.processingStalledHeadline, "the real core reported the stall")
+        XCTAssertTrue(
+            processing.detail.contains(StatusText.processingAttentionUserDetail),
+            "the real core's configuration_needed fault is still shown")
+        XCTAssertEqual(processing.actions, [.retry, .openProviderSettings])
+        XCTAssertEqual(
+            scalar("SELECT text FROM captures WHERE capture_id = 'capture-unauthorized'"),
+            "ask the landlord about the boiler", "reading status never touches a saved source")
     }
 }

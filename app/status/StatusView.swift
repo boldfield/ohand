@@ -71,7 +71,7 @@ struct StatusView: View {
                     .preference(key: StatusRenderedKey.self, value: [Self.rowIdentifier(fact.kind): "\(fact.headline) | \(fact.detail)"])
                 }
             }
-            if model.facts.contains(where: { $0.action == .retry }) {
+            if model.facts.contains(where: { $0.actions.contains(.retry) }) {
                 Button(StatusText.retryLabel, action: retryAction)
                     .font(DSFont.rowLabel)
                     .padding(.horizontal, DSSpacing.md)
@@ -89,7 +89,7 @@ struct StatusView: View {
                     .accessibilityIdentifier(Self.retryNoteIdentifier)
                     .preference(key: StatusRenderedKey.self, value: [Self.retryNoteIdentifier: StatusText.retryRequestedNote])
             }
-            if model.facts.contains(where: { $0.action == .openProviderSettings }) {
+            if model.facts.contains(where: { $0.actions.contains(.openProviderSettings) }) {
                 NavigationLink(StatusText.providerSettingsLabel) { makeProviderSettings() }
                     .font(DSFont.rowLabel)
                     .padding(.horizontal, DSSpacing.md)
@@ -97,7 +97,7 @@ struct StatusView: View {
                     .accessibilityIdentifier(Self.providerSettingsIdentifier)
                     .preference(key: StatusRenderedKey.self, value: [Self.providerSettingsIdentifier: StatusText.providerSettingsLabel])
             }
-            if model.facts.contains(where: { $0.action == .openSettings }) {
+            if model.facts.contains(where: { $0.actions.contains(.openSettings) }) {
                 Button(StatusText.openSettingsLabel) { model.openSettings() }
                     .font(DSFont.rowLabel)
                     .padding(.horizontal, DSSpacing.md)

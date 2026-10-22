@@ -106,7 +106,7 @@ final class StatusModelTests: XCTestCase {
             XCTAssertEqual(fact(status, .capture).headline, StatusText.captureHeadline)
             await status.refresh()
             XCTAssertEqual(fact(status, .capture).tone, .good)
-            XCTAssertEqual(fact(status, .capture).action, .none)
+            XCTAssertEqual(fact(status, .capture).actions, [])
         }
     }
 
@@ -122,7 +122,7 @@ final class StatusModelTests: XCTestCase {
         let (status, _, retrier) = model(health: snapshot(summary: "stalled"))
         await status.refresh()
         XCTAssertEqual(fact(status, .processing).tone, .needsAttention)
-        XCTAssertEqual(fact(status, .processing).action, .retry)
+        XCTAssertEqual(fact(status, .processing).actions, [.retry])
         await status.retry()
         XCTAssertEqual(retrier.count, 1)
     }
@@ -133,7 +133,7 @@ final class StatusModelTests: XCTestCase {
                 summary: "needs_attention", errors: [error(kind: "configuration_needed", recovery: "user_action")]))
         await status.refresh()
         XCTAssertEqual(fact(status, .processing).detail, StatusText.processingAttentionUserDetail)
-        XCTAssertEqual(fact(status, .processing).action, .openProviderSettings)
+        XCTAssertEqual(fact(status, .processing).actions, [.openProviderSettings])
     }
 
     func testTerminalFaultOffersNoRetryAndKeepsSourceUntouched() async {
@@ -141,8 +141,47 @@ final class StatusModelTests: XCTestCase {
             health: snapshot(
                 summary: "needs_attention", errors: [error(kind: "permanent_failure", recovery: "terminal")]))
         await status.refresh()
-        XCTAssertEqual(fact(status, .processing).action, StatusAction.none)
+        XCTAssertEqual(fact(status, .processing).actions, [])
         XCTAssertTrue(fact(status, .processing).detail.contains("untouched"))
+    }
+
+    func testAStallDoesNotHideAProviderFaultNeedingThePerson() async {
+        let (status, _, _) = model(
+            health: snapshot(
+                summary: "stalled",
+                errors: [
+                    error(kind: "configuration_needed", recovery: "user_action"),
+                    error(kind: "permanent_failure", recovery: "terminal"),
+                ]))
+        await status.refresh()
+        let processing = fact(status, .processing)
+        XCTAssertEqual(processing.headline, StatusText.processingStalledHeadline)
+        XCTAssertTrue(processing.detail.contains(StatusText.processingStalledDetail))
+        XCTAssertTrue(processing.detail.contains(StatusText.processingAttentionUserDetail), "the provider fault is visible")
+        XCTAssertTrue(processing.detail.contains(StatusText.processingAttentionTerminalDetail), "ended work is visible")
+        XCTAssertEqual(processing.actions, [.retry, .openProviderSettings], "retry alone cannot repair configuration")
+    }
+
+    func testAStallWithOnlyEndedWorkOffersRetryButNoProviderRoute() async {
+        let (status, _, _) = model(
+            health: snapshot(summary: "stalled", errors: [error(kind: "permanent_failure", recovery: "terminal")]))
+        await status.refresh()
+        XCTAssertTrue(fact(status, .processing).detail.contains(StatusText.processingAttentionTerminalDetail))
+        XCTAssertEqual(fact(status, .processing).actions, [.retry])
+    }
+
+    func testNeedingThePersonAndEndedWorkTogetherAreBothShown() async {
+        let (status, _, _) = model(
+            health: snapshot(
+                summary: "needs_attention",
+                errors: [
+                    error(kind: "destination_unavailable", recovery: "user_action"),
+                    error(kind: "retries_exhausted", recovery: "terminal"),
+                ]))
+        await status.refresh()
+        XCTAssertTrue(fact(status, .processing).detail.contains(StatusText.processingAttentionUserDetail))
+        XCTAssertTrue(fact(status, .processing).detail.contains(StatusText.processingAttentionTerminalDetail))
+        XCTAssertEqual(fact(status, .processing).actions, [.openProviderSettings])
     }
 
     func testWaitingForNetworkSaysSoAndNeedsNoTriage() async {
@@ -152,7 +191,7 @@ final class StatusModelTests: XCTestCase {
         XCTAssertEqual(fact(status, .processing).tone, .waiting)
         XCTAssertTrue(fact(status, .processing).detail.contains("network"))
         XCTAssertTrue(fact(status, .processing).detail.contains("by itself"))
-        XCTAssertEqual(fact(status, .processing).action, StatusAction.none, "waiting work resumes itself; no triage")
+        XCTAssertEqual(fact(status, .processing).actions, [], "waiting work resumes itself; no triage")
     }
 
     func testRetryReadsStatusAgainAfterRecovery() async {
@@ -161,24 +200,24 @@ final class StatusModelTests: XCTestCase {
         health.set(snapshot(summary: "idle"))
         await status.retry()
         XCTAssertEqual(fact(status, .processing).headline, StatusText.processingIdleHeadline)
-        XCTAssertEqual(fact(status, .processing).action, StatusAction.none)
+        XCTAssertEqual(fact(status, .processing).actions, [])
     }
 
     func testNotificationFaultsAreShown() async {
-        let cases: [(PermissionStatus, PermissionChange, String, StatusAction)] = [
-            (.denied, .unchanged, StatusText.notificationsOffHeadline, .openSettings),
-            (.denied, .revoked, StatusText.notificationsRevokedHeadline, .openSettings),
-            (.restricted, .unchanged, StatusText.notificationsOffHeadline, .none),
-            (.notRequested, .unchanged, StatusText.notificationsNotAskedHeadline, .none),
-            (.granted, .unchanged, StatusText.notificationsUncheckedHeadline, .none),
+        let cases: [(PermissionStatus, PermissionChange, String, [StatusAction])] = [
+            (.denied, .unchanged, StatusText.notificationsOffHeadline, [.openSettings]),
+            (.denied, .revoked, StatusText.notificationsRevokedHeadline, [.openSettings]),
+            (.restricted, .unchanged, StatusText.notificationsOffHeadline, []),
+            (.notRequested, .unchanged, StatusText.notificationsNotAskedHeadline, []),
+            (.granted, .unchanged, StatusText.notificationsUncheckedHeadline, []),
         ]
-        for (permission, change, headline, action) in cases {
+        for (permission, change, headline, actions) in cases {
             let (status, _, _) = model(
                 health: snapshot(summary: "idle"),
                 permissions: [PermissionEntry(kind: .notifications, status: permission, change: change)])
             await status.refresh()
             XCTAssertEqual(fact(status, .notifications).headline, headline)
-            XCTAssertEqual(fact(status, .notifications).action, action)
+            XCTAssertEqual(fact(status, .notifications).actions, actions)
         }
     }
 
