@@ -52,6 +52,7 @@ final class CaptureWithoutPermissionsTests: XCTestCase {
 
     func testFreshInstallWithNoProviderAndDeniedNotificationsSavesAndRetrievesASilentCapture() throws {
         let storageRoot = directory.appendingPathComponent("storage", isDirectory: true)
+        let baselineBuffers = CoreHandle.liveResultBufferCount
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         let deniedCenter = FakeNotificationCenter()
         deniedCenter.authorizationStatus = .denied
@@ -65,7 +66,10 @@ final class CaptureWithoutPermissionsTests: XCTestCase {
                 sender: UnreachableProviderSender(), readSession: session,
                 notificationCenter: deniedCenter, reachability: FakeReachability(reachable: false)),
             modules: [module])
-        defer { root.shutDown() }
+        defer {
+            _ = pump(until: { CoreHandle.liveResultBufferCount == baselineBuffers })
+            root.shutDown()
+        }
 
         // Notifications are denied, no provider is configured, and no other permission has been requested.
         var outcome: CompositionSaveOutcome?

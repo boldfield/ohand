@@ -181,7 +181,8 @@ final class AppServicesTests: XCTestCase {
         let asked = await eventually { asker.askCount >= 1 }
         XCTAssertTrue(asked)
         asker.openGate()
-        await settle()
+        let passed = await eventually { services.root.lastReminderReport != nil }
+        XCTAssertTrue(passed, "the answer is followed by one reminder pass")
 
         XCTAssertEqual(asker.askCount, 1)
     }
