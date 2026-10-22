@@ -15,7 +15,42 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::ffi::{c_char, c_int, CStr};
+use std::sync::{Arc, Once};
+
+/// Pragmas every store connection runs when it opens. `secure_delete` overwrites freed pages,
+/// so deleted text does not stay readable in the database file.
+const CONNECTION_PRAGMAS: &CStr = c"PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;";
+
+static CONNECTION_PRAGMAS_REGISTERED: Once = Once::new();
+
+/// Runs [`CONNECTION_PRAGMAS`] on a connection SQLite has just opened.
+unsafe extern "C" fn apply_connection_pragmas(
+    connection: *mut rusqlite::ffi::sqlite3,
+    _error_message: *mut *const c_char,
+    _api: *const rusqlite::ffi::sqlite3_api_routines,
+) -> c_int {
+    rusqlite::ffi::sqlite3_exec(
+        connection,
+        CONNECTION_PRAGMAS.as_ptr(),
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    )
+}
+
+/// Makes SQLite run [`CONNECTION_PRAGMAS`] on every connection this process opens afterwards,
+/// including connections opened directly with `Connection::open` on the store path (such as the
+/// audio-removal fence), not only the one [`Database::open`] keeps.
+fn register_connection_pragmas_for_every_connection() {
+    CONNECTION_PRAGMAS_REGISTERED.call_once(|| {
+        // SAFETY: the entry point has the signature SQLite expects, touches only the connection
+        // it is given, and stays valid for the life of the process.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(apply_connection_pragmas));
+        }
+    });
+}
 
 /// Injected clock for testability.
 pub trait Clock: Send + Sync {
@@ -124,8 +159,9 @@ impl Database {
         validate_step_list(steps)?;
         let latest_version = steps.last().map_or(0, |step| step.target_version);
 
+        register_connection_pragmas_for_every_connection();
         let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")?;
+        conn.execute_batch(CONNECTION_PRAGMAS.to_str()?)?;
         // Set a reasonable busy timeout to allow concurrent transactions to wait
         // rather than immediately fail. 5 seconds should be sufficient for most operations.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;

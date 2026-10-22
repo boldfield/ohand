@@ -292,3 +292,48 @@ fn an_export_with_no_callback_registered_leaves_no_file() {
         );
     }
 }
+
+#[test]
+fn a_connection_opened_directly_on_the_store_also_sets_secure_delete() {
+    // The audio-removal fence opens its own connection with `Connection::open` on the store path
+    // rather than through `Database::open`; it must get the same pragmas.
+    let (_directory, store_path) = deletion_store();
+    drop(open_store(&store_path));
+
+    let direct = rusqlite::Connection::open(&store_path).unwrap();
+    let secure_delete: i64 = direct
+        .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+        .unwrap();
+    let foreign_keys: i64 = direct
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(secure_delete, 1);
+    assert_eq!(foreign_keys, 1);
+
+    direct
+        .execute_batch("CREATE TABLE synthetic_scratch (text TEXT NOT NULL)")
+        .unwrap();
+    for _ in 0..40 {
+        direct
+            .execute(
+                "INSERT INTO synthetic_scratch (text) VALUES ('neighbouring synthetic note')",
+                [],
+            )
+            .unwrap();
+    }
+    direct
+        .execute(
+            "INSERT INTO synthetic_scratch (text) VALUES (?1)",
+            [format!("{CANARY} to be deleted")],
+        )
+        .unwrap();
+    assert!(store_files_contain_canary(&store_path));
+    direct
+        .execute(
+            "DELETE FROM synthetic_scratch WHERE text LIKE 'CANARY%'",
+            [],
+        )
+        .unwrap();
+    drop(direct);
+    assert!(!store_files_contain_canary(&store_path));
+}
