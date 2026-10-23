@@ -71,6 +71,9 @@ final class SimulatorHappyPathTests: XCTestCase {
     private var sender: CountingOfflineSender!
     private var center: FakeNotificationCenter!
     private var retrieval: RetrievalSearchModule!
+    /// The silent-capture surface over the production text ingress and progress reader, stamped by the controlled clock
+    /// (`AppServices` builds its own with the system clock and offers no seam for one).
+    private var captureEntry: CaptureEntryModel!
     private let engine = SyntheticVoiceEngine()
     private let permission = FakeMicrophonePermission()
     private let poller = ManualPoller()
@@ -120,6 +123,11 @@ final class SimulatorHappyPathTests: XCTestCase {
             voice: voice, retrieval: retrieval,
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationCenter: lifecycleCenter, isProtectedDataAvailable: { true })
+        captureEntry = CaptureEntryModel(
+            textIngress: RootTextCaptureIngress(root: root), voice: voice.recorder,
+            progressReader: RootCaptureProgressReader(root: root), defaultMode: .silent,
+            access: { CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true) },
+            now: { [fixedNow] in fixedNow })
         services.start(isActive: true)
     }
 
@@ -197,7 +205,7 @@ final class SimulatorHappyPathTests: XCTestCase {
 
     func testWithNoProviderASessionTopicAndFacetCorrectionAreRetrievedBySinceDateWithoutNetwork() throws {
         unlock()
-        let therapyWords = "Bring this up in therapy: synthetic sleep schedule"
+        let therapyWords = "Bring this up in therapy"
         let therapyID = try captureSilently(therapyWords)
         let otherID = try captureSilently("synthetic kitchen tap")
 
@@ -244,15 +252,15 @@ final class SimulatorHappyPathTests: XCTestCase {
     }
 
     private func captureSilently(_ text: String) throws -> String {
-        let previousItemID = services.captureEntry.acknowledgment?.savedItemID
-        services.captureEntry.textModel.updateText(text)
-        services.captureEntry.saveText()
+        let previousItemID = captureEntry.acknowledgment?.savedItemID
+        captureEntry.textModel.updateText(text)
+        captureEntry.saveText()
         XCTAssertTrue(
             pump {
-                guard let savedItemID = self.services.captureEntry.acknowledgment?.savedItemID else { return false }
+                guard let savedItemID = self.captureEntry.acknowledgment?.savedItemID else { return false }
                 return savedItemID != previousItemID
             }, "the core confirmed the save")
-        return try XCTUnwrap(services.captureEntry.acknowledgment?.savedItemID)
+        return try XCTUnwrap(captureEntry.acknowledgment?.savedItemID)
     }
 
     private func reminderRequest() -> NotificationCenterRequest? {
