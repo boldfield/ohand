@@ -2740,6 +2740,14 @@ fn a_hedged_request_with_a_clock_time_is_never_scheduled() {
         "Okay, maybe, remind me Friday at 3 p.m. to call Sam",
         "Maybe. Remind me Friday at 3 p.m. to call Sam",
         "Maybe, can you remind me Friday at 3 p.m. to call Sam",
+        // A hedge after an earlier sentence still reaches the request.
+        "Busy week. Maybe remind me Friday at 3 p.m. to call Sam",
+        "Sam called. Maybe. Remind me Friday at 3 p.m. to call Sam",
+        "Water the plants. Maybe, remind me Friday at 3 p.m. to call Sam",
+        "Water the plants. Okay, maybe. Remind me Friday at 3 p.m. to call Sam",
+        "Okay so maybe, remind me Friday at 3 p.m. to call Sam",
+        // Transcript punctuation is inferred, so a clause ending in a hedge counts as hedging.
+        "Sam called maybe. Remind me Friday at 3 p.m. to call Sam",
     ] {
         // A proposal that quotes the time but claims no instant is stored as needing correction.
         let (fixture, disposition) = apply_clock_proposal_with(
@@ -2774,6 +2782,20 @@ fn a_hedge_does_not_turn_a_non_request_into_one() {
         assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
         assert_eq!(fixture.durable().reminders, 0, "{text}");
     }
+}
+
+#[test]
+fn a_hedge_before_an_earlier_content_clause_does_not_reach_the_request() {
+    // The walk back stops at the first clause with other words, so a hedge before it is that
+    // clause's own and the request stays plain.
+    let text = "Maybe Sam called. Remind me Friday at 3 p.m. to call Sam";
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Sam",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
 }
 
 #[test]

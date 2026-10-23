@@ -2515,27 +2515,48 @@ fn request_hedge(tokens: &[IntentToken], cue_start: usize, verb: &str) -> Option
     })
 }
 
-/// Whether the clauses just before the request's own clause hold only politeness and hedge words
-/// with at least one hedge ("Maybe, remind me", "Okay, maybe. Remind me"), so a punctuated hedge
-/// leaves the timing unconfirmed like an unpunctuated one. A hedge in a separate sentence counts
-/// the same: the hedge word has no other function there.
+/// Whether the clauses just before the request's own clause hedge it, so a punctuated hedge
+/// leaves the timing unconfirmed like an unpunctuated one. Walking back clause by clause, a clause
+/// of only politeness and hedge words ("Maybe, remind me", "Sam called. Maybe. Remind me") passes
+/// its hedge on, since the hedge word has no other function there. The first clause holding any
+/// other word ends the walk, and still hedges the request when it ends in a hedge ("Okay so
+/// maybe, remind me"). Punctuation in a transcript is inferred, so a trailing hedge counts even
+/// across a sentence end ("Sam called maybe. Remind me"): reading too much as hedged only keeps a
+/// reminder unscheduled, never schedules one the speaker did not confirm.
 fn hedged_by_earlier_clauses(tokens_before_cue: &[IntentToken]) -> bool {
-    let own_clause_start = tokens_before_cue
+    let is_hedge_or_politeness = |token: &&IntentToken| {
+        HEDGE_WORDS.contains(&token.text.as_str())
+            || POLITENESS_WORDS.contains(&token.text.as_str())
+    };
+    let is_hedge = |token: &IntentToken| HEDGE_WORDS.contains(&token.text.as_str());
+    let Some(mut clause_end) = tokens_before_cue
         .iter()
         .rposition(|token| token.clause_break)
-        .unwrap_or(0);
+    else {
+        return false;
+    };
     let mut hedged = false;
-    for token in tokens_before_cue[..own_clause_start].iter().rev() {
-        if token.clause_break {
-            continue;
+    loop {
+        let clause_start = tokens_before_cue[..clause_end]
+            .iter()
+            .rposition(|token| token.clause_break)
+            .map_or(0, |index| index + 1);
+        let clause = &tokens_before_cue[clause_start..clause_end];
+        let run = clause
+            .iter()
+            .rev()
+            .take_while(is_hedge_or_politeness)
+            .count();
+        let run_hedged = clause[clause.len() - run..].iter().any(is_hedge);
+        if run < clause.len() {
+            return hedged || run_hedged;
         }
-        if HEDGE_WORDS.contains(&token.text.as_str()) {
-            hedged = true;
-        } else if !POLITENESS_WORDS.contains(&token.text.as_str()) {
-            return false;
+        hedged |= run_hedged;
+        if clause_start == 0 {
+            return hedged;
         }
+        clause_end = clause_start - 1;
     }
-    hedged
 }
 
 /// Trims politeness and hedge words from the start of the clause (the end of the nearest-first
