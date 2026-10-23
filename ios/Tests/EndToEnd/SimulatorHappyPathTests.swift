@@ -164,6 +164,9 @@ final class SimulatorHappyPathTests: XCTestCase {
             "the saved capture is classified as an action")
 
         // Explicit reminder scheduling reaches the (fake) OS center.
+        // The app reconciles reminders when it becomes active; run that same production pass once the item is
+        // classified rather than racing the launch-time pass against interpretation.
+        runAsync { _ = try? await self.services.root.reconcileReminders(trigger: .foreground) }
         XCTAssertTrue(pump { self.reminderRequest() != nil }, "the explicit reminder was handed to the OS: reminders=\(scalar("SELECT group_concat(request_state || '/' || schedule_state || '/' || IFNULL(unschedulable_reason, '-'), ';') FROM reminders")) words=\(words)")
         let request = try XCTUnwrap(reminderRequest())
         let notification = try XCTUnwrap(NotificationIdentifier(rawValue: request.identifier))
