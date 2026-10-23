@@ -3841,7 +3841,9 @@
         "core/src/review/compare/source.rs",
         "core/src/ffi/job_runner/tests.rs",
         "core/tests/",
-        "docs/architecture/m1-contracts.md"
+        "docs/architecture/m1-contracts.md",
+        "core/src/interpretation/contracts/mod.rs",
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift"
       ],
       "intent": "Voice captures are minted as voice-<uuid>, which the interpretation request rejects as a non-UUID capture_id, so no voice note is ever sorted. Mint UUIDs and accept the legacy form.",
       "acceptance": [
@@ -3866,7 +3868,9 @@
         "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift",
         "ios/Services/JobConfiguration/",
         "core/tests/job_configuration/",
-        "ios/Tests/JobConfiguration/"
+        "ios/Tests/JobConfiguration/",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "core/src/ffi/job_configuration/tests.rs"
       ],
       "intent": "A private read of failed interpretation work and an explicit operation that requeues it on the current pin, reusing repin.",
       "acceptance": [
@@ -4923,6 +4927,10 @@
     {
       "date": "2026-10-23",
       "change": "Added F45 (debug-only UI-test fixture launch mode, after F37). U10a amended: depends on F44 and F45; announcements tested in hosted tests via an injectable announcer."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "F42 owns contracts/mod.rs (proposal capture-id check) and the one flaky HomeRecents test wait; F43 owns an additive PrivateReadGate scope and the FFI job_configuration tests."
     }
   ]
 }

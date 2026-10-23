@@ -3625,6 +3625,10 @@ Acceptance:
 
 **Amended (coordinator, 2026-10-23, before any attempt).** Acceptance 3 is withdrawn from F42 and moved to F43. The Status screen's "Try again" only asks the queue to drain (`JobRunnerService.requestDrain`), and a drain never reruns a job that failed terminally, so no existing retry path exists for this. F42 keeps acceptance 1, 2, 4, 5 and 6.
 
+**Ownership amendment (coordinator, 2026-10-23, after PR #352 round 2).** Two additions; nothing else changes:
+- **`core/src/interpretation/contracts/mod.rs`.** `Proposal::validate_identifiers` checks the capture ID too. Without the shared check there, a legacy-ID voice note still fails after the send, as the FFI legacy-ID test shows. Use the same shared function.
+- **`ios/Tests/HomeRecents/HomeRecentsModelTests.swift`, only `testAFailedReadKeepsTheListAndOffersARetry`.** It failed on the exact-head macOS run (39926383832) although F42 touches no Home code, and it has failed on no other PR. It waits with a fixed 500 `Task.yield()` calls (`settle()`), so on a slow simulator the assertion can run before the failed read lands. Replace that wait with a bounded wait for the asserted condition, `loadFailed`, of at most 5 seconds. Keep both assertions unchanged, and change no other test. A green exact-head run is still required.
+
 After landing: the maintainer reinstalls and retries the failed voice notes from Status. The four voice notes on the phone keep their legacy IDs, which is what acceptance 2 is for.
 
 ### F43
@@ -3665,6 +3669,12 @@ Acceptance:
    - A locked read is refused.
    - Repeating the operation creates nothing.
 4. **Bridge.** The Swift bridge and `JobConfigurationService` expose the read and the operation, with tests in `ios/Tests/JobConfiguration/`. Exact-head macOS CI evidence is required.
+
+**Ownership amendment (coordinator, 2026-10-23, after PR #353 round 1).** The worker reported both missing seams correctly. Two additions; nothing else changes:
+- **`ios/Services/Authentication/PrivateReadGate.swift`, additive only.** Register the new read's scope and its start verb beside the existing private reads, as F30 did. Change no existing scope or check.
+- **`core/src/ffi/job_configuration/tests.rs`.** The FFI tests need the crate-internal recording host.
+
+PR #353 (head af9e5f8) may resubmit as it is, with the exact-head macOS run linked in the PR body.
 
 ### F44
 
