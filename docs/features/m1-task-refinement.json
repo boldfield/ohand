@@ -3934,6 +3934,31 @@
         "ios/Services/Assembly/CompositionRoot.swift:441",
         "ios/AppAssembly/AppDelegate.swift:11"
       ]
+    },
+    {
+      "key": "F46",
+      "parent": null,
+      "title": "Schedule a reminder whose day and clock time sit on either side of the task",
+      "file_scope": [
+        "core/src/time/",
+        "core/tests/time/",
+        "core/tests/proposal_application/",
+        "fixtures/intent/contrastive-fixtures.json",
+        "core/tests/fixture_validation/",
+        "core/tests/live_providers/"
+      ],
+      "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
+      "acceptance": [
+        "See the F46 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F29"
+      ],
+      "source_pointers": [
+        "core/src/time/expression.rs:1",
+        "core/src/time/expression.rs:293"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4729,6 +4754,9 @@
     ],
     "F45": [
       "F37"
+    ],
+    "F46": [
+      "F29"
     ]
   },
   "retained_dependency_overrides": {
@@ -4931,6 +4959,10 @@
     {
       "date": "2026-10-23",
       "change": "F42 owns contracts/mod.rs (proposal capture-id check) and the one flaky HomeRecents test wait; F43 owns an additive PrivateReadGate scope and the FFI job_configuration tests."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F46: split day/task/clock reminders (\"remind me today to call the dentist at 10am\") are held for correction; add the shape to the time grammar. Depends on F29."
     }
   ]
 }
