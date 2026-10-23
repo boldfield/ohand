@@ -11,6 +11,7 @@ struct ManagementContext {
     let suggestion: SuggestionScreenModel
     let privacySettings: PrivacySettingsModel
     var permissionsSettings: PermissionsSettingsModel?
+    var statusModel: StatusModel?
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -98,6 +99,7 @@ enum ManagementCatalog {
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
         ManagementEntry(id: "privacy-settings", title: "Privacy", systemImage: "hand.raised") { context in AnyView(PrivacySettingsView(model: context.privacySettings)) },
         ManagementEntry(id: "permissions-settings", title: "Permissions", systemImage: "checkmark.shield") { context in context.permissionsSettings.map { AnyView(PermissionsSettingsView(model: $0)) } ?? AnyView(EmptyView()) },
+        ManagementEntry(id: "status-settings", title: "Status", systemImage: "waveform.path.ecg") { context in context.statusModel.map { model in AnyView(StatusView(model: model, makeProviderSettings: { AnyView(ProviderSettingsView(model: context.providerSettings)) })) } ?? AnyView(EmptyView()) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
@@ -163,7 +165,7 @@ struct SettingsRootView: View {
 
     /// The design's row order for the two groups. Rows missing from `sections` are skipped.
     static let firstGroupEntryIDs = ["prompt-settings", "voice-recovery"]
-    static let secondGroupEntryIDs = ["provider-settings", "privacy-settings", "permissions-settings", "audio-retention", exportEntryID]
+    static let secondGroupEntryIDs = ["provider-settings", "privacy-settings", "permissions-settings", "status-settings", "audio-retention", exportEntryID]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
