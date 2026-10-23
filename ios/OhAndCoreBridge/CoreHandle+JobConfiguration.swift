@@ -26,7 +26,7 @@ public enum JobConfigurationCommand: Equatable, Sendable {
     case rerunFailedInterpretations(readScopes: [CoreExportScope], selection: JobConfigurationRerunSelection)
 
     /// The same command with `readScopes` replaced, for the commands that carry them; any other command is unchanged.
-    func withReadScopes(_ scopes: [CoreExportScope]) -> JobConfigurationCommand {
+    public func withReadScopes(_ scopes: [CoreExportScope]) -> JobConfigurationCommand {
         switch self {
         case .failedInterpretations(_, let limit, let cursor):
             return .failedInterpretations(readScopes: scopes, limit: limit, cursor: cursor)
