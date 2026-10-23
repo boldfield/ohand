@@ -1,6 +1,6 @@
 import SQLite3
 import XCTest
-import OhAndCoreBridge
+@testable import OhAndCoreBridge
 @testable import OhAndServices
 import UIKit
 import UserNotifications
@@ -114,6 +114,21 @@ final class AppRealServicesTests: XCTestCase {
         func increment() {
             lock.lock()
             value += 1
+            lock.unlock()
+        }
+    }
+
+    private final class ChangeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var changes: [ItemChange] = []
+        var all: [ItemChange] {
+            lock.lock()
+            defer { lock.unlock() }
+            return changes
+        }
+        func add(_ change: ItemChange) {
+            lock.lock()
+            changes.append(change)
             lock.unlock()
         }
     }
@@ -272,6 +287,83 @@ final class AppRealServicesTests: XCTestCase {
         XCTAssertGreaterThan(completionObserverRuns.count, runsBeforeSave, "the completion observer ran after the drain")
         XCTAssertTrue(reminderScheduled(), "the reminder pass ran after the same drain")
         settleBackgroundWork(services)
+    }
+
+    func testACompletedInterpretationDrainPublishesTheItemChangeSignalThroughTheProductionRoot() throws {
+        let services = try AppServices.production(
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
+        created.append(services)
+        let changes = ChangeBox()
+        let stopObserving = services.root.observeItemChanges { changes.add($0) }
+        defer { stopObserving() }
+
+        services.captureEntry.textModel.updateText("remind me 2099-01-01 09:00:00 to call mom")
+        services.captureEntry.saveText()
+        wait { changes.all.contains(.allItems) }
+
+        XCTAssertTrue(changes.all.contains(.allItems), "applied interpretation asks every list to read again")
+        XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM reminders"), "0", "the drain really applied its result")
+        settleBackgroundWork(services)
+    }
+
+    func testTheDrainEventItselfDecidesTheItemChangeWhateverTheRunnerHasMovedOnTo() {
+        func drainEvent(_ jobsJSON: String) -> CoreEvent {
+            CoreEvent(
+                operationID: 7,
+                outcome: .success(Data(#"{"operation_id":7,"stop":"job_limit","jobs":\#(jobsJSON)}"#.utf8)))
+        }
+        let completedInterpretation = drainEvent(
+            #"[{"job_id":"j1","job_type":"interpret","result":"settled","settlement":"completed"}]"#)
+        let completedTranscription = drainEvent(
+            #"[{"job_id":"j2","job_type":"\#(TranscriptionJobHandler.transcriptionJobType)","result":"settled","settlement":"completed"}]"#)
+        let retriedInterpretation = drainEvent(
+            #"[{"job_id":"j3","job_type":"interpret","result":"transient","settlement":null}]"#)
+
+        // Read from the event, so a re-run that started (or failed to start) since cannot hide what this drain applied.
+        XCTAssertEqual(ServiceCompositionRoot.itemChange(afterDrainEvent: completedInterpretation), .allItems)
+        XCTAssertEqual(ServiceCompositionRoot.itemChange(afterDrainEvent: completedTranscription), .allItems)
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrainEvent: retriedInterpretation))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrainEvent: drainEvent("[]")))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(
+            afterDrainEvent: CoreEvent(operationID: 7, outcome: .failure(CoreFailure.handleClosed))))
+    }
+
+    func testDeliveredNotificationsAreRecordedOnceAtForegroundThroughTheProductionRoot() throws {
+        let center = FakeNotificationCenter()
+        let services = try makeInjectedServices(
+            grant: nil, center: center, lifecycleCenter: NotificationCenter(), recognizer: nil)
+        services.start(isActive: true)
+        services.root.saveText(
+            captureID: UUID().uuidString, text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
+        ) { _ in }
+        func reminderRequest() -> NotificationCenterRequest? {
+            center.addedRequests.first { $0.identifier != PendingProcessingAlert.identifier }
+        }
+        wait { reminderRequest() != nil }
+        let request = try XCTUnwrap(reminderRequest(), "the reminder was scheduled")
+        settleBackgroundWork(services)
+        XCTAssertEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
+
+        let readsAfterLaunch = center.deliveredReads
+        XCTAssertEqual(readsAfterLaunch, 1, "the launch pass reads the delivered list once")
+
+        // The OS delivered it while the app was away, and nothing tapped it.
+        center.deliver(identifier: request.identifier, at: Date())
+        services.lifecycle.foregroundActivated()
+        wait { self.scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'") == "1" }
+        settleBackgroundWork(services)
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1")
+        XCTAssertNotEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
+        XCTAssertEqual(
+            center.deliveredReads, readsAfterLaunch + 1,
+            "one return to the foreground reads the delivered list once, though two steps reconcile reminders")
+
+        services.lifecycle.foregroundActivated()
+        settleBackgroundWork(services)
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1",
+            "a second return to the foreground records nothing new")
+        XCTAssertEqual(center.deliveredReads, readsAfterLaunch + 2)
     }
 
     func testASaveThatFailsRequestsNoDrainAndTakesNoBackgroundTime() throws {
