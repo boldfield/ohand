@@ -74,6 +74,7 @@ final class AppServices {
         notificationHooks: NotificationHooks = .live,
         notificationCenter: NotificationCenter = .default,
         timeSources: TimeSources = .system,
+        captureNow: @escaping () -> Date = Date.init,
         notificationPermission: NotificationPermissionAsking = NotificationPermissionAsker(
             center: SystemNotificationCenter(), requester: SystemNotificationAuthorizationRequester()),
         isForeground: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
@@ -101,7 +102,8 @@ final class AppServices {
             voice: voice.recorder,
             progressReader: RootCaptureProgressReader(root: root),
             defaultMode: defaultMode(),
-            access: access)
+            access: access,
+            now: captureNow)
         self.captureEntry = captureEntry
         let navigation = ManagementNavigationModel(
             readScope: { [weak root] in root?.readScope ?? .captureOnly },
