@@ -4,6 +4,8 @@ This execution overlay replaces 25 task groups with 53 smaller implementation ta
 
 Addendum 2026-10-08: V08 was originally excluded as an externally blocked evidence task. After two rejected review rounds on its PR #60, it is now split into V08a (worker-executable server-side probe) and V08b (maintainer-supplied phone-context evidence). The original task `939fe62e` is retired; see the replacement map and the V08a/V08b slices below. Addendum 2026-10-08, later: P08 is split the same way into P08a (signing tooling, Linux-testable with stubbed Apple tools) and P08b (maintainer-produced signed build and device-install evidence on a Mac with Xcode). The original task `7d4836ee` is retired; P09, T05 and T10 now depend on P08b.
 
+Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable accessibility, fixed and gated in CI) and U10b (the maintainer's actual-device VoiceOver, Dynamic Type and keyboard pass). The original task `f5423770` blocked on the missing device evidence and is retired. T05 now depends on U10b.
+
 ## Execution authority
 
 Read this document with `m1-task-refinement.json`, `m1-plan.md` and the architecture contract. The original `m1-tasks.json` remains the immutable baseline and ownership-group catalog used by the existing contract checker. For current execution, apply this overlay: each replaced group delegates its listed paths to the child tasks below, and consumers depend on its last child. An archived parent is an audit record, not completed implementation.
@@ -335,6 +337,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | L05 | L05a, L05b | The original Swift-only scope omitted Rust-owned reset fencing. Separate the atomic core reset operation from native cleanup orchestration. |
 | V08 | V08a, V08b | The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block. |
 | P08 | P08a, P08b | Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block. |
+| U10 | U10a, U10b | Automated audits and their fixes can be done and checked in the simulator; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them instead of finding them. |
 
 ## Retained unstarted tasks
 
@@ -3520,3 +3523,66 @@ Acceptance:
 2. Every store connection sets `PRAGMA secure_delete = ON` next to `foreign_keys`. A test writes a canary item, deletes it through the normal deletion path, closes the store, and scans the raw bytes of the database file and any `-journal` or `-wal` file. The canary is absent. The same test without the pragma shows that the test detects the canary; that variant may run only inside the test.
 3. Existing export and deletion tests still pass. Deletion keeps removing the item from the search index in the same transaction.
 4. `make check` and `make test` pass. No native change, so no macOS run.
+
+### U10a
+
+Fix and gate the simulator-checkable accessibility of the M1 app
+
+Find and fix every accessibility defect the simulator can detect, and keep them fixed with a CI gate, so that the maintainer's device pass (U10b) confirms the app instead of discovering its defects.
+
+Owned paths:
+- `ios/UITests/Accessibility/` (new UI test target) and `ios/scripts/accessibility-simulator.sh`;
+- `ios/project.yml` and `.github/workflows/ios.yml`, only to add that target, its scheme and its CI steps;
+- `docs/validation/accessibility.md` (the automated-gate and procedure sections; the device-results section belongs to U10b);
+- accessibility-only edits in SwiftUI views under `app/` (labels, values, hints, traits, grouping, sort priority, announcements, and layout changes that large text needs).
+
+Not owned: `app/settings/prompt-preview/` (S04), `ios/Services/` and `ios/AppAssembly/` (F37), `ios/Tests/EndToEnd/` (T09), and `ios/UITests/Walkthrough/`. Reuse the walkthrough's launch arguments and synthetic fixtures; do not edit them.
+
+Dependencies: U10's dependencies (C06, DS04b, DS05, DS06, DS07, DS09, U03b, U04b, U07c, U08b, U09), all merged.
+
+Acceptance:
+
+1. **Audit every main screen.** A UI test runs `XCUIApplication.performAccessibilityAudit()` with the default audit types on each screen the person reaches in M1, with synthetic fixtures:
+   - Home, empty and populated;
+   - capture, both voice (idle and recording) and silent text entry;
+   - search, with results and with none;
+   - source detail with a reminder, and the correction and item controls;
+   - Settings root, Processing (privacy), provider settings, prompt settings, and data settings with the erase confirmation;
+   - status and recovery;
+   - first-run permissions;
+   - the locked screen.
+
+   The audit passes on each. Any exemption is for one named issue on one element, handled in the audit's issue handler with a comment, and listed with its reason in `docs/validation/accessibility.md`. Never exclude a whole audit type.
+2. **Large text.** The same audits pass at the default content size and at the largest accessibility size (`UICTContentSizeCategoryAccessibilityXXXL`, set by launch argument). Nothing is truncated without a way to read it in full. Screenshots at the largest size go into the CI artifact.
+3. **What the simulator can prove about VoiceOver.**
+   - Every interactive element has a label that names its action or content, and a stateful control exposes its state as a value or trait.
+   - Saving a capture, a processing failure, a reminder that needs correction, and locking post an accessibility announcement or move focus to a status element. Tests assert each one.
+   - The locked screen's unlock control is labelled, reachable and hittable, so authentication has no dead end.
+4. **Fix scope.** Fixes change accessibility attributes and the layout large text needs, nothing else. Visible copy comes from `docs/features/m1-ui-design.md`; a label may only add words where the visible text is ambiguous. Every existing unit, UI and walkthrough test passes unchanged.
+5. **CI gate.** `ios.yml` runs the accessibility UI tests on every pull request, and any audit issue fails the job. Exact-head macOS evidence as AGENTS.md requires, with the audit log and the large-text screenshots in the uploaded artifact (retention 7 days).
+6. **Procedure for U10b.** `docs/validation/accessibility.md` states what the automated gate covers and what only a device can show: VoiceOver gestures, rotor and reading order on hardware, Dynamic Type in real use, and Full Keyboard Access with a hardware keyboard. It gives a step-by-step device procedure covering the screens in item 1, and an evidence record format modelled on `docs/validation/evidence/device-feasibility/2026-10-10-latency-accessibility.json`.
+
+Keyboard navigation is not asserted in the simulator; it belongs to U10b.
+
+Contributes to original U10 criteria: 1 (automated audits), 2 (fixes recorded).
+
+### U10b
+
+Record the actual-device accessibility pass
+
+Fold the maintainer's device pass into `docs/validation/accessibility.md` as cited evidence.
+
+Owned paths: `docs/validation/accessibility.md` (the device-results section) and `docs/validation/evidence/accessibility/`.
+
+Dependencies: U10a.
+
+Context: this task starts blocked. The maintainer installs a signed build that contains U10a, follows the U10a procedure on the trial iPhone with VoiceOver, the largest Dynamic Type size and Full Keyboard Access, commits the sanitized record under `docs/validation/evidence/accessibility/`, and unblocks this task naming that file. A worker claimed without such a file must re-block naming that exact missing prerequisite and must not substitute simulator results.
+
+Acceptance:
+
+1. `docs/validation/accessibility.md` cites the named record, with the build revision, collection time and device model, for every screen and check in the procedure.
+2. Each issue the device pass found is listed with its severity. An issue that blocks a flow (no way to capture, retrieve, act on an item, change settings or unlock with VoiceOver, at the largest text size, or from the keyboard) makes the check fail until a follow-up fix lands and the affected steps are re-recorded. Lesser issues are listed with a follow-up task or an explicit acceptance for the trial.
+3. Raw recordings and personal content stay with the maintainer. The repository holds only the sanitized record and an auditable reference to the private evidence.
+
+Contributes to original U10 criteria: 1 (device pass), 2, 3.
+

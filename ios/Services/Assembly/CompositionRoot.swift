@@ -851,6 +851,7 @@ final class NotificationActionClients: @unchecked Sendable {
         layout: ProtectedStorageLayout,
         session: ReadAuthenticationSession,
         now: @escaping @Sendable () -> Date,
+        changes: ItemChangePublishing,
         forwardTo environmentHandler: @escaping NotificationEventHandler
     ) {
         let client = CoreNotificationActionClient(core: core)
@@ -859,7 +860,8 @@ final class NotificationActionClients: @unchecked Sendable {
                 .appendingPathComponent(Self.journalDirectoryName, isDirectory: true))
         let relay = OpenItemRelay()
         let handler = ActionHandler(
-            core: client, journal: journal, authorization: session, openItem: { relay.open($0) })
+            core: ChangePublishingNotificationActionCore(base: client, changes: changes), journal: journal,
+            authorization: session, openItem: { relay.open($0) })
         let promptTap = promptTap
         let ingestor = NotificationEventIngestor(
             now: now,
@@ -1116,6 +1118,7 @@ public final class ServiceCompositionRoot {
     private let resetItemCleanup: ResetItemCleanupBridge
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
+    private let itemChanges: ItemChangeSignal
     /// Adapts the job runner for B04's completion service so its drain-idle observer does not displace the root's.
     let completionDrain: JobRunnerCompletionDrain
     /// Built on first use on the main queue; `nil` when the platform supplies no background-execution grant.
@@ -1181,6 +1184,7 @@ public final class ServiceCompositionRoot {
         itemCorrections = assembly.itemCorrections
         itemDeletionClient = assembly.itemDeletionClient
         itemDeletion = assembly.itemDeletion
+        itemChanges = assembly.itemChanges
         reminderControlClient = assembly.reminderControlClient
         reminderControls = assembly.reminderControls
         itemLifecycleControlClient = assembly.itemLifecycleControlClient
@@ -1529,6 +1533,14 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    /// Calls `observer` on the main thread after the core committed a change to an item (a deletion, correction,
+    /// lifecycle control, reminder edit or cancellation, a completion from a notification action) or to every item (a
+    /// completed reset). It carries only the item's identifier, never content; read what is shown again. Returns a
+    /// closure that removes the registration.
+    public func observeItemChanges(_ observer: @escaping @Sendable (ItemChange) -> Void) -> () -> Void {
+        itemChanges.observe(observer)
+    }
+
     /// Returns to capture-only and invalidates every read still waiting for its answer. The root also relocks itself
     /// when the app enters the background or returns to the foreground, and when protected data becomes unavailable.
     public func relockReads() {
@@ -1809,6 +1821,7 @@ public final class ServiceCompositionRoot {
         let resetItemCleanup: ResetItemCleanupBridge
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
+        let itemChanges: ItemChangeSignal
     }
 
     private static func validate(modules: [CompositionModule]) throws {
@@ -1914,28 +1927,32 @@ public final class ServiceCompositionRoot {
                     return try await root.reconcileReminders(trigger: trigger)
                 })
 
+            let itemChanges = ItemChangeSignal()
             let notificationActions = NotificationActionClients(
                 core: core, layout: layout, session: adapters.readSession, now: environment.now,
-                forwardTo: environment.notificationEvents)
+                changes: itemChanges, forwardTo: environment.notificationEvents)
             undo.append { notificationActions.shutDown(session: adapters.readSession) }
             router.register { notificationActions.client.handle($0) }
             let itemCorrectionClient = CoreItemCorrectionClient(core: core)
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
-            let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
+            let itemCorrections = ItemCorrectionService(
+                core: itemCorrectionClient, session: adapters.readSession, changes: itemChanges)
             let itemDeletionClient = CoreItemDeletionClient(core: core, gate: readGate)
             router.register { itemDeletionClient.handle($0) }
             undo.append { itemDeletionClient.shutDown() }
-            let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)
+            let itemDeletion = ItemDeletionService(
+                core: itemDeletionClient, session: adapters.readSession, changes: itemChanges)
             let reminderControlClient = CoreReminderControlClient(core: core, gate: readGate)
             router.register { reminderControlClient.handle($0) }
             undo.append { reminderControlClient.shutDown() }
-            let reminderControls = ReminderControlService(core: reminderControlClient, session: adapters.readSession)
+            let reminderControls = ReminderControlService(
+                core: reminderControlClient, session: adapters.readSession, changes: itemChanges)
             let itemLifecycleControlClient = CoreItemLifecycleControlClient(core: core)
             router.register { itemLifecycleControlClient.handle($0) }
             undo.append { itemLifecycleControlClient.shutDown() }
             let itemLifecycleControls = ItemLifecycleControlService(
-                core: itemLifecycleControlClient, session: adapters.readSession)
+                core: itemLifecycleControlClient, session: adapters.readSession, changes: itemChanges)
             let suggestionResponseClient = CoreSuggestionResponseClient(core: core, gate: readGate)
             router.register { suggestionResponseClient.handle($0) }
             undo.append { suggestionResponseClient.shutDown() }
@@ -1997,7 +2014,8 @@ public final class ServiceCompositionRoot {
                 itemCleanup: resetItemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: layout),
                 credentials: KeychainResetCredentialRemover(serviceName: configuration.credentialServiceName),
-                markers: resetMarkers)
+                markers: resetMarkers,
+                changes: itemChanges)
             let resetControl = ResetControl(service: resetService, core: resetCore, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
@@ -2072,7 +2090,7 @@ public final class ServiceCompositionRoot {
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
                 exportClient: exportClient, exportService: exportService,
                 resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
-                permissionReconciler: permissionReconciler, foreground: foreground)
+                permissionReconciler: permissionReconciler, foreground: foreground, itemChanges: itemChanges)
         } catch {
             for step in undo.reversed() {
                 step()

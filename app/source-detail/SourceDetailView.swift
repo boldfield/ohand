@@ -1,3 +1,4 @@
+import OhAndServices
 import SwiftUI
 
 /// The authenticated source-detail screen: where the item's words came from, the original and corrected text, and
@@ -50,6 +51,13 @@ struct SourceDetailView: View {
     /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
     @Environment(\.isInItemPane) private var isInItemPane
 
+    /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
+    /// never sets it, so it still says "Not here".
+    @State private var deletedHere = false
+    /// A change to this item arrived while one of this screen's own controls was working; the item is read again once
+    /// they settle.
+    @State private var readAgainIsPending = false
+
     private var sideMargin: CGFloat { isInItemPane ? 0 : DSSpacing.sideMargin(for: horizontalSizeClass) }
 
     var body: some View {
@@ -63,9 +71,12 @@ struct SourceDetailView: View {
                         history(content)
                         if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
                     } else if let failure = model.failure {
-                        emptyState(
-                            title: Self.title(for: failure), message: Self.text(for: failure),
-                            identifier: Self.identifier(for: failure))
+                        // Once the person has deleted this item, the deletion result below is the whole answer.
+                        if !deletedHere {
+                            emptyState(
+                                title: Self.title(for: failure), message: Self.text(for: failure),
+                                identifier: Self.identifier(for: failure))
+                        }
                     } else {
                         ProgressView()
                             .tint(DSColor.accent.color)
@@ -75,7 +86,8 @@ struct SourceDetailView: View {
                             .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
                     }
                     if let deletion = model.deletion {
-                        ItemDeletionSection(model: deletion, onRecorded: { Task { await model.load() } })
+                        DeletionWatchingSection(
+                            model: deletion, deletedHere: $deletedHere, onRecorded: { Task { await model.load() } })
                     }
                 }
                 .padding(.bottom, DSSpacing.lg)
@@ -87,13 +99,44 @@ struct SourceDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task { await model.load() }
         .onDisappear { model.close() }
+        .onReceive(NotificationCenter.default.publisher(for: ItemChangeSignal.didChangeNotification)) { notification in
+            guard let change = ItemChangeSignal.change(in: notification), change.concerns(model.itemID) else { return }
+            Task { await readAgainAfterChange() }
+        }
         .task {
             // Watches for a relock, deletion or the clip ending for as long as the screen is shown.
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 model.checkSession()
+                if readAgainIsPending && !ownControlIsWorking { await readAgainAfterChange() }
             }
         }
+    }
+
+    /// The item changed somewhere else (a notification action, another screen, a reset) while it is shown in the search
+    /// screen's pane, whose results are read again for the same change: read it again so the card's text, type and
+    /// state agree with them, and an item deleted meanwhile says "Not here" as its row disappears. The delete control
+    /// reads the revision the card now shows. The correction and reminder
+    /// editors keep the revision the person started from, so a save against it still meets the conflict that shows the
+    /// newer values and keeps what was typed. A first read still in flight is superseded, so an answer read before the
+    /// change never replaces this one. While one of this screen's own controls is working the read waits until they
+    /// settle, so their result stays shown, and is then made. An item that is not shown (locked, gone or unreadable) is
+    /// not read.
+    private func readAgainAfterChange() async {
+        guard isInItemPane else { return }
+        if ownControlIsWorking {
+            readAgainIsPending = true
+            return
+        }
+        readAgainIsPending = false
+        guard model.failure == nil || model.isLoading else { return }
+        await model.load()
+        await model.deletion?.prepare()
+    }
+
+    private var ownControlIsWorking: Bool {
+        model.itemControls?.isWorking == true || model.reminderEditor?.isWorking == true
+            || model.deletion?.isBusy == true
     }
 
     private var header: some View {
@@ -283,6 +326,21 @@ struct SourceDetailView: View {
                 }
             }
         }
+    }
+}
+
+/// The delete control, which also tells the screen when the person has deleted an item that was live when it opened.
+private struct DeletionWatchingSection: View {
+    @ObservedObject var model: ItemDeletionModel
+    @Binding var deletedHere: Bool
+    var onRecorded: () -> Void
+    /// Latched once the item was offered for deletion, i.e. it was live when the control read it.
+    @State private var wasLive = false
+
+    var body: some View {
+        ItemDeletionSection(model: model, onRecorded: onRecorded)
+            .onReceive(model.$revision) { if $0 != nil { wasLive = true } }
+            .onReceive(model.$isRecorded) { if $0, wasLive { deletedHere = true } }
     }
 }
 

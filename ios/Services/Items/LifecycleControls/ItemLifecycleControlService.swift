@@ -48,10 +48,12 @@ public enum ItemLifecycleControlError: Error, Equatable, Sendable {
 public final class ItemLifecycleControlService: @unchecked Sendable {
     private let core: ItemLifecycleControlCore
     private let session: ReadAuthenticationSession
+    private let changes: ItemChangePublishing?
 
-    init(core: ItemLifecycleControlCore, session: ReadAuthenticationSession) {
+    init(core: ItemLifecycleControlCore, session: ReadAuthenticationSession, changes: ItemChangePublishing? = nil) {
         self.core = core
         self.session = session
+        self.changes = changes
     }
 
     public func complete(commandID: String, itemID: String, expectedRevision: Int) async throws
@@ -106,7 +108,9 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
             default: throw ItemLifecycleControlError.core(failure)
             }
         }
-        return try Self.receipt(from: answer)
+        let receipt = try Self.receipt(from: answer)
+        changes?.publish(.item(receipt.itemID))
+        return receipt
     }
 
     private static func receipt(from answer: ItemLifecycleControlAnswer) throws -> ItemLifecycleControlReceipt {

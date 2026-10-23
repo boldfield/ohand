@@ -48,4 +48,8 @@ final class RootHomeRecentsSource: HomeRecentsSource {
     func observeAccess(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
         root?.observeReadAccess(handler) ?? {}
     }
+
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void {
+        root?.observeItemChanges(handler) ?? {}
+    }
 }
