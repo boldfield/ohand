@@ -44,7 +44,7 @@ final class SimulatorUpgradePersistenceTests: XCTestCase {
     /// Test that sources, corrections, tombstones, profile references and scheduled reminders
     /// persist through an upgrade without uninstalling (in-place install).
     func testUpgradePersistenceOfSourcesCorrectionsReminders() throws {
-        // Phase 1: Create seeded prior-version state
+        // Phase 1: Create seeded prior-version state with all required data categories
         let (priorItemID, priorReminderID) = try createPriorVersionState()
 
         // Phase 2: Simulate upgrade (clear app services, reopen storage)
