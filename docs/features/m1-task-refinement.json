@@ -3773,7 +3773,8 @@
         "ios/project.yml",
         ".github/workflows/ios.yml",
         "docs/validation/accessibility.md",
-        "app/"
+        "app/",
+        "app/accessibility/"
       ],
       "intent": "Find, fix and gate every accessibility defect the simulator can detect, so the device pass confirms the app instead of discovering its defects.",
       "acceptance": [
@@ -3790,6 +3791,8 @@
         "DS06",
         "DS07",
         "DS09",
+        "F44",
+        "F45",
         "U03b",
         "U04b",
         "U07c",
@@ -3899,6 +3902,33 @@
       "source_pointers": [
         "app/status/StatusText.swift:30",
         "app/source-detail/SourceDetailView.swift"
+      ]
+    },
+    {
+      "key": "F45",
+      "parent": null,
+      "title": "Add a debug-only fixture launch mode for UI tests",
+      "file_scope": [
+        "ios/AppAssembly/AppDelegate.swift",
+        "ios/AppAssembly/AppConfiguration.swift",
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/UITestFixtures/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/UITests/Fixtures/",
+        "ios/Tests/AppAssembly/",
+        "ios/project.yml"
+      ],
+      "intent": "Let UI tests open the app in named synthetic states through the existing debug-only injectedForTests adapters.",
+      "acceptance": [
+        "See the F45 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F37"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:441",
+        "ios/AppAssembly/AppDelegate.swift:11"
       ]
     }
   ],
@@ -4677,6 +4707,8 @@
       "DS06",
       "DS07",
       "DS09",
+      "F44",
+      "F45",
       "U03b",
       "U04b",
       "U07c",
@@ -4690,6 +4722,9 @@
     "F43": [],
     "F44": [
       "F43"
+    ],
+    "F45": [
+      "F37"
     ]
   },
   "retained_dependency_overrides": {
@@ -4884,6 +4919,10 @@
     {
       "date": "2026-10-23",
       "change": "Added F43 (failed-work read and explicit requeue, core and bridge) and F44 (Status and detail show failed notes with a working Try again; depends on F43). F42 acceptance 3 moved to F43."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F45 (debug-only UI-test fixture launch mode, after F37). U10a amended: depends on F44 and F45; announcements tested in hosted tests via an injectable announcer."
     }
   ]
 }

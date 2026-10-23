@@ -3564,6 +3564,11 @@ Acceptance:
 
 Keyboard navigation is not asserted in the simulator; it belongs to U10b.
 
+**Amended (coordinator, 2026-10-23, after the first attempt blocked).** The worker was right: the "walkthrough's launch arguments and synthetic fixtures" this section told it to reuse do not exist. The walkthrough calls `app.launch()` with no arguments, and nothing reads launch arguments. U10a now depends on F45, which adds a debug-only fixture launch mode, and on F44, which edits `app/status/` and `app/source-detail/` first. The changes:
+- Reach the screens and states in item 1 through F45's fixture mode.
+- Test item 3's announcements in hosted view-model tests, through an injectable announcer in `app/` (U10a may add `app/accessibility/` for it), not in UI tests, because XCUITest cannot observe announcements.
+- Everything else is unchanged.
+
 Contributes to original U10 criteria: 1 (automated audits), 2 (fixes recorded).
 
 ### U10b
@@ -3682,4 +3687,33 @@ Acceptance:
 2. **"Try again" re-runs failed work.** It calls F43's operation for the listed notes, then reports what happened in one line: the number queued again, and the number that cannot run until a setting changes, with a link to Processing when that is the cause. The existing drain request stays for work that is only waiting.
 3. **The note's detail screen**, when its sorting failed, shows one line with the same reason and a "Try again" for that one note. When the note is being sorted, it shows "Sorting…"; otherwise nothing.
 4. **Hosted view tests** cover Status in each case: locked, unlocked with 1 note, unlocked with more than 5, after a try-again that queued notes, and after one that could not queue because no provider was allowed. They also cover the detail line. Run them in both appearances. A walkthrough screenshot shows Status with one failed note. Exact-head macOS CI evidence is required.
+
+### F45
+
+Add a debug-only fixture launch mode for UI tests
+
+U10a, and any future UI test, needs to open the app in a known state: locked, unlocked with a populated store, with a failed note, with a reminder that needs correction, or before first-run permissions. Today a UI test can only launch the real app empty and type into it. The composition root already has a debug-only substitute adapter set (`CompositionAdapterSet.injectedForTests`, `ios/Services/Assembly/CompositionRoot.swift`) that a release build cannot construct. F45 makes it reachable from a UI test.
+
+Owned paths: `ios/AppAssembly/AppDelegate.swift`, `ios/AppAssembly/AppConfiguration.swift`, `ios/AppAssembly/AppServices.swift`, a new `ios/AppAssembly/UITestFixtures/`, `ios/Services/Assembly/CompositionRoot.swift` (only the debug adapter factory and its fixture hook), `ios/UITests/Fixtures/` (new, a shared launch helper), `ios/Tests/AppAssembly/` and `ios/project.yml`, the last only to add the new source folders to existing targets.
+
+Dependencies: F37, which owns `CompositionRoot.swift`, `AppServices.swift` and `ios/Tests/AppAssembly/` until it lands.
+
+Acceptance:
+
+1. **Debug only.** In a Debug build, the launch argument `-OhAndUITestFixture <name>` selects the fixture mode. In a Release build, the code that reads the argument is compiled out (`#if DEBUG`), and a test proves the release configuration has no path to it, the way the existing `injectedForTests` factory is guarded. Without the argument, behaviour is unchanged.
+2. **Isolated.** Each fixture launch uses a fresh temporary store. It never opens, reads or writes the production store or the Keychain items production uses. It uses the existing `injectedForTests` adapters:
+   - a scripted provider sender that answers from fixtures and never touches the network;
+   - a scripted on-device recognizer;
+   - a controllable read session that starts locked or unlocked as the fixture says and unlocks on the normal unlock action;
+   - a fake notification center with a chosen permission state.
+3. **Named fixtures, seeded through the production core operations** (import, transcript attach, profile, grant, interpretation through the scripted sender), never by writing SQL. At least these:
+   - `empty-first-run`: permissions not yet asked;
+   - `locked`;
+   - `populated`: typed and voice notes of each item type, one sorted reminder;
+   - `needs-correction`: a reminder whose time needs correction;
+   - `failed-sorting`: one note whose provider request was rejected;
+   - `offline`: the network is unavailable, with waiting work.
+
+   All fixture content is synthetic.
+4. **A shared helper** in `ios/UITests/Fixtures/` launches the app with a fixture. A UI test in it opens each fixture and asserts one identifying element. Exact-head macOS CI evidence is required.
 
