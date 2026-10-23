@@ -3625,6 +3625,10 @@ Acceptance:
 
 **Amended (coordinator, 2026-10-23, before any attempt).** Acceptance 3 is withdrawn from F42 and moved to F43. The Status screen's "Try again" only asks the queue to drain (`JobRunnerService.requestDrain`), and a drain never reruns a job that failed terminally, so no existing retry path exists for this. F42 keeps acceptance 1, 2, 4, 5 and 6.
 
+**Ownership amendment (coordinator, 2026-10-23, after PR #352 round 2).** Two additions; nothing else changes:
+- **`core/src/interpretation/contracts/mod.rs`.** `Proposal::validate_identifiers` checks the capture ID too. Without the shared check there, a legacy-ID voice note still fails after the send, as the FFI legacy-ID test shows. Use the same shared function.
+- **`ios/Tests/HomeRecents/HomeRecentsModelTests.swift`, only `testAFailedReadKeepsTheListAndOffersARetry`.** It failed on the exact-head macOS run (39926383832) although F42 touches no Home code, and it has failed on no other PR. It waits with a fixed 500 `Task.yield()` calls (`settle()`), so on a slow simulator the assertion can run before the failed read lands. Replace that wait with a bounded wait for the asserted condition, `loadFailed`, of at most 5 seconds. Keep both assertions unchanged, and change no other test. A green exact-head run is still required.
+
 After landing: the maintainer reinstalls and retries the failed voice notes from Status. The four voice notes on the phone keep their legacy IDs, which is what acceptance 2 is for.
 
 ### F43
@@ -3665,6 +3669,12 @@ Acceptance:
    - A locked read is refused.
    - Repeating the operation creates nothing.
 4. **Bridge.** The Swift bridge and `JobConfigurationService` expose the read and the operation, with tests in `ios/Tests/JobConfiguration/`. Exact-head macOS CI evidence is required.
+
+**Ownership amendment (coordinator, 2026-10-23, after PR #353 round 1).** The worker reported both missing seams correctly. Two additions; nothing else changes:
+- **`ios/Services/Authentication/PrivateReadGate.swift`, additive only.** Register the new read's scope and its start verb beside the existing private reads, as F30 did. Change no existing scope or check.
+- **`core/src/ffi/job_configuration/tests.rs`.** The FFI tests need the crate-internal recording host.
+
+PR #353 (head af9e5f8) may resubmit as it is, with the exact-head macOS run linked in the PR body.
 
 ### F44
 
@@ -3716,4 +3726,49 @@ Acceptance:
 
    All fixture content is synthetic.
 4. **A shared helper** in `ios/UITests/Fixtures/` launches the app with a fixture. A UI test in it opens each fixture and asserts one identifying element. Exact-head macOS CI evidence is required.
+
+### F46
+
+Schedule a reminder whose day and clock time sit on either side of the task
+
+"Remind me today to call the dentist at 10am" is held for correction and never scheduled. The maintainer found it on the phone on 2026-10-23, and a live replay on main 3dee81f with `claude-haiku-5-5` (capture at 07:00 America/Los_Angeles) confirmed it:
+- The model's proposal is right: `explicit`, `2026-10-23T10:00:00-07:00`, with the reminder span "today to call the dentist at 10am".
+- Core still holds it. The F28 grammar (`core/src/time/expression.rs`, module comment) knows two shapes: time first ("today at 10am to call the dentist") and task first ("to call the dentist today at 10am"). Both of those replay correctly.
+- It does not know the split shape, where the day and the clock sit on either side of the task. The span covering day, task and clock is not a time expression. The clock alone is day-less, and the sentence names a day before it, so it fails closed.
+
+This is a new shape, not a hole in F28's rule, so per F28's own instruction it is a separate task, not another F28 extension.
+
+Owned paths: `core/src/time/`, `core/tests/time/`, `core/tests/proposal_application/`, and `fixtures/intent/contrastive-fixtures.json` (only to add the two fixtures below, and any fixture-count constants that adding them requires in `core/tests/fixture_validation/` and `core/tests/live_providers/`).
+
+Dependencies: F29, which owns `core/tests/proposal_application/` until it lands.
+
+Acceptance:
+
+1. **The split shape is a covered time expression,** in either order, in one sentence:
+   - day, task, clock: "remind me today to call the dentist at 10am", "Remind me Friday to call Sam at 3 p.m.";
+   - clock, task, day: "remind me at 10am to call the dentist tomorrow".
+
+   All of these must hold:
+   - the first part directly follows the request prefix, and the last part ends the sentence, apart from closing punctuation or a filler;
+   - each part is a single complete expression that F28's grammar already accepts on its own (a day, or a clock that names no day);
+   - the task between them holds no clause mark and no temporal token, and opens with `to` or a filler as in F28's time-first rule;
+   - the whole-capture rule still applies: no other sentence may hold a temporal token.
+
+   The proposal's span may be the whole stretch from the first part to the last, or the clock part alone. Either is covered only when the sentence has exactly this shape.
+2. **Core resolves the day and the clock together** and schedules only when the model's instant equals that resolution, in the capture's zone. A different instant is rejected through the existing guard, as for any explicit reminder.
+3. **Everything F28 holds for correction stays held**, and is tested:
+   - two days ("remind me today to call Sam tomorrow at 10am");
+   - two clocks;
+   - a clause mark in the task ("today to call the dentist, about the bill, at 10am");
+   - a number or time word in the task ("today to call the dentist about 2 fillings at 10am");
+   - a hedge ("maybe today to call … at 10am"), per F29;
+   - a temporal token in another sentence;
+   - a day or clock part that is not complete on its own ("today to call … at 10").
+
+   Every existing `core/tests/time/` and `proposal_application` test passes unchanged.
+4. **Tests.**
+   - Guard-table tests for each positive and negative case.
+   - End-to-end `proposal_application` tests, using `apply_clock_proposal` as the F28 tests do, for the three positive captures with both span forms, and for each negative capture.
+   - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
+5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
 
