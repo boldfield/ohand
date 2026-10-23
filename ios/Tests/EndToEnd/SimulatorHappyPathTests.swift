@@ -147,7 +147,8 @@ final class SimulatorHappyPathTests: XCTestCase {
         unlock()
         // The OS-side scheduling pass compares the due time with the device clock, which this suite does not own, so the due
         // instant is derived from the controlled clock but placed decades out to stay in the future on any real date.
-        let due = utcCalendar.date(byAdding: .year, value: 25, to: fixedNow)!
+        let decadesOut = utcCalendar.date(byAdding: .year, value: 25, to: fixedNow)!
+        let due = utcCalendar.date(bySettingHour: 9, minute: 0, second: 0, of: decadesOut)!
         let formatter = DateFormatter()
         formatter.calendar = utcCalendar
         formatter.timeZone = utcCalendar.timeZone
@@ -163,7 +164,7 @@ final class SimulatorHappyPathTests: XCTestCase {
             "the saved capture is classified as an action")
 
         // Explicit reminder scheduling reaches the (fake) OS center.
-        XCTAssertTrue(pump { self.reminderRequest() != nil }, "the explicit reminder was handed to the OS")
+        XCTAssertTrue(pump { self.reminderRequest() != nil }, "the explicit reminder was handed to the OS: reminders=\(scalar("SELECT group_concat(request_state || '/' || schedule_state || '/' || IFNULL(unschedulable_reason, '-'), ';') FROM reminders")) words=\(words)")
         let request = try XCTUnwrap(reminderRequest())
         let notification = try XCTUnwrap(NotificationIdentifier(rawValue: request.identifier))
         XCTAssertEqual(
