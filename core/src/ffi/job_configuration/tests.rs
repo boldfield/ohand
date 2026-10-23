@@ -801,3 +801,19 @@ fn a_locked_read_is_refused_and_a_scope_outside_the_session_sees_nothing() {
     assert_eq!(work_rerun["moved"], 0);
     assert_eq!(store.jobs(&item_id).len(), 1);
 }
+
+#[test]
+fn label_shaped_stored_text_is_reported_as_other_never_echoed() {
+    let _guard = serial();
+    let store = Store::new("rerun-label-shaped");
+    store.configure("primary");
+    store.waiting_capture(1);
+    store.fail_next_job("call_dr_smith_about_results");
+    let mut session = Session::over(&store.path);
+
+    let listed = list_failed(&mut session);
+    let entries = listed["failed"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["failure_reason"], "other");
+    assert!(!listed.to_string().contains("smith"));
+}

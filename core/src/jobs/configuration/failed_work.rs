@@ -17,6 +17,7 @@ use crate::interpretation::enqueue::{
     enqueue_planned_interpretation, resolve_profile_pin, InterpretationPlan,
 };
 use crate::interpretation::instructions::M1_INSTRUCTION_VERSION;
+use crate::jobs::health::KNOWN_REASONS;
 use crate::privacy::routing::JOB_TYPE_INTERPRET;
 use crate::retrieval::recent::parse_cursor;
 use crate::store::events::ItemScope;
@@ -36,7 +37,6 @@ const UNSUPPORTED_JOB_VERSION_REASON: &str = "unsupported_job_version";
 const CURSOR_SEPARATOR: char = '|';
 /// Reported when a stored failure reason is not a plain machine label.
 const OTHER_REASON: &str = "other";
-const MAX_REASON_BYTES: usize = 64;
 
 /// Whether running the failed work again could succeed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,15 +201,10 @@ fn failed_rows(
     Ok(rows)
 }
 
-/// A stored reason is already a fixed label; anything else is reported as `other` so no text
-/// leaves the store through this read.
+/// Reports a stored reason only when it is in the closed health vocabulary; label-shaped text
+/// that is not listed there is reported as `other`, so no text leaves the store through this read.
 fn machine_label(reason: &str) -> String {
-    let plain = !reason.is_empty()
-        && reason.len() <= MAX_REASON_BYTES
-        && reason
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-    if plain {
+    if KNOWN_REASONS.contains(&reason) {
         reason.to_string()
     } else {
         OTHER_REASON.to_string()
