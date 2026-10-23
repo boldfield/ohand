@@ -475,8 +475,9 @@ impl Proposal {
     pub fn validate_identifiers(&self) -> Result<(), ProposalError> {
         parse_uuid(&self.proposal_id, "proposal_id")?;
         parse_uuid(&self.item_id, "item_id")?;
-        if !crate::providers::contracts::InterpretationRequest::is_valid_capture_id(&self.capture_id)
-        {
+        if !crate::providers::contracts::InterpretationRequest::is_valid_capture_id(
+            &self.capture_id,
+        ) {
             return Err(ProposalError::InvalidIdentifier {
                 field: "capture_id",
             });
