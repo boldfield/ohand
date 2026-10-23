@@ -107,6 +107,42 @@ public final class JobConfigurationService: @unchecked Sendable {
         return moved
     }
 
+    /// The active notes whose interpretation failed and was not run again, newest first, one page at a time: item, capture
+    /// time, a machine failure label, the pin, and whether running again could work. No text. Pass the previous page's
+    /// `nextCursor` as `cursor`. `limit` (at least 1) narrows the page; the core caps it at 100.
+    public func failedInterpretations(limit: Int? = nil, cursor: String? = nil) async throws
+        -> JobConfigurationFailedInterpretations
+    {
+        guard limit.map({ $0 >= 1 }) ?? true, cursor.map(Self.isIdentifier) ?? true else {
+            throw JobConfigurationError.invalidRequest
+        }
+        let answer = try await perform(
+            .failedInterpretations(readScopes: [], limit: limit, cursor: cursor), isRead: true)
+        guard case .failedInterpretations(let page) = answer else { throw JobConfigurationError.unreadable }
+        return page
+    }
+
+    /// Runs the failed interpretations of `itemIDs` again (at most 100): each gets a new job pinned to what the core
+    /// selects now, and the failed job is left as it was. Items that cannot move are reported with a reason. Repeating
+    /// the call creates nothing.
+    public func rerunFailedInterpretations(itemIDs: [String]) async throws -> JobConfigurationRerunResult {
+        guard !itemIDs.isEmpty, itemIDs.count <= 100, itemIDs.allSatisfy(Self.isIdentifier) else {
+            throw JobConfigurationError.invalidRequest
+        }
+        return try await rerun(.items(itemIDs))
+    }
+
+    /// Runs again every failed interpretation `failedInterpretations` lists, newest first, at most 100 per call.
+    public func rerunAllFailedInterpretations() async throws -> JobConfigurationRerunResult {
+        try await rerun(.allListed)
+    }
+
+    private func rerun(_ selection: JobConfigurationRerunSelection) async throws -> JobConfigurationRerunResult {
+        let answer = try await perform(.rerunFailedInterpretations(readScopes: [], selection: selection), isRead: false)
+        guard case .rerun(let result) = answer else { throw JobConfigurationError.unreadable }
+        return result
+    }
+
     private func perform(_ command: JobConfigurationCommand, isRead: Bool) async throws -> JobConfigurationAnswer {
         guard let authorization = session.currentAuthorization() else { throw JobConfigurationError.notAuthenticated }
         let result = await withCheckedContinuation {

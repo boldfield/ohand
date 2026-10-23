@@ -19,6 +19,23 @@ public enum JobConfigurationCommand: Equatable, Sendable {
     /// Moves the route's waiting unpinned interpretation work onto the profile the core selects now, when that profile
     /// is authorized for the route. Runs only when asked; the core moves a bounded batch per call.
     case repinWaitingWork(routeID: String)
+    /// The active items whose newest `interpret` job ended `failed` and was not since replaced, newest first, one page at
+    /// a time. `readScopes` is what the session may read; the client states it, the core refuses an empty list.
+    case failedInterpretations(readScopes: [CoreExportScope], limit: Int?, cursor: String?)
+    /// Runs the selected failed items again: a new `interpret` job each, pinned to what the core selects now.
+    case rerunFailedInterpretations(readScopes: [CoreExportScope], selection: JobConfigurationRerunSelection)
+
+    /// The same command with `readScopes` replaced, for the commands that carry them; any other command is unchanged.
+    public func withReadScopes(_ scopes: [CoreExportScope]) -> JobConfigurationCommand {
+        switch self {
+        case .failedInterpretations(_, let limit, let cursor):
+            return .failedInterpretations(readScopes: scopes, limit: limit, cursor: cursor)
+        case .rerunFailedInterpretations(_, let selection):
+            return .rerunFailedInterpretations(readScopes: scopes, selection: selection)
+        default:
+            return self
+        }
+    }
 
     fileprivate var request: Request {
         switch self {
@@ -36,6 +53,15 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             return Request(command: "revoke_profile", profileVersion: profileVersion)
         case .repinWaitingWork(let routeID):
             return Request(command: "repin_waiting_work", routeID: routeID)
+        case .failedInterpretations(let readScopes, let limit, let cursor):
+            return Request(command: "failed_interpretations", limit: limit, cursor: cursor, readScopes: readScopes)
+        case .rerunFailedInterpretations(let readScopes, let selection):
+            switch selection {
+            case .items(let itemIDs):
+                return Request(command: "rerun_failed_interpretations", readScopes: readScopes, itemIDs: itemIDs)
+            case .allListed:
+                return Request(command: "rerun_failed_interpretations", readScopes: readScopes, allListed: true)
+            }
         }
     }
 
@@ -49,6 +75,10 @@ public enum JobConfigurationCommand: Equatable, Sendable {
         var newProfileVersion: String?
         var routeID: String?
         var after: String?
+        var cursor: String?
+        var readScopes: [CoreExportScope]?
+        var itemIDs: [String]?
+        var allListed: Bool?
 
         enum CodingKeys: String, CodingKey {
             case command
@@ -59,7 +89,118 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             case newProfileVersion = "new_profile_version"
             case routeID = "route_id"
             case after
+            case cursor
+            case readScopes = "read_scopes"
+            case itemIDs = "item_ids"
+            case allListed = "all_listed"
         }
+    }
+}
+
+/// Which failed items a rerun covers.
+public enum JobConfigurationRerunSelection: Equatable, Sendable {
+    /// These items; the core takes at most 100.
+    case items([String])
+    /// Every item the failed-work read lists, newest first, at most 100 per call.
+    case allListed
+}
+
+/// Whether running failed work again could succeed. Raw values are the core's.
+public enum JobConfigurationRecovery: String, Decodable, Equatable, Sendable {
+    /// A provider is allowed now, so a new job can be pinned and sent.
+    case runAgain = "run_again"
+    /// Nothing can run until the person changes a setting.
+    case changeSettings = "change_settings"
+}
+
+/// One item whose interpretation failed. Carries no item text.
+public struct JobConfigurationFailedInterpretation: Decodable, Equatable, Sendable {
+    public let itemID: String
+    /// RFC 3339: when the note was captured.
+    public let capturedAt: String
+    /// The job's failure reason as a fixed machine label.
+    public let failureReason: String
+    /// Whether the failed job was pinned to a provider profile.
+    public let pinned: Bool
+    public let profileVersion: String?
+    public let recovery: JobConfigurationRecovery
+
+    public init(
+        itemID: String, capturedAt: String, failureReason: String, pinned: Bool, profileVersion: String?,
+        recovery: JobConfigurationRecovery
+    ) {
+        self.itemID = itemID
+        self.capturedAt = capturedAt
+        self.failureReason = failureReason
+        self.pinned = pinned
+        self.profileVersion = profileVersion
+        self.recovery = recovery
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case itemID = "item_id"
+        case capturedAt = "captured_at"
+        case failureReason = "failure_reason"
+        case pinned
+        case profileVersion = "profile_version"
+        case recovery
+    }
+}
+
+/// One page of failed interpretations and the cursor of the next page (`nil` on the last).
+public struct JobConfigurationFailedInterpretations: Decodable, Equatable, Sendable {
+    public let failed: [JobConfigurationFailedInterpretation]
+    public let nextCursor: String?
+
+    public init(failed: [JobConfigurationFailedInterpretation], nextCursor: String?) {
+        self.failed = failed
+        self.nextCursor = nextCursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case failed
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// Why an item was not run again. Raw values are the core's.
+public enum JobConfigurationSkipReason: String, Decodable, Equatable, Sendable {
+    /// No failed, unreplaced interpretation the session may read: unknown, deleted, not failed or already run again.
+    case notFailed = "not_failed"
+    /// No provider is allowed for the item now.
+    case noProviderAllowed = "no_provider_allowed"
+}
+
+public struct JobConfigurationSkippedItem: Decodable, Equatable, Sendable {
+    public let itemID: String
+    public let reason: JobConfigurationSkipReason
+
+    public init(itemID: String, reason: JobConfigurationSkipReason) {
+        self.itemID = itemID
+        self.reason = reason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case itemID = "item_id"
+        case reason
+    }
+}
+
+/// The answer to `rerunFailedInterpretations`: how many items got a new job and which were skipped, with reasons.
+public struct JobConfigurationRerunResult: Decodable, Equatable, Sendable {
+    public let moved: Int
+    public let skipped: Int
+    public let skippedItems: [JobConfigurationSkippedItem]
+
+    public init(moved: Int, skipped: Int, skippedItems: [JobConfigurationSkippedItem]) {
+        self.moved = moved
+        self.skipped = skipped
+        self.skippedItems = skippedItems
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case moved, skipped
+        case skippedItems = "skipped_items"
     }
 }
 
@@ -197,6 +338,8 @@ public enum JobConfigurationAnswer: Equatable, Sendable {
     case requeueRecord(JobConfigurationRequeueRecord?)
     case revoked(profileVersion: String)
     case repinned(moved: Int)
+    case failedInterpretations(JobConfigurationFailedInterpretations)
+    case rerun(JobConfigurationRerunResult)
 
     private struct RecordEnvelope: Decodable {
         let record: JobConfigurationRequeueRecord?
@@ -228,6 +371,10 @@ public enum JobConfigurationAnswer: Equatable, Sendable {
             return .revoked(profileVersion: try decoder.decode(RevokedEnvelope.self, from: data).profileVersion)
         case .repinWaitingWork:
             return .repinned(moved: try decoder.decode(RepinEnvelope.self, from: data).moved)
+        case .failedInterpretations:
+            return .failedInterpretations(try decoder.decode(JobConfigurationFailedInterpretations.self, from: data))
+        case .rerunFailedInterpretations:
+            return .rerun(try decoder.decode(JobConfigurationRerunResult.self, from: data))
         }
     }
 }
