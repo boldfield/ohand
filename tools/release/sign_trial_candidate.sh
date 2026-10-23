@@ -26,8 +26,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCHEME="${SCHEME:-OhAndApp}"
 INSTALL_FLAG="--install"
 TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+PROFILE_MAP_FLAG=""
 
-# Check for no-install flag
+# Check for flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-install)
@@ -45,32 +46,42 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# Generate build info
+# Generate build info into a temporary file
+BUILDINFO_FILE=$(mktemp)
+trap "rm -f '$BUILDINFO_FILE'" EXIT
+
 echo "Generating build info for trial candidate..." >&2
 python3 "$REPO_ROOT/tools/release/build_info.py" \
     --json \
     --timestamp "$TIMESTAMP" \
-    --export-vars /tmp/build_info.sh
+    --export-vars "$BUILDINFO_FILE"
 
-source /tmp/build_info.sh
-rm /tmp/build_info.sh
+source "$BUILDINFO_FILE"
 
 echo "Build identifier: $build_identifier" >&2
 echo "Revision: $build_revision_short" >&2
 echo "Timestamp: $collected_at" >&2
 
-# Ensure output directory exists
+# Ensure output directories exist
 mkdir -p "$REPO_ROOT/docs/releases/m1-trial"
+mkdir -p "$REPO_ROOT/docs/validation/evidence/apple-signing"
+
+# OhAndApp requires profile map argument
+if [ "$SCHEME" = "OhAndApp" ]; then
+    PROFILE_MAP_FLAG="--profile-map"
+fi
 
 # Run the signing script (with or without install depending on flags)
 echo "Signing $SCHEME for trial..." >&2
 if [ -n "$INSTALL_FLAG" ]; then
     python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
         --scheme "$SCHEME" \
+        $PROFILE_MAP_FLAG \
         $INSTALL_FLAG
 else
     python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
-        --scheme "$SCHEME"
+        --scheme "$SCHEME" \
+        $PROFILE_MAP_FLAG
 fi
 
 echo "Trial candidate signed successfully" >&2

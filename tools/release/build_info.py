@@ -6,8 +6,9 @@ Build identifier format: <revision-prefix>-<run-id>
 - revision-prefix: first 8 characters of the git commit SHA at build time
 - run-id: 8-character hex identifier from collection/build timestamp
 
-The identifier remains stable across rebuilds of the same revision, and uniquely
-identifies the build metadata (revision, timestamp, and collection conditions).
+The identifier uniquely identifies a specific build collected at a specific time.
+Given the same revision and timestamp, it is deterministic and reproducible.
+Rebuilding at a different time produces a different identifier.
 """
 
 import subprocess
