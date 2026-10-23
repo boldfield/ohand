@@ -123,7 +123,7 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.firstGroupEntryIDs, from: catalog)),
                        ["prompt-settings", "voice-recovery"])
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.secondGroupEntryIDs, from: catalog)),
-                       ["provider-settings", "privacy-settings", "permissions-settings", "audio-retention"])
+                       ["provider-settings", "privacy-settings", "permissions-settings", "status-settings", "audio-retention"])
         XCTAssertEqual(SettingsRootView.secondGroupEntryIDs.last, SettingsRootView.exportEntryID)
     }
 
@@ -146,5 +146,15 @@ final class SettingsRootViewTests: XCTestCase {
         settle { model.phase == .locked }
         XCTAssertEqual(model.phase, .locked)
         XCTAssertTrue(model.routes.isEmpty)
+    }
+
+    /// The status screen is reachable from the app shell: the settings root lists its row, and `AppServices` assembles
+    /// the model the catalog entry presents.
+    func testStatusRowIsListedAndTheContextCarriesTheAssembledStatusModel() throws {
+        host()
+        settle { rendered["status-settings"] != nil }
+        XCTAssertEqual(rendered["status-settings"], "Status")
+        XCTAssertNotNil(services.managementContext.statusModel)
+        XCTAssertNotNil(ManagementCatalog.settingsSections.first { $0.id == "status-settings" })
     }
 }
