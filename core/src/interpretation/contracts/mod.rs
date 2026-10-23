@@ -475,7 +475,11 @@ impl Proposal {
     pub fn validate_identifiers(&self) -> Result<(), ProposalError> {
         parse_uuid(&self.proposal_id, "proposal_id")?;
         parse_uuid(&self.item_id, "item_id")?;
-        parse_uuid(&self.capture_id, "capture_id")?;
+        if !InterpretationRequest::is_valid_capture_id(&self.capture_id) {
+            return Err(ProposalError::InvalidIdentifier {
+                field: "capture_id",
+            });
+        }
         parse_uuid(&self.request_version, "request_version")?;
         let source_revision = u64::try_from(self.source_revision)
             .map_err(|_| ProposalError::NegativeRevision(self.source_revision))?;
