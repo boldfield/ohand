@@ -145,7 +145,15 @@ final class SimulatorHappyPathTests: XCTestCase {
 
     func testSilentCaptureThroughReminderSchedulingAndNotificationActionCompletion() throws {
         unlock()
-        let words = "remind me 2026-01-16 09:00:00 to call mom"
+        // The OS-side scheduling pass compares the due time with the device clock, which this suite does not own, so the due
+        // instant is derived from the controlled clock but placed decades out to stay in the future on any real date.
+        let due = utcCalendar.date(byAdding: .year, value: 25, to: fixedNow)!
+        let formatter = DateFormatter()
+        formatter.calendar = utcCalendar
+        formatter.timeZone = utcCalendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let words = "remind me \(formatter.string(from: due)) to call mom"
 
         let itemID = try captureSilently(words)
 
