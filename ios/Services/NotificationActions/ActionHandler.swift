@@ -340,6 +340,9 @@ final class ActionHandler: @unchecked Sendable {
             case .complete:
                 guard authorization.currentAuthorization() != nil else { return .deferred }
                 _ = try await core.complete(notificationID: entry.notificationID, itemID: entry.targetID)
+            case .discardOpen:
+                // Markers are read by `adoptDurableDiscards` and never delivered.
+                return .retained
             case .open:
                 // A tap the person declined to unlock for is never opened, even if a session authenticated since.
                 if isDroppedOpen(entry) { return .discarded }
