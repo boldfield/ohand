@@ -68,16 +68,21 @@ final class CaptureEntryViewTests: XCTestCase {
         retainedWindow?.rootViewController?.view.layoutIfNeeded()
     }
 
-    /// Lays the hosted view out and turns the run loop until the condition holds; fails the test naming it otherwise.
+    /// Settles the hosted view in short slices, exactly as `settle(for:)` does, until the condition holds; fails the test
+    /// naming it otherwise. Forcing a layout on every run-loop turn instead makes the frame preference update more than
+    /// once per frame, which SwiftUI drops.
     private func settle(
         until condition: String, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line,
         _ holds: () -> Bool
     ) {
-        waitUntilPumping(condition, timeout: timeout, file: file, line: line) {
-            // The frames are reported by the layout pass, which only runs for a view marked as needing one.
-            self.retainedWindow?.rootViewController?.view.setNeedsLayout()
-            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
-            return holds()
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            settle(for: 0.1)
+            if holds() { return }
+            if Date() >= deadline {
+                XCTFail("timed out after \(timeout) s waiting for: \(condition)", file: file, line: line)
+                return
+            }
         }
     }
 
