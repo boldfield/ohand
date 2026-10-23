@@ -348,6 +348,9 @@ final class AppRealServicesTests: XCTestCase {
         let services = try makeInjectedServices(
             grant: nil, center: center, lifecycleCenter: NotificationCenter(), recognizer: nil)
         services.start(isActive: true)
+        // A reminder pass that is asked for while another is running joins it. The launch pass began before the save, so
+        // it must be over before the save, or the pass after the drain could join it and install nothing.
+        wait("the launch pass has finished") { services.lifecycle.finishedPassCount >= 1 }
         services.root.saveText(
             captureID: UUID().uuidString, text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
         ) { _ in }

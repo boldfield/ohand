@@ -281,11 +281,13 @@ final class WalkthroughUITests: XCTestCase {
         if app.keyboards.firstMatch.waitForExistence(timeout: 5) {
             let done = app.buttons[homeDone]
             XCTAssertTrue(done.waitForExistence(timeout: screenTimeout), "Done did not replace Settings while the keyboard is up")
-            done.tap()
+            tapWhenHittable(done, step: "put the keyboard away", elementName: "the Done button")
         }
-        let gone = NSPredicate(format: "count == 0")
-        expectation(for: gone, evaluatedWith: app.keyboards)
-        waitForExpectations(timeout: 10)
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: app.keyboards)
+        // 20 s rather than 10: the keyboard slides away with an animation that a loaded simulator slows right down.
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [gone], timeout: 20), .completed,
+            "step \"put the keyboard away\": the keyboard was still showing 20 s after Done was tapped")
     }
 
     /// Taps a home link and waits for the destination. The first open per launch shows the system Face ID prompt,
