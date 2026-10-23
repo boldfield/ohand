@@ -3813,7 +3813,9 @@ Owned paths: test code only. That is the test files named above and the twelve f
 
 No production code.
 
-Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`) and F42 (owns one `HomeRecentsModelTests` test). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+
+Amendment (2026-10-23): F47 no longer waits for F42. F42 was blocked until F47 landed, so the two waited on each other. F42's pull request no longer edits `ios/Tests/HomeRecents/`, and its remaining test edits are in `ios/Tests/VoiceCapture/`, outside F47's scope. F47 now owns `testAFailedReadKeepsTheListAndOffersARetry`; the F42 amendment's permission to edit that test is withdrawn. F42 resubmits after F47 lands and needs its own green exact-head run.
 
 Acceptance:
 
