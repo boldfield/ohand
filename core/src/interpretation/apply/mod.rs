@@ -2524,9 +2524,12 @@ fn request_hedge(tokens: &[IntentToken], cue_start: usize, verb: &str) -> Option
 /// across a sentence end ("Sam called maybe. Remind me"): reading too much as hedged only keeps a
 /// reminder unscheduled, never schedules one the speaker did not confirm.
 fn hedged_by_earlier_clauses(tokens_before_cue: &[IntentToken]) -> bool {
+    // A quoted word is reported speech ('Sam said "Maybe."'), not the speaker's own hedge, so it
+    // counts as content and stops the walk.
     let is_hedge_or_politeness = |token: &&IntentToken| {
-        HEDGE_WORDS.contains(&token.text.as_str())
-            || POLITENESS_WORDS.contains(&token.text.as_str())
+        !token.quoted
+            && (HEDGE_WORDS.contains(&token.text.as_str())
+                || POLITENESS_WORDS.contains(&token.text.as_str()))
     };
     let is_hedge = |token: &IntentToken| HEDGE_WORDS.contains(&token.text.as_str());
     let Some(mut clause_end) = tokens_before_cue

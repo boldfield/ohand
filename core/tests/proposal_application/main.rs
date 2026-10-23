@@ -2799,6 +2799,27 @@ fn a_hedge_before_an_earlier_content_clause_does_not_reach_the_request() {
 }
 
 #[test]
+fn a_quoted_hedge_in_an_earlier_clause_does_not_hedge_the_request() {
+    // A quoted hedge is reported speech, not the speaker's own, so the request stays plain.
+    for text in [
+        "Sam said \"Maybe.\" Remind me Friday at 3 p.m. to call him",
+        "\"Maybe.\" Remind me Friday at 3 p.m. to call Sam",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            if text.ends_with("him") {
+                "call him"
+            } else {
+                "call Sam"
+            },
+        );
+        assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
+    }
+}
+
+#[test]
 fn an_unhedged_clock_request_still_schedules() {
     let (fixture, disposition) = apply_clock_proposal(
         "Remind me Friday at 3 p.m. to call Sam",
