@@ -12,9 +12,10 @@ protocol JobConfigurationCore: Sendable {
 }
 
 /// Runs job-configuration requests over a `CoreHandle`: the production `JobConfigurationCore`. The reads of stored
-/// state (`jobsPinnedToProfile`, `jobsRetiredByRevocation`, `requeueRecord`) go only through the `PrivateReadGate`, so a capture-only session never
+/// state (`jobsPinnedToProfile`, `jobsRetiredByRevocation`, `requeueRecord`, `failedInterpretations`) go only through the `PrivateReadGate`, so a capture-only session never
 /// reaches the core and an answer that arrives after a relock is dropped undecoded. Mutations go straight to the core;
-/// `JobConfigurationService` requires an authenticated session before it sends one. The core answers on its
+/// `JobConfigurationService` requires an authenticated session before it sends one. The read scopes of the failed-work
+/// commands are the gate's own authorized scopes; whatever the caller put in the command is replaced. The core answers on its
 /// single event handler, so the owner of that handler must forward every event to `handle(_:)`; it returns `true` when
 /// the event answered one of this client's operations. Operation IDs start at `firstOperationID`, far from the ranges the
 /// other services use. Call `shutDown()` before closing the core so no completion is left waiting.
@@ -68,6 +69,11 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
                     operationID: operationID, profileVersion: profileVersion, limit: limit, after: after)
             case .requeueRecord(let jobID):
                 try gate.startRequeueRecord(operationID: operationID, jobID: jobID)
+            case .failedInterpretations(_, let limit, let cursor):
+                try gate.startFailedInterpretations(operationID: operationID, limit: limit, cursor: cursor)
+            case .rerunFailedInterpretations:
+                try core.startJobConfiguration(
+                    operationID: operationID, command: command.withReadScopes(gate.authorizedReadScopes))
             case .requeueJob, .revokeProfile, .repinWaitingWork:
                 try core.startJobConfiguration(operationID: operationID, command: command)
             }
@@ -85,8 +91,8 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
 
     private static func isStoredStateRead(_ command: JobConfigurationCommand) -> Bool {
         switch command {
-        case .jobsPinnedToProfile, .jobsRetiredByRevocation, .requeueRecord: return true
-        case .requeueJob, .revokeProfile, .repinWaitingWork: return false
+        case .jobsPinnedToProfile, .jobsRetiredByRevocation, .requeueRecord, .failedInterpretations: return true
+        case .requeueJob, .revokeProfile, .repinWaitingWork, .rerunFailedInterpretations: return false
         }
     }
 
