@@ -236,6 +236,12 @@ final class CompositionRootTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // A core read issued before a root's shutdown (a lifecycle step, a health or status read) completes on its own
+        // queue, so its result buffer is freed a moment after the test body ends. Wait for that, bounded, before
+        // judging a leak; a buffer that is still outstanding after the wait is a real one.
+        _ = pump(
+            until: { CoreHandle.liveResultBufferCount == self.baselineBuffers && CoreHandle.liveHandleCount == self.baselineHandles },
+            timeout: 10)
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)

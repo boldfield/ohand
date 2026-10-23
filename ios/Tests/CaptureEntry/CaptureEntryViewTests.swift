@@ -55,6 +55,9 @@ final class CaptureEntryViewTests: XCTestCase {
         window.rootViewController = controller
         window.makeKeyAndVisible()
         retainedWindow = window
+        settle(until: "the header and composer have reported their frames") {
+            self.frames[CaptureEntryView.headerIdentifier] != nil && self.frames[CaptureEntryView.composerIdentifier] != nil
+        }
         settle()
     }
 
@@ -64,6 +67,19 @@ final class CaptureEntryViewTests: XCTestCase {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
         retainedWindow?.rootViewController?.view.layoutIfNeeded()
     }
+
+    /// Lays the hosted view out and turns the run loop until the condition holds; fails the test naming it otherwise.
+    private func settle(
+        until condition: String, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line,
+        _ holds: () -> Bool
+    ) {
+        waitUntilPumping(condition, timeout: timeout, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
+    }
+
+    private func isDrawn(_ identifier: String) -> Bool { frames[identifier].map { $0 != .zero } ?? false }
 
     private func frame(_ identifier: String) -> CGRect { frames[identifier] ?? .zero }
 
@@ -136,14 +152,15 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertNil(frames[HomeComposer.disabledIdentifier(HomeComposer.fieldIdentifier)], file: file, line: line)
     }
 
-    private func waitUntilFocused(timeout: TimeInterval = 2) -> Bool {
+    private func waitUntilFocused(timeout: TimeInterval = 5) -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while frames[HomeComposer.focusedIdentifier] == nil, Date() < deadline { settle(for: 0.1) }
         return frames[HomeComposer.focusedIdentifier] != nil
     }
 
-    private func post(_ name: Notification.Name) {
+    private func post(_ name: Notification.Name, until condition: String, _ holds: () -> Bool) {
         NotificationCenter.default.post(name: name, object: nil)
+        settle(until: condition, holds)
         settle()
     }
 
@@ -179,13 +196,17 @@ final class CaptureEntryViewTests: XCTestCase {
         host()
         XCTAssertNotEqual(frame(HomeHeader.settingsIdentifier), .zero)
 
-        post(UIResponder.keyboardWillShowNotification)
+        post(UIResponder.keyboardWillShowNotification, until: "Done replaces Settings") {
+            self.isDrawn(HomeHeader.doneIdentifier) && self.frames[HomeHeader.settingsIdentifier] == nil
+        }
         let done = frame(HomeHeader.doneIdentifier)
         XCTAssertNotEqual(done, .zero, "Done is shown while the keyboard is up")
         XCTAssertGreaterThanOrEqual(done.height, Self.minimumTouchTarget)
         XCTAssertNil(frames[HomeHeader.settingsIdentifier], "Settings is replaced by Done")
 
-        post(UIResponder.keyboardWillHideNotification)
+        post(UIResponder.keyboardWillHideNotification, until: "Settings is back and Done is gone") {
+            self.isDrawn(HomeHeader.settingsIdentifier) && self.frames[HomeHeader.doneIdentifier] == nil
+        }
         XCTAssertNotEqual(frame(HomeHeader.settingsIdentifier), .zero, "Settings is back once the keyboard is gone")
         XCTAssertNil(frames[HomeHeader.doneIdentifier])
     }
@@ -216,20 +237,27 @@ final class CaptureEntryViewTests: XCTestCase {
         assertComposerState("rest")
 
         model.textModel.updateText("buy oat milk")
-        settle()
+        settle(until: "the typing composer is drawn with Save") {
+            self.frames[CaptureEntryView.composerStateIdentifier("typing")] != nil && self.isDrawn(HomeComposer.saveIdentifier)
+        }
         assertComposerState("typing")
         assertHeaderAndComposerVisible(windowSize: Self.standardPhone, keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         model.textModel.updateText("")
         model.startRecording()
-        settle()
+        settle(until: "recording started and the recording composer is drawn") {
+            self.voice.startCount == 1 && self.frames[CaptureEntryView.composerStateIdentifier("recording")] != nil
+                && self.isDrawn(HomeComposer.stopIdentifier)
+        }
         XCTAssertEqual(voice.startCount, 1)
         assertComposerState("recording")
         assertHeaderAndComposerVisible(windowSize: Self.standardPhone, keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         model.cancelRecording()
         voice.state = .idle
-        settle()
+        settle(until: "the rest composer is drawn") {
+            self.frames[CaptureEntryView.composerStateIdentifier("rest")] != nil && self.isDrawn(HomeComposer.recordIdentifier)
+        }
         assertComposerState("rest")
         XCTAssertEqual(frame(CaptureEntryView.composerIdentifier).width, rest.width, accuracy: 0.5)
     }
@@ -240,7 +268,11 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
-        settle()
+        settle(until: "the in-flight save is stated and Record and Save are drawn disabled") {
+            self.isDrawn(CaptureEntryView.messageIdentifier)
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.recordIdentifier)] != nil
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)] != nil
+        }
 
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the in-flight save is stated")
         assertComposerStateName("typing")
@@ -249,7 +281,10 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertEqual(voice.startCount, 0, "Record does nothing while a save is in flight")
 
         textIngress.release()
-        settle()
+        settle(until: "the save settled and the rest composer is drawn") {
+            self.model.textModel.text == "" && self.frames[CaptureEntryView.composerStateIdentifier("rest")] != nil
+                && self.isDrawn(HomeComposer.recordIdentifier)
+        }
         assertComposerState("rest")
     }
 
@@ -260,10 +295,14 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
+        settle(until: "the save is in flight") { self.model.acknowledgment?.save == .saving }
         settle()
         XCTAssertNotNil(frames[HomeComposer.focusedIdentifier], "the field keeps focus while the save is in flight")
 
         textIngress.release()
+        settle(until: "the save settled and the composer cleared") {
+            self.model.textModel.text == "" && self.frames[CaptureEntryView.composerStateIdentifier("rest")] != nil
+        }
         settle()
         XCTAssertEqual(model.textModel.text, "", "the composer clears")
         XCTAssertNotNil(frames[HomeComposer.focusedIdentifier], "and keeps focus, so the keyboard stays up")
@@ -273,7 +312,9 @@ final class CaptureEntryViewTests: XCTestCase {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         model.textModel.updateText("   ")
-        settle()
+        settle(until: "Save is drawn disabled") {
+            self.frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)] != nil
+        }
         assertComposerStateName("typing")
         XCTAssertNotNil(
             frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)], "Save is disabled with nothing to save")
@@ -282,7 +323,7 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertNotNil(frames[HomeComposer.fieldIdentifier], "the text field stays enabled")
 
         model.textModel.updateText("  buy oat milk ")
-        settle()
+        settle(until: "Save is drawn enabled") { self.isDrawn(HomeComposer.saveIdentifier) }
         XCTAssertNotNil(frames[HomeComposer.saveIdentifier], "Save is enabled once there is something to save")
         XCTAssertNil(frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)])
     }
@@ -291,23 +332,36 @@ final class CaptureEntryViewTests: XCTestCase {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         voice.state = .requestingPermission
-        settle()
+        settle(until: "waiting for the microphone is stated and Record is drawn disabled") {
+            self.isDrawn(CaptureEntryView.messageIdentifier)
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.recordIdentifier)] != nil
+        }
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "waiting for the microphone is stated")
         assertComposerStateName("rest")
         assertEntryActionsDisabled(saveIsShown: false)
 
         model.textModel.updateText("buy oat milk")
-        settle()
+        settle(until: "the typing composer is drawn with Save disabled") {
+            self.frames[CaptureEntryView.composerStateIdentifier("typing")] != nil
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)] != nil
+        }
         assertComposerStateName("typing")
         assertEntryActionsDisabled(saveIsShown: true)
 
         voice.state = .finishing(captureID: "voice-1")
-        settle()
+        settle(until: "finishing the recording is stated with Record and Save disabled") {
+            self.isDrawn(CaptureEntryView.messageIdentifier)
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.recordIdentifier)] != nil
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)] != nil
+        }
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "finishing the recording is stated")
         assertEntryActionsDisabled(saveIsShown: true)
 
         voice.state = .idle
-        settle()
+        settle(until: "the typing composer is drawn with Record and Save enabled") {
+            self.isDrawn(HomeComposer.recordIdentifier) && self.isDrawn(HomeComposer.saveIdentifier)
+                && self.frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)] == nil
+        }
         assertComposerState("typing")
     }
 
@@ -318,14 +372,23 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
-        settle()
+        settle(until: "the composer cleared and the Saved pill and the message are shown") {
+            self.model.textModel.text == "" && self.frames[CaptureEntryView.savedPillIdentifier] != nil
+                && self.isDrawn(CaptureEntryView.messageIdentifier)
+        }
+        let pillShownAt = Date()
 
         XCTAssertEqual(model.textModel.text, "", "the composer clears")
         XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the Saved pill is shown")
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the reminder and processing state is visible")
         assertHeaderAndComposerVisible(windowSize: Self.standardPhone, keyboardHeight: Self.standardPhoneKeyboardHeight)
 
-        settle(for: CaptureEntryView.savedPillDuration + 0.6)
+        // The fade is timed from the pill's appearance, which on a loaded simulator is later than the save; wait for it
+        // to go rather than for a fixed time after the save.
+        settle(
+            until: "the Saved pill has faded",
+            timeout: max(0.1, CaptureEntryView.savedPillDuration + 3 - Date().timeIntervalSince(pillShownAt))
+        ) { self.frames[CaptureEntryView.savedPillIdentifier] == nil }
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the pill fades after about two seconds")
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the message outlives the pill")
     }
@@ -354,19 +417,27 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
+        settle(until: "the Saved pill is shown and the progress read is held") {
+            self.frames[CaptureEntryView.savedPillIdentifier] != nil && !reader.requestedItemIDs.isEmpty
+        }
         let savedAt = Date()
-        settle()
         XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the Saved pill is shown")
 
         settle(for: 1.2)
         reader.release()
-        settle()
+        settle(until: "the delayed progress read republished the acknowledgment") { self.model.acknowledgment?.progress != nil }
         XCTAssertNotNil(model.acknowledgment?.progress, "the delayed progress read republished the acknowledgment")
 
-        settle(for: max(0, CaptureEntryView.savedPillDuration + 0.6 - Date().timeIntervalSince(savedAt)))
+        // The pill's own timer runs from when it appeared (`savedAt`); the progress read must not have moved it.
+        settle(
+            until: "the Saved pill has faded on its own timer",
+            timeout: max(0.1, CaptureEntryView.savedPillDuration + 0.6 - Date().timeIntervalSince(savedAt))
+        ) { self.frames[CaptureEntryView.savedPillIdentifier] == nil }
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the progress read did not extend the pill")
 
+        let readsBeforeRefresh = reader.requestedItemIDs.count
         model.refreshProgress()
+        settle(until: "the foreground refresh asked for a read") { reader.requestedItemIDs.count > readsBeforeRefresh }
         reader.release()
         settle()
         XCTAssertEqual(model.acknowledgment?.savedItemID, "item-1")
@@ -378,18 +449,24 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
-        settle()
+        settle(until: "the first capture shows the Saved pill") { self.frames[CaptureEntryView.savedPillIdentifier] != nil }
         XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the first capture is Saved")
 
         textIngress.holdsCompletions = true
         textIngress.outcomes = [.notStaged(captureID: "text-capture-1")]
         model.textModel.updateText("call the dentist")
         model.saveText()
+        settle(until: "the second save is in flight and the pill is gone") {
+            self.model.acknowledgment?.save == .saving && self.frames[CaptureEntryView.savedPillIdentifier] == nil
+        }
         settle()
         XCTAssertEqual(model.acknowledgment?.save, .saving)
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the pill goes once the next save starts")
 
         textIngress.release()
+        settle(until: "the second save failed and the failure is stated") {
+            self.model.acknowledgment?.save == .notSaved && self.isDrawn(CaptureEntryView.messageIdentifier)
+        }
         settle()
         XCTAssertEqual(model.acknowledgment?.save, .notSaved)
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "Saved is never shown beside Not saved")
@@ -405,11 +482,14 @@ final class CaptureEntryViewTests: XCTestCase {
         textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
-        settle()
+        settle(until: "the first capture shows the Saved pill") { self.frames[CaptureEntryView.savedPillIdentifier] != nil }
         XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the first capture is Saved")
 
         voice.startResult = .failure(.microphoneDenied)
         model.startRecording()
+        settle(until: "the start failure is stated") {
+            self.voice.startCount == 1 && self.isDrawn(CaptureEntryView.noticeIdentifier)
+        }
         settle()
         XCTAssertEqual(voice.startCount, 1)
         XCTAssertEqual(model.recorderState, .idle, "nothing was recorded")
@@ -426,6 +506,9 @@ final class CaptureEntryViewTests: XCTestCase {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         model.textModel.updateText("buy oat milk")
         model.saveText()
+        settle(until: "the protected-data notice and the failure are shown") {
+            self.isDrawn(CaptureEntryView.noticeIdentifier) && self.isDrawn(CaptureEntryView.messageIdentifier)
+        }
         settle()
 
         XCTAssertEqual(model.textModel.text, "buy oat milk", "the text is kept")
@@ -449,7 +532,7 @@ final class CaptureEntryViewTests: XCTestCase {
         voice.startResult = .failure(.microphoneDenied)
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         model.startRecording()
-        settle()
+        settle(until: "the hosted home shows the notices") { self.isDrawn(CaptureEntryView.noticeIdentifier) }
         XCTAssertNotEqual(frame(CaptureEntryView.noticeIdentifier), .zero, "the hosted home shows the notices")
     }
 }

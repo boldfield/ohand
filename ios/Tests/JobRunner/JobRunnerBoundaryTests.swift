@@ -389,9 +389,13 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
             storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), metrics: metrics)
 
         session.service.activate()
-        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertTrue(
+            session.waitForFinishedDrains(1),
+            "the drain finished (started \(session.service.startedDrainCount), finished \(session.service.finishedDrainCount))")
 
-        XCTAssertEqual(metrics.records, [.processingFailure(.capabilityUnavailable)])
+        XCTAssertEqual(
+            metrics.records, [.processingFailure(.capabilityUnavailable)],
+            "drains started: \(session.service.startedDrainCount); last summary: \(String(describing: session.summary()))")
     }
 
     func testAnAllSuccessfulDrainReportsNoFailure() throws {

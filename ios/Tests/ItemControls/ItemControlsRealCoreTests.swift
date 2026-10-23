@@ -134,7 +134,10 @@ final class ItemControlsRealCoreTests: XCTestCase {
         host(AnyView(NavigationStack { SourceDetailView(model: detailModel, renderReporter: { [unowned self] id, shown in
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         }) }))
-        settle { detailModel.content != nil && controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle("the detail card and the controls loaded and are editable") {
+            detailModel.content != nil && controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier)
+                && onScreen.contains(ItemControlsView.editableIdentifier)
+        }
         XCTAssertTrue(onScreen.contains(ItemControlsView.sectionIdentifier), "the controls render under the detail card")
 
         // Someone else corrects the item after the controls loaded it.
@@ -148,7 +151,9 @@ final class ItemControlsRealCoreTests: XCTestCase {
         guard case .conflict(.text, _)? = controls.outcome else {
             return XCTFail("expected a conflict, got \(String(describing: controls.outcome))")
         }
-        settle { onScreen.contains(ItemControlsView.outcomeIdentifier) && detailModel.content?.currentText == "someone else's words" }
+        settle("the conflict message is on screen and the card shows the newer text") {
+            onScreen.contains(ItemControlsView.outcomeIdentifier) && detailModel.content?.currentText == "someone else's words"
+        }
         XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "the conflict message is on screen")
         XCTAssertEqual(controls.textDraft, "my words", "the draft is kept")
         XCTAssertEqual(detailModel.content?.currentText, "someone else's words", "the card agrees with the controls")
@@ -166,9 +171,9 @@ final class ItemControlsRealCoreTests: XCTestCase {
         host(AnyView(ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         })))
-        settle { onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle("the controls section is on screen") { onScreen.contains(ItemControlsView.sectionIdentifier) }
         controls.pendingType = .action
-        settle { onScreen.contains(ItemControlsView.actionWarningIdentifier) }
+        settle("the action warning is on screen") { onScreen.contains(ItemControlsView.actionWarningIdentifier) }
         XCTAssertTrue(onScreen.contains(ItemControlsView.actionWarningIdentifier))
         XCTAssertEqual(scalar("SELECT item_type FROM items WHERE item_id = '\(itemID)'"), "idea")
     }
@@ -178,7 +183,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         let reader = HookedDetailReader(root.itemDetails)
         let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
         hostControls(controls)
-        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle("the controls loaded and are on screen") { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
         let revisionBefore = try XCTUnwrap(controls.snapshot?.revision)
 
         controls.topicDraft = "garage"
@@ -194,7 +199,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertFalse(controls.canSaveTopic, "nothing can be sent against the old revision")
         XCTAssertEqual(
             scalar("SELECT COUNT(*) FROM events WHERE event_id LIKE 'user-correction:%'"), "1", "the save was stored")
-        settle {
+        settle("the saved and locked messages and the reload button are on screen") {
             onScreen.contains(ItemControlsView.outcomeIdentifier)
                 && onScreen.contains(ItemControlsView.refreshFailureIdentifier)
                 && onScreen.contains(ItemControlsView.reloadIdentifier)
@@ -209,7 +214,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertGreaterThan(controls.snapshot?.revision ?? 0, revisionBefore)
         XCTAssertEqual(controls.snapshot?.text, "call the roofer tomorrow")
         XCTAssertEqual(controls.topicDraft, "garage")
-        settle { !onScreen.contains(ItemControlsView.refreshFailureIdentifier) }
+        settle("the locked message is gone") { !onScreen.contains(ItemControlsView.refreshFailureIdentifier) }
         XCTAssertFalse(onScreen.contains(ItemControlsView.refreshFailureIdentifier))
 
         onMain { await controls.saveSessionTopic() }
@@ -222,7 +227,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         let reader = HookedDetailReader(root.itemDetails)
         let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
         hostControls(controls)
-        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle("the controls loaded and are on screen") { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
         let revisionBefore = try XCTUnwrap(controls.snapshot?.revision)
         try run { try await self.root.itemCorrections.correctText(
             commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revisionBefore,
@@ -243,7 +248,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertFalse(
             ItemControlsView.message(for: controls.outcome!, newerValuesShown: controls.refreshFailure == nil)
                 .contains("newer values are shown"))
-        settle {
+        settle("the conflict and locked messages are on screen") {
             onScreen.contains(ItemControlsView.outcomeIdentifier)
                 && onScreen.contains(ItemControlsView.refreshFailureIdentifier)
         }
@@ -264,8 +269,8 @@ final class ItemControlsRealCoreTests: XCTestCase {
         let reader = GatedDetailReader(root.itemDetails)
         let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
         hostControls(controls)
-        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
-        settle { onScreen.contains(ItemControlsView.editableIdentifier) }
+        settle("the controls loaded and are on screen") { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle("the fields are editable") { onScreen.contains(ItemControlsView.editableIdentifier) }
         XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "the fields are editable once loaded")
 
         controls.topicDraft = "garage"
@@ -275,17 +280,17 @@ final class ItemControlsRealCoreTests: XCTestCase {
             await controls.saveSessionTopic()
             finished = true
         }
-        settle { reader.isWaiting && !onScreen.contains(ItemControlsView.editableIdentifier) }
+        settle("the refresh is held and the fields are disabled") { reader.isWaiting && !onScreen.contains(ItemControlsView.editableIdentifier) }
         XCTAssertTrue(reader.isWaiting, "the correction was stored and its refresh is pending")
         XCTAssertFalse(onScreen.contains(ItemControlsView.editableIdentifier), "the fields cannot be edited meanwhile")
         XCTAssertEqual(scalar("SELECT current_session_topic FROM items WHERE item_id = '\(itemID)'"), "garage")
 
         reader.release()
-        settle { finished }
+        settle("the save finished") { finished }
         XCTAssertTrue(finished)
         XCTAssertEqual(controls.outcome, .saved(.sessionTopic))
         XCTAssertEqual(controls.topicDraft, "garage")
-        settle { onScreen.contains(ItemControlsView.editableIdentifier) }
+        settle("the fields are editable") { onScreen.contains(ItemControlsView.editableIdentifier) }
         XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "editing resumes once the new values are read")
     }
 
@@ -336,7 +341,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         let itemID = try saveCapture()
         let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
         hostControls(controls)
-        settle {
+        settle("the actions and their explanation render") {
             controls.snapshot != nil && onScreen.contains(ItemControlsView.actionsIdentifier)
                 && onScreen.contains(ItemControlsView.actionsFooterIdentifier)
         }
@@ -347,7 +352,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(controls.canQuietSuggestions)
 
         onMain { await controls.complete() }
-        settle { onScreen.contains(ItemControlsView.endedNoticeIdentifier) }
+        settle("the ended notice renders") { onScreen.contains(ItemControlsView.endedNoticeIdentifier) }
         XCTAssertTrue(onScreen.contains(ItemControlsView.endedNoticeIdentifier), "the ended notice renders")
         XCTAssertFalse(controls.canAct)
         XCTAssertFalse(controls.canQuietSuggestions)
@@ -416,15 +421,24 @@ final class ItemControlsRealCoreTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView: view)
         window.makeKeyAndVisible()
         retainedWindow = window
-        settle { true }
+        pauseRunLoop()
     }
 
-    private func settle(until condition: () -> Bool) {
-        let deadline = Date(timeIntervalSinceNow: 10)
-        repeat {
-            retainedWindow?.rootViewController?.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        } while !condition() && Date() < deadline
+    /// Lays the hosted view out and runs the main loop briefly.
+    private func pauseRunLoop() {
+        retainedWindow?.rootViewController?.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    /// Runs the main loop until the condition holds; fails the test naming it if ten seconds pass first.
+    private func settle(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        pauseRunLoop()
+        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
     }
 
     private func onMain(_ operation: @escaping @MainActor () async -> Void) {
@@ -433,7 +447,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
             await operation()
             finished = true
         }
-        settle { finished }
+        settle("the operation completed") { finished }
         XCTAssertTrue(finished, "the operation completed")
     }
 
@@ -444,7 +458,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
             do { _ = try await operation() } catch { failure = error }
             finished = true
         }
-        settle { finished }
+        settle("the call completed") { finished }
         XCTAssertTrue(finished)
         if let failure { throw failure }
     }
@@ -455,7 +469,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         Task {
             do { result = .success(try await reader.detail(itemID: itemID)) } catch { result = .failure(error) }
         }
-        settle { result != nil }
+        settle("the detail read completed") { result != nil }
         return try result?.get()
     }
 
@@ -464,7 +478,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         root.saveText(captureID: UUID().uuidString.lowercased(), text: Self.captureText, capturedAt: Date()) {
             outcome = $0
         }
-        settle { outcome != nil }
+        settle("the save completes") { outcome != nil }
         guard case .saved(_, let itemID, _)? = outcome else {
             XCTFail("expected a confirmed save, got \(String(describing: outcome))")
             throw CoreFailure.handleClosed

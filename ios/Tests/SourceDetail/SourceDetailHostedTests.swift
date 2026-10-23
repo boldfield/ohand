@@ -117,12 +117,16 @@ final class SourceDetailHostedTests: XCTestCase {
         host(AnyView(rootView))
 
         navigation.open(entryID: ManagementCatalog.searchEntryID)
-        settle { events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false)) }
+        settle("the search entry appeared") {
+            events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false))
+        }
         searchModel.query = "corrected"
         searchModel.search()
-        settle { searchModel.rows == [shown] }
+        settle("the search shows the row") { searchModel.rows == [shown] }
         searchModel.select(shown)
-        settle { detailModels.first?.content != nil }
+        settle("the item's detail content loaded and its destination appeared") {
+            detailModels.first?.content != nil && events.contains(.appeared(.item(itemID), isPlaceholder: false))
+        }
 
         XCTAssertTrue(
             events.contains(.appeared(.item(itemID), isPlaceholder: false)),
@@ -143,14 +147,20 @@ final class SourceDetailHostedTests: XCTestCase {
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         }) }))
 
-        settle { model.content != nil && onScreen.contains(SourceDetailView.playButtonIdentifier) }
+        settle("the sections and the play button are on screen") {
+            model.content != nil && onScreen.contains(SourceDetailView.playButtonIdentifier)
+                && onScreen.contains(SourceDetailView.sectionIdentifier(.original))
+                && onScreen.contains(SourceDetailView.sectionIdentifier(.correction))
+        }
         XCTAssertTrue(onScreen.contains(SourceDetailView.sectionIdentifier(.original)))
         XCTAssertTrue(onScreen.contains(SourceDetailView.sectionIdentifier(.correction)))
         XCTAssertTrue(onScreen.contains(SourceDetailView.playButtonIdentifier), "retained audio offers play")
         XCTAssertFalse(onScreen.contains(SourceDetailView.audioNoticeIdentifier))
 
         Task { @MainActor in await model.play() }
-        settle { onScreen.contains(SourceDetailView.pauseButtonIdentifier) }
+        settle("playing shows pause and no play") {
+            onScreen.contains(SourceDetailView.pauseButtonIdentifier) && !onScreen.contains(SourceDetailView.playButtonIdentifier)
+        }
         XCTAssertFalse(onScreen.contains(SourceDetailView.playButtonIdentifier), "playing shows pause only")
 
         let revision = try XCTUnwrap(Int(scalar("SELECT revision FROM items WHERE item_id = '\(itemID)'")))
@@ -159,8 +169,12 @@ final class SourceDetailHostedTests: XCTestCase {
             _ = try await root.itemDeletion.delete(itemID: itemID, expectedRevision: revision)
             deleted = true
         }
-        settle { deleted }
-        settle { onScreen.contains(SourceDetailView.audioNoticeIdentifier) }
+        settle("the deletion was recorded") { deleted }
+        settle("the disabled notice replaces play and pause") {
+            onScreen.contains(SourceDetailView.audioNoticeIdentifier)
+                && !onScreen.contains(SourceDetailView.playButtonIdentifier)
+                && !onScreen.contains(SourceDetailView.pauseButtonIdentifier)
+        }
 
         XCTAssertTrue(onScreen.contains(SourceDetailView.audioNoticeIdentifier), "disabled notice is visible")
         XCTAssertFalse(onScreen.contains(SourceDetailView.playButtonIdentifier), "no play button remains")
@@ -173,11 +187,15 @@ final class SourceDetailHostedTests: XCTestCase {
         host(AnyView(NavigationStack { SourceDetailView(model: model, renderReporter: { [unowned self] id, shown in
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         }) }))
-        settle { onScreen.contains(SourceDetailView.sectionIdentifier(.original)) }
+        settle("the original section is on screen") { onScreen.contains(SourceDetailView.sectionIdentifier(.original)) }
         XCTAssertTrue(onScreen.contains(SourceDetailView.sectionIdentifier(.original)))
 
         session.relock(.explicit)
-        settle { onScreen.contains(SourceDetailView.lockedIdentifier) }
+        settle("the locked notice replaces the text") {
+            onScreen.contains(SourceDetailView.lockedIdentifier)
+                && !onScreen.contains(SourceDetailView.sectionIdentifier(.original))
+                && !onScreen.contains(SourceDetailView.currentTextIdentifier)
+        }
 
         XCTAssertTrue(onScreen.contains(SourceDetailView.lockedIdentifier))
         XCTAssertFalse(onScreen.contains(SourceDetailView.sectionIdentifier(.original)), "no text stays visible")
@@ -207,7 +225,7 @@ final class SourceDetailHostedTests: XCTestCase {
                     .environment(\.horizontalSizeClass, layout.sizeClass)
                     .environment(\.sizeCategory, category)
                     host(AnyView(screen), size: layout.size, style: style)
-                    settle { identifiers.allSatisfy { frames[$0].map { !$0.isEmpty } ?? false } }
+                    settle("every checked element is laid out, \(label)") { identifiers.allSatisfy { frames[$0].map { !$0.isEmpty } ?? false } }
 
                     XCTAssertEqual(
                         retainedWindow?.rootViewController?.traitCollection.userInterfaceStyle, style, label)
@@ -227,7 +245,7 @@ final class SourceDetailHostedTests: XCTestCase {
                     XCTAssertGreaterThanOrEqual(original.minX, margin, "the card keeps the side margin, \(label)")
                     retainedWindow?.isHidden = true
                     retainedWindow = nil
-                    settle { true }
+                    pauseRunLoop()
                 }
             }
         }
@@ -243,16 +261,24 @@ final class SourceDetailHostedTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView: view)
         window.makeKeyAndVisible()
         retainedWindow = window
-        settle { true }
+        pauseRunLoop()
     }
 
-    /// Runs the main loop until the condition holds or ten seconds pass.
-    private func settle(until condition: () -> Bool) {
-        let deadline = Date(timeIntervalSinceNow: 10)
-        repeat {
-            retainedWindow?.rootViewController?.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        } while !condition() && Date() < deadline
+    /// Lays the hosted view out and runs the main loop briefly.
+    private func pauseRunLoop() {
+        retainedWindow?.rootViewController?.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    /// Runs the main loop until the condition holds; fails the test naming it if ten seconds pass first.
+    private func settle(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        pauseRunLoop()
+        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
     }
 
     private var layout: ProtectedStorageLayout { ProtectedStorageLayout(rootDirectory: storageRoot) }
@@ -261,7 +287,7 @@ final class SourceDetailHostedTests: XCTestCase {
         let captureID = UUID().uuidString.lowercased()
         var outcome: CompositionSaveOutcome?
         root.saveText(captureID: captureID, text: "synthetic capture to play", capturedAt: Date()) { outcome = $0 }
-        settle { outcome != nil }
+        settle("the save completes") { outcome != nil }
         guard case .saved(_, let itemID, _)? = outcome else {
             XCTFail("expected a confirmed save, got \(String(describing: outcome))")
             throw CoreFailure.handleClosed
@@ -279,7 +305,7 @@ final class SourceDetailHostedTests: XCTestCase {
             catch { failure = error }
             finished = true
         }
-        settle { finished }
+        settle("the correction finished") { finished }
         XCTAssertNil(failure)
     }
 

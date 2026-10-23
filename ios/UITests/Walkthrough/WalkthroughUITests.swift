@@ -78,12 +78,12 @@ final class WalkthroughUITests: XCTestCase {
         // The restyled Search has no title; its query field is what shows the screen is open.
         let queryField = app.textFields["retrieval.search.query"].firstMatch
         openFromHome(homeSearch, name: "Search", shows: queryField)
-        queryField.tap()
+        tapWhenHittable(queryField, step: "Search", elementName: "the query field")
         queryField.typeText(searchQuery)
         // The keyboard's Search key is the one way a person submits; it also puts the keyboard away.
         let searchKey = app.keyboards.buttons["Search"]
         XCTAssertTrue(searchKey.waitForExistence(timeout: screenTimeout), "keyboard Search key did not appear")
-        searchKey.tap()
+        tapWhenHittable(searchKey, step: "Search", elementName: "the keyboard Search key")
         // The saved captures must be found: "garage" matches at least one (the second appearance's run adds a second copy).
         // The count ("1 result", "2 results") is shown only when there are results; no match shows "No matches".
         let resultCount = app.staticTexts["retrieval.search.count"]
@@ -96,7 +96,7 @@ final class WalkthroughUITests: XCTestCase {
         let firstResult = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "retrieval.search.row.")).firstMatch
         XCTAssertTrue(firstResult.waitForExistence(timeout: screenTimeout), "no search result to open")
-        firstResult.tap()
+        tapWhenHittable(firstResult, step: "source detail", elementName: "the first search result")
         let detailText = app.descendants(matching: .any)["source-detail.current-text"]
         XCTAssertTrue(detailText.waitForExistence(timeout: screenTimeout), "source detail did not open")
         capture(prefix, "source detail")
@@ -116,7 +116,7 @@ final class WalkthroughUITests: XCTestCase {
                 NSPredicate(format: "label == %@ OR label BEGINSWITH %@", screen.label, "\(screen.label), ")
             ).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: screenTimeout), "settings row \(screen.label) not found")
-            row.tap()
+            tapWhenHittable(row, step: "settings row \(screen.label)", elementName: "the \(screen.label) row")
             // The row query is re-resolved on every check and can match a control on the opened screen (Export's own
             // "Export" button), so the screen counts as open once the Settings header has gone.
             XCTAssertTrue(
@@ -130,7 +130,7 @@ final class WalkthroughUITests: XCTestCase {
                 ] {
                     let link = app.buttons[identifier]
                     XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not found on Processing")
-                    link.tap()
+                    tapWhenHittable(link, step: title, elementName: "the \(identifier) link")
                     XCTAssertTrue(
                         waitForScreen(title, leaving: link, timeout: screenTimeout), "\(title) did not open from Processing")
                     capture(prefix, slug)
@@ -143,8 +143,7 @@ final class WalkthroughUITests: XCTestCase {
         let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
         XCTAssertTrue(eraseCard.waitForExistence(timeout: screenTimeout), "Erase everything card not found on Settings")
         if !eraseCard.isHittable { app.swipeUp() }
-        XCTAssertTrue(eraseCard.isHittable, "Erase everything card is not tappable")
-        eraseCard.tap()
+        tapWhenHittable(eraseCard, step: "erase everything", elementName: "the Erase everything card")
         let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
         XCTAssertTrue(resetExplanation.waitForExistence(timeout: screenTimeout), "Erase everything did not open the reset screen")
         capture(prefix, "erase everything")
@@ -173,10 +172,35 @@ final class WalkthroughUITests: XCTestCase {
     private func waitForScreen(shownBy markers: [XCUIElement], leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if markers.contains(where: { $0.exists }), !(origin.exists && origin.isHittable) { return true }
+            if markers.contains(where: { $0.exists }), !isShowing(origin) { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
+    }
+
+    /// True when `element` exists and its frame is on the screen. Unlike `isHittable`, it never asks for an activation
+    /// point, which XCTest fails the test over for a static text mid-transition ("Activation point invalid").
+    private func isShowing(_ element: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let frame = element.frame
+        return !frame.isEmpty && frame.intersects(app.frame)
+    }
+
+    /// Waits until `element` exists and is hittable, then taps it. A step that cannot act fails naming the step and the
+    /// element. The timeout is `screenTimeout` like every other wait here: a hosted macOS simulator can take a minute to
+    /// finish a transition under load.
+    private func tapWhenHittable(_ element: XCUIElement, step: String, elementName: String) {
+        waitUntilHittable(element, step: step, elementName: elementName)
+        element.tap()
+    }
+
+    private func waitUntilHittable(_ element: XCUIElement, step: String, elementName: String) {
+        let deadline = Date().addingTimeInterval(screenTimeout)
+        while Date() < deadline {
+            if element.exists, element.isHittable { return }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTFail("step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
     }
 
     /// The app makes one quiet Face ID attempt at launch. Its system prompt takes focus, so typing while it is up loses
@@ -216,7 +240,7 @@ final class WalkthroughUITests: XCTestCase {
             // The system can take focus (the launch Face ID check, keyboard tips) and drop typed text; a person types again.
             var typed = false
             for attempt in 1...3 where !typed {
-                field.tap()
+                tapWhenHittable(field, step: "type capture", elementName: "the composer field")
                 // Typing before the keyboard is up makes the UI-test runner fail while it looks for interrupting alerts.
                 XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: screenTimeout), "keyboard did not appear")
                 field.typeText(text)
@@ -228,11 +252,13 @@ final class WalkthroughUITests: XCTestCase {
                 }
             }
             XCTAssertTrue(typed, "Save did not appear enabled after typing a capture")
-            save.tap()
+            tapWhenHittable(save, step: "save capture", elementName: "the Save button")
             // A saved capture empties the field and keeps the keyboard up, so the composer is back at rest, which has no
             // Save. Typing before then would go into the text still being saved.
-            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
-            waitForExpectations(timeout: 30)
+            let saveGone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: save)
+            XCTAssertEqual(
+                XCTWaiter().wait(for: [saveGone], timeout: 30), .completed,
+                "step \"save capture\": the Save button was still showing 30 s after it was tapped")
         }
     }
 
