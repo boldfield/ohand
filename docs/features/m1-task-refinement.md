@@ -3586,3 +3586,37 @@ Acceptance:
 
 Contributes to original U10 criteria: 1 (device pass), 2, 3.
 
+### F42
+
+Sort voice notes: give voice captures contract-conforming IDs and accept the legacy form
+
+Found on the maintainer's phone on 2026-10-22. Typed notes are sorted by Anthropic. Every voice note fails at once with failure reason `rejected`, and no request reaches the provider (the provider's request log shows none at those times). Status shows "Some work needs you", and Home shows "Not yet sorted".
+
+Cause:
+- `VoiceRecordingController.generateCaptureID()` (`ios/Capture/Voice/VoiceRecordingController.swift:113`) mints `"voice-" + UUID`. The contract (`docs/architecture/m1-contracts.md`, "Capture ID") says a capture ID is a random UUID.
+- Ingress stores the ID without checking it.
+- When the interpretation request is built, `InterpretationRequest::validate` (`core/src/providers/contracts/request.rs:132`) requires `capture_id` to be a UUID. It returns `InvalidIdentifier("capture_id")`, the Anthropic adapter reports that as `TransportError::Rejected`, and the job fails permanently before the transport is reached.
+- `core/src/review/compare/source.rs:79` has the same check.
+- Every existing test, the E02 live harness and the provider connection check use typed or synthetic captures with UUID IDs, so none covered a voice capture through a provider.
+
+This was reproduced by replaying the phone's failed jobs through the FFI job runner (`ohand_core_start_job_drain`) with a recording host: both jobs failed and the host received no send command.
+
+Owned paths: `ios/Capture/Voice/VoiceRecordingController.swift`, `ios/Tests/VoiceCapture/`, `core/src/providers/contracts/request.rs`, `core/src/review/compare/source.rs`, `core/src/ffi/job_runner/tests.rs`, `core/tests/` (new tests only) and `docs/architecture/m1-contracts.md` (the Capture ID section).
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. **New voice captures get a plain random UUID.** Lowercase hyphenated, with no prefix, minted once as today. Nothing else about voice ingress changes. Audio file names may keep the `voice-` prefix: they are not capture IDs.
+2. **Voice captures already saved with a legacy ID can still be sorted.**
+   - Core accepts a capture ID that is either a UUID or exactly `voice-` followed by a lowercase hyphenated UUID. Nothing else is accepted.
+   - One shared function decides this, and both `request.rs` and `review/compare/source.rs` use it.
+   - No stored ID is rewritten, because capture IDs are immutable idempotency keys.
+   - The Capture ID section of `m1-contracts.md` records the legacy form, says only builds before this fix minted it, and keeps "a random UUID" as the rule for new IDs.
+3. **A job that already failed this way can be retried.** An interpret job that failed as `rejected` for this reason runs again through the existing retry path that the Status screen uses, and is sorted. A test covers this: a legacy-ID voice capture with a failed `rejected` interpret job is retried and reaches the send.
+4. **Voice through a provider is tested end to end.** A test in `core/src/ffi/job_runner/tests.rs` drives a voice capture through the FFI job drain with the recording host, once with a legacy `voice-<uuid>` ID and once with a plain UUID. The capture is imported with an audio reference, has its transcript attached, and is interpreted with a pinned Anthropic profile. Each run must produce a send command to the host, and complete when the host answers with a valid reply. Also add a request-validation unit test that rejects malformed IDs, including `voice-` with no UUID, an uppercase UUID after the prefix, and any other prefix.
+5. **Native test.** A test in `ios/Tests/VoiceCapture/` asserts that the generated ID parses as a UUID and has no prefix.
+6. `make check` and `make test` pass. This is a native change, so exact-head macOS CI evidence is required, as AGENTS.md describes.
+
+After landing: the maintainer reinstalls and retries the failed voice notes from Status. The four voice notes on the phone keep their legacy IDs, which is what acceptance 2 is for.
+

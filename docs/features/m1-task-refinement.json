@@ -3826,6 +3826,32 @@
       "source_pointers": [
         "docs/validation/accessibility.md"
       ]
+    },
+    {
+      "key": "F42",
+      "parent": null,
+      "title": "Sort voice notes: give voice captures contract-conforming IDs and accept the legacy form",
+      "file_scope": [
+        "ios/Capture/Voice/VoiceRecordingController.swift",
+        "ios/Tests/VoiceCapture/",
+        "core/src/providers/contracts/request.rs",
+        "core/src/review/compare/source.rs",
+        "core/src/ffi/job_runner/tests.rs",
+        "core/tests/",
+        "docs/architecture/m1-contracts.md"
+      ],
+      "intent": "Voice captures are minted as voice-<uuid>, which the interpretation request rejects as a non-UUID capture_id, so no voice note is ever sorted. Mint UUIDs and accept the legacy form.",
+      "acceptance": [
+        "See the F42 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Capture/Voice/VoiceRecordingController.swift:113",
+        "core/src/providers/contracts/request.rs:132",
+        "core/src/review/compare/source.rs:79",
+        "docs/architecture/m1-contracts.md:19"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4611,7 +4637,8 @@
     ],
     "U10b": [
       "U10a"
-    ]
+    ],
+    "F42": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -4797,6 +4824,10 @@
     {
       "date": "2026-10-23",
       "change": "U10 split into U10a (simulator-checkable accessibility fixes and CI gate) and U10b (maintainer actual-device pass); original task f5423770 retired; T05 depends on U10b."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F42: voice captures minted voice-<uuid> capture IDs, which interpretation requests reject, so no voice note was sorted. Mint UUIDs; accept the exact legacy form; end-to-end voice-through-provider test."
     }
   ]
 }
