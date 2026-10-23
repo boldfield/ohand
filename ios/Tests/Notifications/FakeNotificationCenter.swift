@@ -23,6 +23,7 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     private var storedPendingReadError: Error?
     private var recordedAdds: [NotificationCenterRequest] = []
     private var recordedRemovals: [String] = []
+    private var recordedDeliveredReads = 0
 
     var addError: Error? {
         get { lock.lock(); defer { lock.unlock() }; return storedAddError }
@@ -105,9 +106,17 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
         }
     }
 
+    /// How many times the delivered list was read.
+    var deliveredReads: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedDeliveredReads
+    }
+
     func deliveredNotifications() async -> [NotificationCenterDeliveredNotification] {
         lock.lock()
         defer { lock.unlock() }
+        recordedDeliveredReads += 1
         return delivered
     }
 

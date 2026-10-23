@@ -29,6 +29,39 @@ final class ManagementNavigationModelTests: XCTestCase {
         pendingCompletions.removeFirst()(outcome)
     }
 
+    func testAHeldOpenAsksToUnlockAndLeavesTheScreenToTheHeldTapOnSuccess() {
+        var dropped = 0
+        model.authenticateForHeldOpen { dropped += 1 }
+        XCTAssertEqual(reasons, [ManagementNavigationModel.authenticationReason])
+        finishAuthentication(.authenticated, grantingScope: true)
+        XCTAssertEqual(dropped, 0)
+        XCTAssertEqual(model.path, [], "the held tap opens its own item once the session authenticates")
+    }
+
+    func testACancelledOrFailedUnlockDropsTheHeldOpen() {
+        for outcome: CompositionAuthenticationOutcome in [.cancelled, .interrupted, .denied, .unavailable] {
+            var dropped = 0
+            model.authenticateForHeldOpen { dropped += 1 }
+            finishAuthentication(outcome, grantingScope: false)
+            XCTAssertEqual(dropped, 1, "\(outcome)")
+        }
+    }
+
+    func testAHeldOpenJoinsAnUnlockAlreadyInFlightAndIsDroppedWithIt() {
+        var dropped = 0
+        model.open(entryID: ManagementCatalog.searchEntryID)
+        model.authenticateForHeldOpen { dropped += 1 }
+        XCTAssertEqual(reasons.count, 1, "one prompt serves both")
+        finishAuthentication(.cancelled, grantingScope: false)
+        XCTAssertEqual(dropped, 1)
+    }
+
+    func testAHeldOpenDoesNotAskWhenReadsAreAlreadyAuthenticated() {
+        scope = .authenticated
+        model.authenticateForHeldOpen { XCTFail("nothing to drop") }
+        XCTAssertTrue(reasons.isEmpty)
+    }
+
     func testAnAuthenticatedSessionOpensTheEntryWithoutAsking() {
         scope = .authenticated
         model.open(entryID: ManagementCatalog.searchEntryID)

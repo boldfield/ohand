@@ -3727,3 +3727,106 @@ Acceptance:
    All fixture content is synthetic.
 4. **A shared helper** in `ios/UITests/Fixtures/` launches the app with a fixture. A UI test in it opens each fixture and asserts one identifying element. Exact-head macOS CI evidence is required.
 
+### F46
+
+Schedule a reminder whose day and clock time sit on either side of the task
+
+"Remind me today to call the dentist at 10am" is held for correction and never scheduled. The maintainer found it on the phone on 2026-10-23, and a live replay on main 3dee81f with `claude-haiku-5-5` (capture at 07:00 America/Los_Angeles) confirmed it:
+- The model's proposal is right: `explicit`, `2026-10-23T10:00:00-07:00`, with the reminder span "today to call the dentist at 10am".
+- Core still holds it. The F28 grammar (`core/src/time/expression.rs`, module comment) knows two shapes: time first ("today at 10am to call the dentist") and task first ("to call the dentist today at 10am"). Both of those replay correctly.
+- It does not know the split shape, where the day and the clock sit on either side of the task. The span covering day, task and clock is not a time expression. The clock alone is day-less, and the sentence names a day before it, so it fails closed.
+
+This is a new shape, not a hole in F28's rule, so per F28's own instruction it is a separate task, not another F28 extension.
+
+Owned paths: `core/src/time/`, `core/tests/time/`, `core/tests/proposal_application/`, and `fixtures/intent/contrastive-fixtures.json` (only to add the two fixtures below, and any fixture-count constants that adding them requires in `core/tests/fixture_validation/` and `core/tests/live_providers/`).
+
+Dependencies: F29, which owns `core/tests/proposal_application/` until it lands.
+
+Acceptance:
+
+1. **The split shape is a covered time expression,** in either order, in one sentence:
+   - day, task, clock: "remind me today to call the dentist at 10am", "Remind me Friday to call Sam at 3 p.m.";
+   - clock, task, day: "remind me at 10am to call the dentist tomorrow".
+
+   All of these must hold:
+   - the first part directly follows the request prefix, and the last part ends the sentence, apart from closing punctuation or a filler;
+   - each part is a single complete expression that F28's grammar already accepts on its own (a day, or a clock that names no day);
+   - the task between them holds no clause mark and no temporal token, and opens with `to` or a filler as in F28's time-first rule;
+   - the whole-capture rule still applies: no other sentence may hold a temporal token.
+
+   The proposal's span may be the whole stretch from the first part to the last, or the clock part alone. Either is covered only when the sentence has exactly this shape.
+2. **Core resolves the day and the clock together** and schedules only when the model's instant equals that resolution, in the capture's zone. A different instant is rejected through the existing guard, as for any explicit reminder.
+3. **Everything F28 holds for correction stays held**, and is tested:
+   - two days ("remind me today to call Sam tomorrow at 10am");
+   - two clocks;
+   - a clause mark in the task ("today to call the dentist, about the bill, at 10am");
+   - a number or time word in the task ("today to call the dentist about 2 fillings at 10am");
+   - a hedge ("maybe today to call … at 10am"), per F29;
+   - a temporal token in another sentence;
+   - a day or clock part that is not complete on its own ("today to call … at 10").
+
+   Every existing `core/tests/time/` and `proposal_application` test passes unchanged.
+4. **Tests.**
+   - Guard-table tests for each positive and negative case.
+   - End-to-end `proposal_application` tests, using `apply_clock_proposal` as the F28 tests do, for the three positive captures with both span forms, and for each negative capture.
+   - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
+5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
+
+### F47
+
+Make the iOS test suite deterministic: fix the intermittent failures
+
+The macOS suite fails intermittently often enough to slow every native merge. In the last 80 `ios.yml` runs (2026-10-21 23:11 to 2026-10-23 16:00 UTC), 80 job attempts failed across 19 PR branches:
+- 54 in "Run OhAndTests on simulator";
+- 22 in the screenshot walkthrough (16 compact, 6 regular);
+- 3 in the NotificationProbe UI tests;
+- 1 in the Tauri handoff.
+
+A few were real compile errors in the PR under test. Most passed unchanged on a rerun. F29 needed 3 attempts, and F42 has had 7 attempts fail in code it does not touch. Each rerun costs about 20 minutes of macOS time.
+
+These tests failed on branches whose change did not touch them. The number in brackets is how many distinct branches each failed on:
+- `WalkthroughUITests.testWalkthrough` (5);
+- `StatusIntegrationTests`: `testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged` (3), plus four others (1 each);
+- `CaptureEntryViewTests.testAConfirmedSaveClearsTheTextShowsTheSavedPillAndStillStatesTheReminder` (3);
+- `PlaybackRootIntegrationTests.testTheLifecycleDeletionCleanupUsesTheRootsFence` (2);
+- once each:
+  - `SourceDetailHostedTests.testTheRenderedScreenShowsSectionsPlayAndThenTheDisabledNoticeAfterDeletion`;
+  - two `SimulatorHappyPathTests`;
+  - `RetrievalSearchItemPaneTests.testAChangeStoredWhileThePanesReminderSaveIsInFlightIsShownOnceTheSaveSettles`;
+  - `LifecycleCoordinatorRealCoreTests.testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground`;
+  - `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable`;
+  - `ItemControlsRealCoreTests.testAStaleSaveShowsTheConflictAndTheHostCardShowsTheNewerValues`;
+  - two `HomeRecentsModelTests`;
+  - two `CompositionRootTests`, including `testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration`;
+  - four `AppServicesTests`, including the system-time-change test F27 addressed, which failed again after F27 landed;
+  - two `ActionHandlerTests`.
+
+Twelve test files wait with a fixed `settle()` (a set number of `Task.yield()` calls) instead of waiting for the state they assert. On a loaded simulator, that wait can end before the work it is waiting for.
+
+Owned paths: test code only. That is the test files named above and the twelve files that define a fixed-yield `settle()`:
+- `ios/Tests/Status/`, `ios/Tests/CaptureEntry/`, `ios/Tests/Playback/`, `ios/Tests/SourceDetail/`, `ios/Tests/EndToEnd/`;
+- `ios/Tests/Retrieval/`, `ios/Tests/Services/`, `ios/Tests/JobRunner/`, `ios/Tests/ItemControls/`, `ios/Tests/HomeRecents/`;
+- `ios/Tests/AppAssembly/`, `ios/Tests/NotificationActions/`;
+- any other `ios/Tests/` file that defines a fixed-yield `settle()`;
+- a new `ios/Tests/Support/` for one shared wait helper;
+- `ios/UITests/Walkthrough/WalkthroughUITests.swift`.
+
+No production code.
+
+Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`) and F42 (owns one `HomeRecentsModelTests` test). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+
+Acceptance:
+
+1. **One shared helper.** A bounded condition wait, for example `waitUntil(timeout:file:line:_:)`, that polls with `Task.yield()` and short sleeps. It fails the test with a clear message naming the condition when the timeout (default 5 s) passes. Every fixed-yield `settle()` that comes before an assertion about asynchronous work is replaced by a wait for the asserted condition. A `settle()` used only to prove that nothing happens may stay, but must yield at least as much as today.
+2. **Every named test is diagnosed.** For each one, the PR lists the cause: test timing, state shared between tests (a leaked task, recording session, notification center, Keychain item or simulator state), or a real race in product code.
+   - Fix test timing and shared state in the tests.
+   - A real product race is not fixed here. Report it in the task result with its evidence and block, so the coordinator can file it.
+3. **Walkthrough.** Each step waits for its element to exist and be hittable with an explicit timeout before acting. When it fails, it names the step and the element. The screenshots and their order are unchanged.
+4. **Nothing is weakened.**
+   - No assertion is removed or loosened.
+   - No test is skipped, disabled or moved out of the suite.
+   - No `-retry-tests-on-failure`, no `XCTExpectFailure`, and no retry loop around an assertion.
+   - Nothing in `ios.yml` changes.
+   - No timeout over 10 s without a stated reason.
+5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, with no test from the list failing. Rerun the whole workflow after the first success, not only a failed job. Link all three in the PR. Any failure during those runs is reported, with its test and cause, not hidden by a rerun.
+
