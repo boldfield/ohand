@@ -19,7 +19,8 @@ use ohand_core::providers::contracts::ErrorClass;
 use ohand_core::reminders::capacity::{CapacityPolicy, CapacityReport};
 use ohand_core::reminders::coordinator::ReminderCoordinator;
 use ohand_core::reminders::reconcile::{
-    NotificationEffectError, NotificationEffects, PendingRequest, ScheduleRequest,
+    retry_rejected_schedule, NotificationEffectError, NotificationEffects, PendingRequest,
+    ScheduleRequest,
 };
 use ohand_core::reminders::state::{
     apply_derived_request, AcknowledgmentState, DeliveryState, DerivedReminderRequest,
@@ -28,7 +29,9 @@ use ohand_core::reminders::state::{
 use ohand_core::store::captures::{self, Capture};
 use ohand_core::store::events::{self, Correction, CorrectionKind, Event, EventPayload, EventType};
 use ohand_core::store::schema::{Clock, Database};
-use ohand_core::suggestions::coordinator::{PromptActivation, PromptCoordinator};
+use ohand_core::suggestions::coordinator::{
+    PromptActivation, PromptCoordinator, PromptResponse, PromptResponseCommand, ResponseOutcome,
+};
 use ohand_core::suggestions::schedule::{
     is_prompt_notification_id, reconcile_prompts, PromptPassReport, PromptSchedule, PromptSettings,
     PromptTime, RefreshTrigger, PROMPT_HORIZON_DAYS,
@@ -41,6 +44,8 @@ const START: &str = "2026-01-15T10:30:00Z";
 const REMINDER_PHRASE: &str = "2026-01-16 09:00:00";
 const REMINDER_DUE: &str = "2026-01-16T09:00:00Z";
 const AUTHENTICATED: ReadAuthentication = ReadAuthentication::Authenticated;
+
+mod production_services;
 
 fn instant(text: &str) -> DateTime<Utc> {
     text.parse().unwrap()
@@ -337,6 +342,36 @@ impl Fixture {
             .unwrap()
     }
 
+    fn respond(
+        &mut self,
+        command_id: &str,
+        item_id: &str,
+        expected_revision: i32,
+        response: PromptResponse,
+    ) -> ResponseOutcome {
+        PromptCoordinator::new(self.clock.as_ref())
+            .respond(
+                &mut self.db,
+                AUTHENTICATED,
+                &PromptResponseCommand {
+                    command_id: command_id.to_string(),
+                    item_id: item_id.to_string(),
+                    expected_revision,
+                    response,
+                },
+            )
+            .unwrap()
+    }
+
+    /// The explicit re-arm a regained permission asks for. Returns whether a rejected schedule
+    /// was re-opened.
+    fn rearm(&mut self, item_id: &str) -> bool {
+        let transaction = self.db.immediate_transaction().unwrap();
+        let rearmed = retry_rejected_schedule(&transaction, self.clock.as_ref(), item_id).unwrap();
+        transaction.commit().unwrap();
+        rearmed
+    }
+
     fn lifecycle(&mut self, item_id: &str) -> String {
         let transaction = self.db.transaction().unwrap();
         events::get_item_snapshot(&transaction, item_id)
@@ -467,6 +502,40 @@ fn a_permission_denial_is_surfaced_and_never_reported_as_scheduled_or_retried_bl
         ScheduleState::ScheduleFailed
     );
     assert!(fixture.center.delivered.is_empty());
+
+    // The explicit re-arm installs the request once, under the identifier it always had.
+    let notification_id = fixture.reminder("item-a").notification_id().unwrap();
+    assert!(
+        fixture.rearm("item-a"),
+        "the rejected schedule is re-opened"
+    );
+    assert_eq!(
+        fixture.reminder("item-a").schedule_state,
+        ScheduleState::PendingSchedule
+    );
+    let rearmed = fixture.settle();
+    assert!(rearmed.converged());
+    assert_eq!(fixture.center.schedule_calls, 1);
+    assert_eq!(fixture.center.reminder_ids(), vec![notification_id.clone()]);
+    assert_eq!(
+        fixture.reminder("item-a").schedule_state,
+        ScheduleState::Scheduled
+    );
+
+    // A second re-arm, repeated passes and restarts change nothing and install nothing twice.
+    assert!(
+        !fixture.rearm("item-a"),
+        "an armed schedule is not re-armed"
+    );
+    fixture.center.reset_counters();
+    for _ in 0..2 {
+        fixture.restart();
+        assert!(!fixture.rearm("item-a"));
+        fixture.settle();
+    }
+    assert_eq!(fixture.center.mutations(), 0);
+    assert_eq!(fixture.center.reminder_ids(), vec![notification_id]);
+    assert!(fixture.center.delivered.is_empty());
 }
 
 #[test]
@@ -496,32 +565,35 @@ fn capacity_overflow_is_explicit_and_a_freed_slot_refills_without_duplicates() {
     );
     assert_ne!(overflow.schedule_state, ScheduleState::Scheduled);
 
-    // The soonest reminder's item ends (the OS drops its request) and the held-back reminder
-    // returns with the same identifier.
-    let freed = fixture.reminder("item-2").notification_id();
+    // The soonest reminder's item is completed through the product path. The OS keeps its
+    // request until the core cancels it, and the held-back reminder takes the slot under the
+    // identifier it already had.
+    let freed = fixture.reminder("item-2").notification_id().unwrap();
     let first_id = fixture.reminder("item-0").notification_id().unwrap();
-    fixture.center.pending.remove(&first_id);
-    fixture.db = Database::open(&fixture.path, fixture.clock.clone()).unwrap();
-    {
-        let transaction = fixture.db.immediate_transaction().unwrap();
-        transaction
-            .execute(
-                "UPDATE items SET lifecycle_state = 'completed' WHERE item_id = 'item-0'",
-                [],
-            )
-            .unwrap();
-        transaction.commit().unwrap();
-    }
+    assert!(fixture.center.pending.contains_key(&first_id));
+    let revision = fixture.revision("item-0");
+    assert_eq!(
+        fixture.respond("done-item-0", "item-0", revision, PromptResponse::Done),
+        ResponseOutcome::Applied { replayed: false }
+    );
+    assert!(
+        fixture.center.pending.contains_key(&first_id),
+        "completing the item alone does not touch the OS"
+    );
+    fixture.restart();
     fixture.center.reset_counters();
     let refill = fixture.settle_with(tight).expect("refill pass");
 
+    assert_eq!(
+        fixture.center.cancel_calls, 1,
+        "the stale request is cancelled"
+    );
+    assert!(!fixture.center.pending.contains_key(&first_id));
     assert!(refill.converged());
     assert_eq!(refill.refilled.len(), 1);
     assert_eq!(fixture.center.reminder_ids().len(), 2);
-    assert!(fixture
-        .center
-        .reminder_ids()
-        .contains(&freed.expect("generation kept")));
+    assert!(fixture.center.reminder_ids().contains(&freed));
+    assert_eq!(fixture.center.schedule_calls, 1);
     let before = fixture.center.schedule_calls;
     fixture.settle_with(tight).expect("idempotent pass");
     assert_eq!(
@@ -721,6 +793,9 @@ fn a_deleted_item_is_never_offered_again_and_its_reminder_request_is_removed() {
         "an item that already has its own reminder is not suggested"
     );
 
+    // A live, eligible item that is never deleted, added after the offer was made.
+    fixture.add_item("item-c", "Book the dentist");
+
     // Deleted while the offer sits in a notification; days pass before the next activation.
     let now = fixture.clock.now();
     mark_deletion_intent(&mut fixture.db, "item-a", revision, now).unwrap();
@@ -733,12 +808,27 @@ fn a_deleted_item_is_never_offered_again_and_its_reminder_request_is_removed() {
         !fixture.center.pending.contains_key(&reminder_id),
         "the deleted item's reminder is cancelled"
     );
-    for day in ["2026-01-16", "2026-01-17", "2026-01-18"] {
-        assert_eq!(
-            fixture.activate_prompt(&format!("prompt:{day}")),
-            PromptActivation::NothingToOffer,
-            "stale selection must not resurface on {day}"
-        );
+
+    // Answering the stale offer does nothing: no event is written for the deleted item.
+    let events_before = fixture.event_count();
+    assert_eq!(
+        fixture.respond("stale-done", "item-b", revision_b, PromptResponse::Done),
+        ResponseOutcome::NoLongerCurrent
+    );
+    assert_eq!(fixture.event_count(), events_before);
+
+    // Only the live item is offered afterwards, so "nothing to offer" is not vacuous.
+    match fixture.activate_prompt("prompt:2026-01-16") {
+        PromptActivation::Offer(offer) => assert_eq!(offer.item_id, "item-c"),
+        PromptActivation::NothingToOffer => panic!("the live eligible item should be offered"),
+    }
+    for day in ["2026-01-17", "2026-01-18"] {
+        if let PromptActivation::Offer(offer) = fixture.activate_prompt(&format!("prompt:{day}")) {
+            assert_eq!(
+                offer.item_id, "item-c",
+                "a deleted item resurfaced on {day}"
+            );
+        }
     }
     assert!(fixture.center.delivered.is_empty());
 }
