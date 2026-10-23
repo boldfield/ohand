@@ -359,7 +359,7 @@ final class ActionHandlerTests: XCTestCase {
 
         await rig.handler.discardHeldOpens()
         XCTAssertEqual(
-            rig.journal.stored.map(\.operation), [.open, .discardOpen],
+            rig.journal.stored.map(\.operation), [.discardOpen, .open],
             "the removal failed, so the entry is still stored, with a durable discard beside it")
 
         rig.authorization.isAuthenticated = true

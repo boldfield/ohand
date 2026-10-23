@@ -186,7 +186,7 @@ final class ActionHandler: @unchecked Sendable {
         lock.lock()
         droppedOpenNotificationIDs.formIntersection(remaining)
         lock.unlock()
-        removeSpentDiscardMarkers(in: entries, remainingOpens: remaining)
+        removeSpentDiscardMarkers(in: (try? journal.pending()) ?? entries, remainingOpens: remaining)
     }
 
     private static func discardMarker(for notificationID: String) -> NotificationActionEntry {
@@ -320,7 +320,8 @@ final class ActionHandler: @unchecked Sendable {
             if disposition == .settled { report.settled += 1 } else { report.discarded += 1 }
             if let openedItemID { report.openedItemIDs.append(openedItemID) }
         }
-        removeSpentDiscardMarkers(in: entries, remainingOpens: openIDsLeft)
+        // Read again: markers written by `adoptDurableDiscards` during this pass are not in `entries`.
+        removeSpentDiscardMarkers(in: (try? journal.pending()) ?? entries, remainingOpens: openIDsLeft)
         // A tap that is waiting for authentication asks the person to unlock, once per pass, as a prompt tap does.
         if heldOpen { requestUnlock() }
         return report
