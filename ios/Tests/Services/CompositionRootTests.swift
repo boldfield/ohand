@@ -1227,6 +1227,79 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(itemLifecycle(itemID), "active", "opening changes nothing")
     }
 
+    func testDeliveredNotificationsFoundAfterAbsenceAreRecordedOnceInTheCore() throws {
+        let center = FakeNotificationCenter()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), notifications: center)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        XCTAssertEqual(scalar("SELECT delivery_state FROM reminders WHERE reminder_id = '\(Self.reminderID)'"), "unknown")
+        center.delivered = [NotificationCenterDeliveredNotification(
+            identifier: notificationID, deliveredAt: Date(timeIntervalSince1970: 1_790_000_000),
+            userInfo: [NotificationContent.targetKey: itemID])]
+
+        for _ in 0..<2 {
+            let finished = FinishedFlag()
+            let forwarded = CountBox()
+            Task {
+                forwarded.set(await root.ingestDeliveredNotifications())
+                finished.finish()
+            }
+            XCTAssertTrue(pump(until: { finished.isFinished }))
+            XCTAssertEqual(forwarded.value, 1)
+            reconcileActions(root)
+        }
+
+        XCTAssertNotEqual(
+            scalar("SELECT delivery_state FROM reminders WHERE reminder_id = '\(Self.reminderID)'"), "unknown",
+            "the delivery that happened while the app was away is recorded without unlocking")
+        XCTAssertEqual(try actionJournal.pending(), [])
+    }
+
+    func testLockedTapAsksToUnlockAndADroppedOpenIsNeverReplayedByALaterUnlock() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let opened = OpenedItemsBox()
+        let asks = CountBox()
+        root.setOpenItemHandler { opened.add($0) }
+        root.setUnlockRequestHandler { asks.set(asks.value + 1) }
+
+        deliver(UNNotificationDefaultActionIdentifier, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertGreaterThanOrEqual(asks.value, 1, "a locked reminder tap asks for authentication")
+        XCTAssertTrue(opened.all.isEmpty)
+
+        let dropped = FinishedFlag()
+        Task {
+            await root.discardHeldNotificationOpens()
+            dropped.finish()
+        }
+        XCTAssertTrue(pump(until: { dropped.isFinished }))
+        XCTAssertEqual(authenticateReadsAndWait(root), .authenticated)
+        reconcileActions(root)
+        XCTAssertTrue(opened.all.isEmpty, "an unrelated unlock does not replay the dropped tap")
+    }
+
+    func testOnlyACompletedInterpretOrTranscriptionJobAnnouncesAChange() {
+        func outcome(_ jobType: String, _ result: String, _ settlement: String?) -> JobDrainOutcome {
+            .finished(JobDrainSummary(
+                operationID: 1, stop: "idle",
+                jobs: [JobDrainJob(jobID: "j", jobType: jobType, result: result, settlement: settlement)]))
+        }
+        XCTAssertEqual(ServiceCompositionRoot.itemChange(afterDrain: outcome("interpret", "settled", "completed")), .allItems)
+        XCTAssertEqual(
+            ServiceCompositionRoot.itemChange(
+                afterDrain: outcome(TranscriptionJobHandler.transcriptionJobType, "settled", "completed")),
+            .allItems)
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrain: outcome("interpret", "settled", "failed")))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrain: outcome("other", "settled", "completed")))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrain: .finished(JobDrainSummary(operationID: 1, stop: "idle", jobs: []))))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrain: nil))
+    }
+
     func testPromptTapReachesTheOpenSuggestionHandler() throws {
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
         defer { root.shutDown() }
@@ -1427,6 +1500,23 @@ final class CompositionRootTests: XCTestCase {
         root.notificationIngestor.ingestResponse(
             requestIdentifier: notificationID, actionIdentifier: actionIdentifier,
             userInfo: [NotificationContent.targetKey: itemID])
+    }
+
+    private final class CountBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = 0
+
+        var value: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ newValue: Int) {
+            lock.lock()
+            stored = newValue
+            lock.unlock()
+        }
     }
 
     private func reconcileActions(_ root: ServiceCompositionRoot) {

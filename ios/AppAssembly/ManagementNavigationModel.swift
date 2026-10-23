@@ -52,6 +52,7 @@ final class ManagementNavigationModel: ObservableObject {
     @Published private(set) var notice: String?
     @Published private(set) var isAuthenticating = false
     private var pendingRoute: ManagementRoute?
+    private var heldOpenDropped: (() -> Void)?
 
     private let readScope: () -> CompositionReadScope
     private let authenticate: (_ reason: String, _ completion: @escaping (CompositionAuthenticationOutcome) -> Void) -> Void
@@ -105,6 +106,40 @@ final class ManagementNavigationModel: ObservableObject {
         present(.suggestion)
     }
 
+    /// Asks the device owner to unlock for a reminder tap the core is holding until reads are authenticated. Unlike
+    /// `openItem`, this shows nothing itself: the held tap opens its item when the session authenticates. When the
+    /// owner cancels or fails, `dropHeldOpen` runs so the held tap is discarded and no later unlock replays it. Does
+    /// nothing when reads are already authenticated.
+    func authenticateForHeldOpen(dropHeldOpen: @escaping () -> Void) {
+        guard readScope() != .authenticated else { return }
+        heldOpenDropped = dropHeldOpen
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        authenticate(Self.authenticationReason) { [weak self] outcome in
+            guard let self = self else { return }
+            self.isAuthenticating = false
+            let awaitedRoute = self.pendingRoute
+            self.pendingRoute = nil
+            let dropHeldOpen = self.heldOpenDropped
+            self.heldOpenDropped = nil
+            self.readAccessDidChange()
+            switch outcome {
+            case .authenticated:
+                if let awaitedRoute = awaitedRoute, self.readScope() == .authenticated {
+                    self.path = [awaitedRoute.pathComponent]
+                }
+            case .cancelled, .interrupted:
+                dropHeldOpen?()
+            case .denied:
+                self.notice = "Oh And could not confirm it is you, so your saved items stay locked."
+                dropHeldOpen?()
+            case .unavailable:
+                self.notice = "This device has no passcode or biometric set up, so your saved items stay locked."
+                dropHeldOpen?()
+            }
+        }
+    }
+
     private func present(_ route: ManagementRoute, keepingOpenScreens: Bool = false) {
         notice = nil
         if readScope() == .authenticated {
@@ -120,6 +155,8 @@ final class ManagementNavigationModel: ObservableObject {
             self.isAuthenticating = false
             let awaitedRoute = self.pendingRoute
             self.pendingRoute = nil
+            let dropHeldOpen = self.heldOpenDropped
+            self.heldOpenDropped = nil
             self.readAccessDidChange()
             switch outcome {
             case .authenticated:
@@ -127,11 +164,13 @@ final class ManagementNavigationModel: ObservableObject {
                     self.path = [awaitedRoute.pathComponent]
                 }
             case .cancelled, .interrupted:
-                break
+                dropHeldOpen?()
             case .denied:
                 self.notice = "Oh And could not confirm it is you, so your saved items stay locked."
+                dropHeldOpen?()
             case .unavailable:
                 self.notice = "This device has no passcode or biometric set up, so your saved items stay locked."
+                dropHeldOpen?()
             }
         }
     }

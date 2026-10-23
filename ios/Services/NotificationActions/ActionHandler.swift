@@ -75,6 +75,7 @@ final class ActionHandler: @unchecked Sendable {
     private let authorization: ActionAuthorizing
     private let openItem: @Sendable (String) -> Void
     private let ingestFailure: @Sendable (NotificationEvent) -> Void
+    private let requestUnlock: @Sendable () -> Void
     private let startsDeliveryOnIngest: Bool
     private let lock = NSLock()
     private var tail: Task<Void, Never>?
@@ -85,6 +86,7 @@ final class ActionHandler: @unchecked Sendable {
         authorization: ActionAuthorizing,
         openItem: @escaping @Sendable (String) -> Void,
         ingestFailure: @escaping @Sendable (NotificationEvent) -> Void = { _ in },
+        requestUnlock: @escaping @Sendable () -> Void = {},
         startsDeliveryOnIngest: Bool = true
     ) {
         self.core = core
@@ -92,6 +94,7 @@ final class ActionHandler: @unchecked Sendable {
         self.authorization = authorization
         self.openItem = openItem
         self.ingestFailure = ingestFailure
+        self.requestUnlock = requestUnlock
         self.startsDeliveryOnIngest = startsDeliveryOnIngest
     }
 
@@ -120,6 +123,27 @@ final class ActionHandler: @unchecked Sendable {
     @discardableResult
     func reconcile() async -> NotificationActionReconciliation {
         await enqueuePass().value
+    }
+
+    /// Drops every stored open that is still waiting for an authenticated session, after the person declined or
+    /// failed to unlock for it. Later unlocks then replay nothing, so a stale tap cannot replace the screen the person
+    /// chose. Runs in order with the passes, so an open a pass is delivering is settled first.
+    func discardHeldOpens() async {
+        let previous: Task<Void, Never>?
+        let discard: Task<Void, Never>
+        lock.lock()
+        previous = tail
+        discard = Task { [self] in
+            _ = await previous?.value
+            guard authorization.currentAuthorization() == nil else { return }
+            guard let entries = try? journal.pending() else { return }
+            for entry in entries where entry.operation == .open {
+                try? journal.remove(entry)
+            }
+        }
+        tail = discard
+        lock.unlock()
+        await discard.value
     }
 
     /// Reconciles whenever the session authenticates, which is when deferred entries become runnable.
@@ -176,6 +200,7 @@ final class ActionHandler: @unchecked Sendable {
 
     private func drain() async -> NotificationActionReconciliation {
         var report = NotificationActionReconciliation()
+        var heldOpen = false
         let entries: [NotificationActionEntry]
         do {
             entries = try journal.pending()
@@ -189,6 +214,7 @@ final class ActionHandler: @unchecked Sendable {
             switch disposition {
             case .deferred:
                 report.deferred += 1
+                if entry.operation == .open { heldOpen = true }
                 continue
             case .retained:
                 report.retained += 1
@@ -205,6 +231,8 @@ final class ActionHandler: @unchecked Sendable {
             if disposition == .settled { report.settled += 1 } else { report.discarded += 1 }
             if let openedItemID { report.openedItemIDs.append(openedItemID) }
         }
+        // A tap that is waiting for authentication asks the person to unlock, once per pass, as a prompt tap does.
+        if heldOpen { requestUnlock() }
         return report
     }
 
