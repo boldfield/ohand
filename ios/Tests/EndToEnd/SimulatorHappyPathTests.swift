@@ -71,9 +71,8 @@ final class SimulatorHappyPathTests: XCTestCase {
     private var sender: CountingOfflineSender!
     private var center: FakeNotificationCenter!
     private var retrieval: RetrievalSearchModule!
-    /// The silent-capture surface over the production text ingress and progress reader, stamped by the controlled clock
-    /// (`AppServices` builds its own with the system clock and offers no seam for one).
-    private var captureEntry: CaptureEntryModel!
+    /// The silent-capture surface `AppServices` assembled, stamped by the controlled clock injected through `captureNow`.
+    private var captureEntry: CaptureEntryModel { services.captureEntry }
     private let engine = SyntheticVoiceEngine()
     private let permission = FakeMicrophonePermission()
     private let poller = ManualPoller()
@@ -122,12 +121,8 @@ final class SimulatorHappyPathTests: XCTestCase {
             root: root, lifecycle: lifecycle, handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
             voice: voice, retrieval: retrieval,
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
-            notificationCenter: lifecycleCenter, isProtectedDataAvailable: { true })
-        captureEntry = CaptureEntryModel(
-            textIngress: RootTextCaptureIngress(root: root), voice: voice.recorder,
-            progressReader: RootCaptureProgressReader(root: root), defaultMode: .silent,
-            access: { CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true) },
-            now: { [fixedNow] in fixedNow })
+            notificationCenter: lifecycleCenter, captureNow: { [fixedNow] in fixedNow },
+            isProtectedDataAvailable: { true })
         services.start(isActive: true)
     }
 
