@@ -1664,9 +1664,16 @@ public final class ServiceCompositionRoot {
     public func reconcileReminders(
         trigger: NotificationReconcileTrigger = .explicit
     ) async throws -> NotificationPermissionReport {
-        // Notifications that fired while the app was away are recorded at launch and on each return to the foreground,
-        // before the pass reads what it needs to install.
-        if trigger == .launch || trigger == .foreground {
+        try await reconcileReminders(trigger: trigger, ingestingDelivered: trigger == .launch || trigger == .foreground)
+    }
+
+    /// One reminder pass. With `ingestingDelivered`, notifications that fired while the app was away are recorded
+    /// first, before the pass reads what it needs to install. A lifecycle pass reads the delivered list once: the
+    /// coordinator's reminders step does, and the prompt step's second pass in the same lifecycle pass does not.
+    func reconcileReminders(
+        trigger: NotificationReconcileTrigger, ingestingDelivered: Bool
+    ) async throws -> NotificationPermissionReport {
+        if ingestingDelivered {
             await ingestDeliveredNotifications()
         }
         let report = try await reminderReconciler.refresh(trigger: trigger)
@@ -2001,7 +2008,8 @@ public final class ServiceCompositionRoot {
                 core: promptScheduleClient, timeZone: environment.timeZone,
                 install: { trigger in
                     guard let root = rootReference.root else { throw CancellationError() }
-                    return try await root.reconcileReminders(trigger: trigger)
+                    // The reminders step of the same lifecycle pass already read the delivered list.
+                    return try await root.reconcileReminders(trigger: trigger, ingestingDelivered: false)
                 })
 
             let itemCorrectionClient = CoreItemCorrectionClient(core: core)

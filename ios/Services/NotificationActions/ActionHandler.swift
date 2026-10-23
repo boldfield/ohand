@@ -82,7 +82,16 @@ final class ActionHandler: @unchecked Sendable {
     /// Notifications tapped in this process whose open may still run. A stored open not named here was tapped before
     /// this launch or dropped since, so it is never opened: whatever unlock comes next is not the one the tap asked for.
     /// Being in memory only, the fence holds when the journal cannot be read or written, and a relaunch starts empty.
-    private var openableNotificationIDs: Set<String> = []
+    private var openableTaps: [String: OpenableTap] = [:]
+
+    /// Where a tap that may still open stands with authentication.
+    private enum OpenableTap {
+        /// Not yet tried in an authenticated session; the next authentication, the one the tap asks for, opens it.
+        case awaitingAuthentication
+        /// Tried in this authentication epoch without being answered, for example because the core could not answer.
+        /// It may be retried within the epoch; once the epoch ends, a later unlock is not the one it asked for.
+        case triedIn(ReadAuthorization)
+    }
 
     init(
         core: NotificationActionCore,
@@ -113,11 +122,11 @@ final class ActionHandler: @unchecked Sendable {
         let entries = Self.entries(for: event)
         guard !entries.isEmpty else { return .ignored }
         // A tap, including a new tap on a notification whose earlier tap was dropped, is a decision to open now.
-        if case .opened = event.kind { setOpenable(event.identifier.rawValue, true) }
+        if case .opened = event.kind { setOpenable(event.identifier.rawValue, .awaitingAuthentication) }
         do {
             for entry in entries { try journal.append(entry) }
         } catch {
-            if case .opened = event.kind { setOpenable(event.identifier.rawValue, false) }
+            if case .opened = event.kind { setOpenable(event.identifier.rawValue, nil) }
             ingestFailure(event)
             return .failed
         }
@@ -141,25 +150,22 @@ final class ActionHandler: @unchecked Sendable {
     /// dropped entries when the journal allows; one it cannot remove is discarded again by a later pass.
     func discardHeldOpens() async {
         lock.lock()
-        openableNotificationIDs.removeAll()
+        openableTaps.removeAll()
         lock.unlock()
         await reconcile()
     }
 
-    private func setOpenable(_ notificationID: String, _ openable: Bool) {
+    /// Sets where a tap stands, or with `nil` drops it so it never opens.
+    private func setOpenable(_ notificationID: String, _ state: OpenableTap?) {
         lock.lock()
         defer { lock.unlock() }
-        if openable {
-            openableNotificationIDs.insert(notificationID)
-        } else {
-            openableNotificationIDs.remove(notificationID)
-        }
+        openableTaps[notificationID] = state
     }
 
-    private func isOpenable(_ entry: NotificationActionEntry) -> Bool {
+    private func openableState(_ entry: NotificationActionEntry) -> OpenableTap? {
         lock.lock()
         defer { lock.unlock() }
-        return openableNotificationIDs.contains(entry.notificationID)
+        return openableTaps[entry.notificationID]
     }
 
     /// Reconciles whenever the session authenticates, which is when deferred entries become runnable.
@@ -269,18 +275,27 @@ final class ActionHandler: @unchecked Sendable {
             case .open:
                 // A tap the person declined to unlock for, or one from an earlier launch, is never opened, even if a
                 // session authenticated since.
-                guard isOpenable(entry) else { return .discarded }
+                guard let state = openableState(entry) else { return .discarded }
+                if case .triedIn(let epoch) = state, !authorization.isCurrent(epoch) {
+                    // The epoch the tap was tried in has ended; whatever unlock comes next is unrelated to it.
+                    setOpenable(entry.notificationID, nil)
+                    return .discarded
+                }
                 guard let admitted = authorization.currentAuthorization() else { return .deferred }
+                setOpenable(entry.notificationID, .triedIn(admitted))
                 let answer = try await core.resolve(notificationID: entry.notificationID)
                 if answer.outcome == "item", let itemID = answer.itemID {
                     // The session may have relocked, even relocked and authenticated again, while the core was
-                    // answering: the answer belongs to the earlier epoch, so show nothing and keep the tap.
-                    guard authorization.isCurrent(admitted) else { return .deferred }
+                    // answering: the answer belongs to the ended epoch, so show nothing and drop the tap.
+                    guard authorization.isCurrent(admitted) else {
+                        setOpenable(entry.notificationID, nil)
+                        return .discarded
+                    }
                     openItem(itemID)
                     openedItemID = itemID
                 }
                 // Answered once: an entry that cannot be removed is not opened a second time.
-                setOpenable(entry.notificationID, false)
+                setOpenable(entry.notificationID, nil)
             }
             return .settled
         } catch let failure as CoreFailure {

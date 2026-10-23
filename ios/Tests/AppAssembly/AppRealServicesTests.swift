@@ -344,18 +344,26 @@ final class AppRealServicesTests: XCTestCase {
         settleBackgroundWork(services)
         XCTAssertEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
 
+        let readsAfterLaunch = center.deliveredReads
+        XCTAssertEqual(readsAfterLaunch, 1, "the launch pass reads the delivered list once")
+
         // The OS delivered it while the app was away, and nothing tapped it.
         center.deliver(identifier: request.identifier, at: Date())
         services.lifecycle.foregroundActivated()
         wait { self.scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'") == "1" }
+        settleBackgroundWork(services)
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1")
         XCTAssertNotEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
+        XCTAssertEqual(
+            center.deliveredReads, readsAfterLaunch + 1,
+            "one return to the foreground reads the delivered list once, though two steps reconcile reminders")
 
         services.lifecycle.foregroundActivated()
         settleBackgroundWork(services)
         XCTAssertEqual(
             scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1",
             "a second return to the foreground records nothing new")
+        XCTAssertEqual(center.deliveredReads, readsAfterLaunch + 2)
     }
 
     func testASaveThatFailsRequestsNoDrainAndTakesNoBackgroundTime() throws {
