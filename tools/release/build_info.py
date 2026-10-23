@@ -14,9 +14,7 @@ import subprocess
 import sys
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 import hashlib
-import struct
 
 
 def get_git_revision():
@@ -52,17 +50,15 @@ def generate_run_id(timestamp_str):
     """
     Generate a deterministic 8-character hex run ID from a timestamp.
 
-    Uses the ISO 8601 timestamp (without microseconds) to produce a stable
-    identifier that is human-traceable to collection time.
+    Produces a stable, collision-free identifier using SHA256 hash of the
+    ISO 8601 timestamp. Same timestamp always produces the same run ID,
+    different timestamps produce different IDs.
     """
-    # Parse the timestamp to ensure it's valid, then use the part after T
-    # to seed the run ID (format: 2026-10-12T19:52:44Z)
     if not timestamp_str:
         timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Use last 12 chars of timestamp + some hash to get determinism
-    time_part = timestamp_str.replace('-', '').replace(':', '').replace('Z', '')[-8:]
-    return time_part[:8].lower()
+    h = hashlib.sha256(timestamp_str.encode()).digest()
+    return h[:4].hex()
 
 
 def create_build_info(revision, timestamp_str=None):

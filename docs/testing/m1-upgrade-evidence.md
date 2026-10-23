@@ -69,7 +69,7 @@ The signed trial candidate is produced by the maintainer on a Mac with Xcode, an
    export OHAND_SIGNING_PROFILE_PATH=/path/to/profile.mobileprovision
    export OHAND_DEVICE_ID=<device-identifier-from-devicectl>
    export OHAND_DEVICE_LABEL=trial-iphone
-   
+
    python3 tools/apple-build/sign_probe.py --scheme OhAndApp --install
    ```
 
@@ -253,14 +253,14 @@ All configuration (providers, endpoints, credentials) is injected at runtime thr
 
 ## Review and acceptance
 
-T10 is complete when the signed candidate is produced and both simulator and device upgrade evidence are collected:
+T10 is complete when the signed candidate is produced and both simulator and device upgrade evidence are collected. This requires external inputs:
 
-1. ✓ Version/build infrastructure in `tools/release/`
-2. ✓ Upgrade procedure documentation in `docs/testing/m1-upgrade-evidence.md`
-3. ✓ Signed candidate metadata in `docs/releases/m1-trial/candidate-metadata.json`
-4. ✓ Upgrade evidence records in `docs/validation/evidence/upgrade/`
-   - Simulator evidence (automated)
-   - Device evidence (maintainer-collected)
-5. ✓ Every evidence record cites sanitized artifacts, build/revision and collection time
+1. Version/build infrastructure in `tools/release/` — provides deterministic, collision-free build identifiers
+2. Upgrade procedure documentation in `docs/testing/m1-upgrade-evidence.md` — this document
+3. Signed candidate metadata in `docs/releases/m1-trial/candidate-metadata.json` — produced by the maintainer with device access (P08)
+4. Upgrade evidence records in `docs/validation/evidence/upgrade/` — requires simulator tests and real-device upgrade attempts
+   - Simulator evidence (automated test)
+   - Device evidence (maintainer-collected with authorized test device)
+5. Every evidence record cites sanitized artifacts, build/revision and collection time — enforced by schema and evidence collection process
 
-All private raw evidence (logs, profiles, device identifiers) is kept local outside the repository with an auditable reference.
+All private raw evidence (logs, profiles, device identifiers) is kept local outside the repository with an auditable reference. Missing external evidence (device access, signing credentials) blocks task completion and must be recorded honestly.

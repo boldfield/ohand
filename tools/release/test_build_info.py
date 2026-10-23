@@ -6,6 +6,7 @@ import json
 import subprocess
 import tempfile
 import os
+import sys
 from pathlib import Path
 
 
@@ -21,7 +22,7 @@ class TestBuildInfo(unittest.TestCase):
     def run_build_info(self, *args):
         """Run build_info.py with given arguments."""
         result = subprocess.run(
-            ["python3", str(self.build_info_script)] + list(args),
+            [sys.executable, str(self.build_info_script)] + list(args),
             capture_output=True,
             text=True,
             cwd=self.test_dir.parent.parent,  # Run from repo root
@@ -144,6 +145,33 @@ class TestBuildInfo(unittest.TestCase):
 
         # Run IDs should be the same for the same timestamp
         self.assertEqual(data1["run_id"], data2["run_id"])
+
+    def test_unique_run_id_different_timestamps(self):
+        """Test that different timestamps produce different run IDs (collision resistance)."""
+        timestamp1 = "2026-10-12T19:52:44Z"
+        timestamp2 = "2026-11-22T19:52:44Z"
+
+        result1 = self.run_build_info("--json", "--timestamp", timestamp1)
+        result2 = self.run_build_info("--json", "--timestamp", timestamp2)
+
+        data1 = json.loads(result1.stdout)
+        data2 = json.loads(result2.stdout)
+
+        # Run IDs should be different for different timestamps
+        self.assertNotEqual(data1["run_id"], data2["run_id"],
+                           f"Run IDs must be unique; both {timestamp1} and {timestamp2} produced {data1['run_id']}")
+
+    def test_run_id_is_hex(self):
+        """Test that run_id is valid hexadecimal."""
+        result = self.run_build_info("--json")
+        data = json.loads(result.stdout)
+
+        run_id = data["run_id"]
+        # Should be a valid hex string
+        try:
+            int(run_id, 16)
+        except ValueError:
+            self.fail(f"Run ID is not valid hexadecimal: {run_id}")
 
     def test_timestamp_in_iso8601(self):
         """Test that collected_at is valid ISO 8601."""

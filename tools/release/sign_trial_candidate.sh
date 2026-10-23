@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCHEME="${SCHEME:-OhAndApp}"
-INSTALL_FLAG=""
+INSTALL_FLAG="--install"
 TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 
 # Check for no-install flag
@@ -67,7 +67,7 @@ echo "Signing $SCHEME for trial..." >&2
 if [ -n "$INSTALL_FLAG" ]; then
     python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
         --scheme "$SCHEME" \
-        --install
+        $INSTALL_FLAG
 else
     python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
         --scheme "$SCHEME"
