@@ -120,7 +120,7 @@ final class WalkthroughUITests: XCTestCase {
             // The row query is re-resolved on every check and can match a control on the opened screen (Export's own
             // "Export" button), so the screen counts as open once the Settings header has gone.
             XCTAssertTrue(
-                waitForScreen(screen.title, leaving: settingsHeader, timeout: screenTimeout), "\(screen.title) did not open")
+                waitForScreen(screen.title, leaving: settingsHeader, originIsText: true, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
             if screen.title == "Processing" {
                 // The two screens one level down hold the dense controls, so each is captured too.
@@ -164,15 +164,24 @@ final class WalkthroughUITests: XCTestCase {
     /// True once the screen titled `title` is showing: the restyled settings screens draw their title as header text
     /// and hide the navigation bar, the others show it in the navigation bar. `leaving` is the control that opened the
     /// screen; it must be gone, so a row or link with the same text as the title does not count as the screen.
-    private func waitForScreen(_ title: String, leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
-        waitForScreen(shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, timeout: timeout)
+    private func waitForScreen(
+        _ title: String, leaving origin: XCUIElement, originIsText: Bool = false, timeout: TimeInterval
+    ) -> Bool {
+        waitForScreen(
+            shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, originIsText: originIsText,
+            timeout: timeout)
     }
 
     /// True once any of `markers` exists and `origin` has gone.
-    private func waitForScreen(shownBy markers: [XCUIElement], leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
+    private func waitForScreen(
+        shownBy markers: [XCUIElement], leaving origin: XCUIElement, originIsText: Bool = false, timeout: TimeInterval
+    ) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if markers.contains(where: { $0.exists }), !isShowing(origin) { return true }
+            // A static text has no activation point while its screen slides away, and asking for one fails the test, so a
+            // text origin counts as showing for as long as it exists.
+            let originIsShowing = originIsText ? origin.exists : isShowing(origin)
+            if markers.contains(where: { $0.exists }), !originIsShowing { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
