@@ -324,7 +324,7 @@ final class StatusIntegrationTests: XCTestCase {
         run { await status.refresh() }
         let stalled = try XCTUnwrap(status.facts.first { $0.kind == .processing })
         XCTAssertEqual(stalled.headline, StatusText.processingStalledHeadline, "the real core reported the stall")
-        XCTAssertEqual(stalled.actions, [.retry])
+        XCTAssertEqual(stalled.actions, [.retry], "facts: \(status.facts); jobs: \(scalar("SELECT group_concat(job_id || ':' || status || ':' || ifnull(failure_reason, '-'), ', ') FROM jobs"))")
 
         let sourceBefore = scalar("SELECT text FROM captures WHERE capture_id = 'capture-stalled'")
         XCTAssertEqual(sourceBefore, "call the roofer about the leak")

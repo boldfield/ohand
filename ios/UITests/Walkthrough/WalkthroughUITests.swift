@@ -142,7 +142,7 @@ final class WalkthroughUITests: XCTestCase {
         // The "Erase everything" card on the Settings root must open the reset screen, which is captured. Nothing is confirmed.
         let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
         XCTAssertTrue(eraseCard.waitForExistence(timeout: screenTimeout), "Erase everything card not found on Settings")
-        if !eraseCard.isHittable { app.swipeUp() }
+        if !isShowing(eraseCard) { app.swipeUp() }
         tapWhenHittable(eraseCard, step: "erase everything", elementName: "the Erase everything card")
         let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
         XCTAssertTrue(resetExplanation.waitForExistence(timeout: screenTimeout), "Erase everything did not open the reset screen")
@@ -178,12 +178,13 @@ final class WalkthroughUITests: XCTestCase {
         return false
     }
 
-    /// True when `element` exists and its frame is on the screen. Unlike `isHittable`, it never asks for an activation
-    /// point, which XCTest fails the test over for a static text mid-transition ("Activation point invalid").
+    private static let existsAndHittable = NSPredicate(format: "exists == true AND hittable == true")
+
+    /// True when `element` exists and is hittable, asked as a predicate: reading `isHittable` or `frame` directly fails
+    /// the test when the element goes away between the query and the read ("No matches found", "Activation point
+    /// invalid"), which a screen in transition does all the time.
     private func isShowing(_ element: XCUIElement) -> Bool {
-        guard element.exists else { return false }
-        let frame = element.frame
-        return !frame.isEmpty && frame.intersects(app.frame)
+        Self.existsAndHittable.evaluate(with: element)
     }
 
     /// Waits until `element` exists and is hittable, then taps it. A step that cannot act fails naming the step and the
@@ -197,7 +198,7 @@ final class WalkthroughUITests: XCTestCase {
     private func waitUntilHittable(_ element: XCUIElement, step: String, elementName: String) {
         let deadline = Date().addingTimeInterval(screenTimeout)
         while Date() < deadline {
-            if element.exists, element.isHittable { return }
+            if isShowing(element) { return }
             Thread.sleep(forTimeInterval: 0.25)
         }
         XCTFail("step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
@@ -311,10 +312,10 @@ final class WalkthroughUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(10)
         var tapped = false
         repeat {
-            if glassBack.exists, glassBack.isHittable {
+            if isShowing(glassBack) {
                 glassBack.tap()
                 tapped = true
-            } else if barBack.exists, barBack.isHittable {
+            } else if isShowing(barBack) {
                 barBack.tap()
                 tapped = true
             } else {

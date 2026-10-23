@@ -74,6 +74,8 @@ final class CaptureEntryViewTests: XCTestCase {
         _ holds: () -> Bool
     ) {
         waitUntilPumping(condition, timeout: timeout, file: file, line: line) {
+            // The frames are reported by the layout pass, which only runs for a view marked as needing one.
+            self.retainedWindow?.rootViewController?.view.setNeedsLayout()
             self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
             return holds()
         }
