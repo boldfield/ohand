@@ -76,6 +76,9 @@ final class InMemoryActionJournal: NotificationActionJournal, @unchecked Sendabl
     var failsAppends = false
     var failsRemovals = false
     var failsReads = false
+    /// Operations whose entries a read leaves out without failing, as the journal contract allows for an unreadable
+    /// entry.
+    var unreadableOperations: Set<NotificationActionEntry.Operation> = []
 
     var stored: [NotificationActionEntry] {
         lock.lock()
@@ -92,7 +95,7 @@ final class InMemoryActionJournal: NotificationActionJournal, @unchecked Sendabl
 
     func pending() throws -> [NotificationActionEntry] {
         if failsReads { throw CocoaError(.fileReadNoPermission) }
-        return stored
+        return stored.filter { !unreadableOperations.contains($0.operation) }
     }
 
     func remove(_ entry: NotificationActionEntry) throws {
@@ -358,9 +361,7 @@ final class ActionHandlerTests: XCTestCase {
         rig.journal.failsRemovals = true
 
         await rig.handler.discardHeldOpens()
-        XCTAssertEqual(
-            rig.journal.stored.map(\.operation), [.discardOpen, .open],
-            "the removal failed, so the entry is still stored, with a durable discard beside it")
+        XCTAssertEqual(rig.journal.stored.map(\.operation), [.open], "the removal failed, so the entry is still stored")
 
         rig.authorization.isAuthenticated = true
         await rig.handler.reconcile()
@@ -372,14 +373,17 @@ final class ActionHandlerTests: XCTestCase {
         XCTAssertTrue(rig.openedItems.isEmpty)
     }
 
-    func testDroppedOpenIsNotReplayedAfterARelaunchWhenTheRemovalFailed() async {
+    func testDroppedOpenIsNotReplayedAfterARelaunchWhenNothingCouldBeWritten() async {
         let rig = makeRig()
         rig.handler.ingest(event(.opened))
         await rig.handler.reconcile()
+        rig.journal.failsAppends = true
         rig.journal.failsRemovals = true
         await rig.handler.discardHeldOpens()
+        XCTAssertEqual(rig.journal.stored.map(\.operation), [.open])
 
-        // A new process: nothing in memory, only the journal.
+        // A new process: nothing in memory, only the journal, which works again.
+        rig.journal.failsAppends = false
         rig.journal.failsRemovals = false
         let relaunched = ActionHandler(
             core: rig.core, journal: rig.journal, authorization: rig.authorization,
@@ -387,7 +391,57 @@ final class ActionHandlerTests: XCTestCase {
         rig.authorization.isAuthenticated = true
         await relaunched.reconcile()
 
-        XCTAssertTrue(rig.openedItems.isEmpty, "the durable discard outlives the process")
+        XCTAssertTrue(rig.openedItems.isEmpty, "an unlock in a later launch is not the one the tap asked for")
+        XCTAssertTrue(rig.journal.stored.isEmpty)
+    }
+
+    func testAHeldOpenFromAnEarlierLaunchIsNeverOpenedByALaterUnlock() async {
+        let journal = InMemoryActionJournal()
+        let first = makeRig(journal: journal)
+        first.handler.ingest(event(.opened))
+        await first.handler.reconcile()
+        XCTAssertEqual(journal.stored.map(\.operation), [.open])
+
+        let asks = OpenedItems()
+        let relaunched = makeRig(journal: journal, requestUnlock: { asks.add("unlock") })
+        let locked = await relaunched.handler.reconcile()
+        XCTAssertEqual(locked.discarded, 1)
+        XCTAssertTrue(asks.all.isEmpty, "nothing is held, so the later launch does not ask to unlock")
+        relaunched.authorization.isAuthenticated = true
+        await relaunched.handler.reconcile()
+        XCTAssertTrue(relaunched.openedItems.isEmpty)
+        XCTAssertTrue(journal.stored.isEmpty)
+        XCTAssertTrue(relaunched.core.calls.isEmpty, "no private read for a tap that will not open")
+    }
+
+    func testDroppedOpenIsNotReplayedWhenAReadLeftItOutAtDiscardTime() async {
+        let rig = makeRig()
+        rig.handler.ingest(event(.opened))
+        await rig.handler.reconcile()
+        rig.journal.unreadableOperations = [.open]
+        await rig.handler.discardHeldOpens()
+        XCTAssertEqual(rig.journal.stored.map(\.operation), [.open], "the read succeeded without the open")
+
+        rig.journal.unreadableOperations = []
+        rig.authorization.isAuthenticated = true
+        await rig.handler.reconcile()
+
+        XCTAssertTrue(rig.openedItems.isEmpty, "the open becomes readable again but stays dropped")
+        XCTAssertTrue(rig.journal.stored.isEmpty)
+    }
+
+    func testAnOpenedTapWhoseEntryCannotBeRemovedOpensOnlyOnce() async {
+        let rig = makeRig()
+        rig.authorization.isAuthenticated = true
+        rig.journal.failsRemovals = true
+        rig.handler.ingest(event(.opened))
+        await rig.handler.reconcile()
+        await rig.handler.reconcile()
+        XCTAssertEqual(rig.openedItems, ["item-from-core"])
+
+        rig.journal.failsRemovals = false
+        await rig.handler.reconcile()
+        XCTAssertEqual(rig.openedItems, ["item-from-core"])
         XCTAssertTrue(rig.journal.stored.isEmpty)
     }
 

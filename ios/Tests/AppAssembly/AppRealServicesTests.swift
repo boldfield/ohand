@@ -1,6 +1,6 @@
 import SQLite3
 import XCTest
-import OhAndCoreBridge
+@testable import OhAndCoreBridge
 @testable import OhAndServices
 import UIKit
 import UserNotifications
@@ -304,6 +304,28 @@ final class AppRealServicesTests: XCTestCase {
         XCTAssertTrue(changes.all.contains(.allItems), "applied interpretation asks every list to read again")
         XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM reminders"), "0", "the drain really applied its result")
         settleBackgroundWork(services)
+    }
+
+    func testTheDrainEventItselfDecidesTheItemChangeWhateverTheRunnerHasMovedOnTo() {
+        func drainEvent(_ jobsJSON: String) -> CoreEvent {
+            CoreEvent(
+                operationID: 7,
+                outcome: .success(Data(#"{"operation_id":7,"stop":"job_limit","jobs":\#(jobsJSON)}"#.utf8)))
+        }
+        let completedInterpretation = drainEvent(
+            #"[{"job_id":"j1","job_type":"interpret","result":"settled","settlement":"completed"}]"#)
+        let completedTranscription = drainEvent(
+            #"[{"job_id":"j2","job_type":"\#(TranscriptionJobHandler.transcriptionJobType)","result":"settled","settlement":"completed"}]"#)
+        let retriedInterpretation = drainEvent(
+            #"[{"job_id":"j3","job_type":"interpret","result":"transient","settlement":null}]"#)
+
+        // Read from the event, so a re-run that started (or failed to start) since cannot hide what this drain applied.
+        XCTAssertEqual(ServiceCompositionRoot.itemChange(afterDrainEvent: completedInterpretation), .allItems)
+        XCTAssertEqual(ServiceCompositionRoot.itemChange(afterDrainEvent: completedTranscription), .allItems)
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrainEvent: retriedInterpretation))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(afterDrainEvent: drainEvent("[]")))
+        XCTAssertNil(ServiceCompositionRoot.itemChange(
+            afterDrainEvent: CoreEvent(operationID: 7, outcome: .failure(CoreFailure.handleClosed))))
     }
 
     func testDeliveredNotificationsAreRecordedOnceAtForegroundThroughTheProductionRoot() throws {

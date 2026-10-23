@@ -1269,6 +1269,13 @@ public final class ServiceCompositionRoot {
         return appliesResults ? .allItems : nil
     }
 
+    /// The change to announce for the event that ended a drain, read from the event itself: the runner's
+    /// `lastOutcome` can already belong to the re-run it started (or to that re-run's failure to start).
+    static func itemChange(afterDrainEvent event: CoreEvent) -> ItemChange? {
+        guard let summary = try? event.decode(JobDrainSummary.self) else { return nil }
+        return itemChange(afterDrain: .finished(summary))
+    }
+
     // MARK: Reset
 
     /// Finishes a reset a previous run left unfinished. The lifecycle coordinator calls it at launch, before the job
@@ -2120,10 +2127,10 @@ public final class ServiceCompositionRoot {
                 retryDelay: configuration.jobRetryDelaySeconds)
             undo.append { jobRunner.shutDown() }
             // Each drain's end is checked as it happens, not only the last one of a re-run chain: a drain that
-            // applied results and was followed at once by an empty drain must still refresh the lists.
+            // applied results and was followed at once by an empty or failed drain must still refresh the lists.
             router.register { event in
                 let handled = jobRunner.handle(event)
-                if handled, let change = ServiceCompositionRoot.itemChange(afterDrain: jobRunner.lastOutcome) {
+                if handled, let change = ServiceCompositionRoot.itemChange(afterDrainEvent: event) {
                     itemChanges.publish(change)
                 }
                 return handled

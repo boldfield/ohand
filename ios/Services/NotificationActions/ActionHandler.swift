@@ -79,10 +79,10 @@ final class ActionHandler: @unchecked Sendable {
     private let startsDeliveryOnIngest: Bool
     private let lock = NSLock()
     private var tail: Task<Void, Never>?
-    private var droppedOpenNotificationIDs: Set<String> = []
-    private var dropsEveryStoredOpen = false
-    /// Notifications tapped since a discard that could not read the journal; that discard must not sweep them up.
-    private var opensStoredSinceUnreadDiscard: Set<String> = []
+    /// Notifications tapped in this process whose open may still run. A stored open not named here was tapped before
+    /// this launch or dropped since, so it is never opened: whatever unlock comes next is not the one the tap asked for.
+    /// Being in memory only, the fence holds when the journal cannot be read or written, and a relaunch starts empty.
+    private var openableNotificationIDs: Set<String> = []
 
     init(
         core: NotificationActionCore,
@@ -112,23 +112,14 @@ final class ActionHandler: @unchecked Sendable {
     func ingest(_ event: NotificationEvent) -> NotificationActionIngestResult {
         let entries = Self.entries(for: event)
         guard !entries.isEmpty else { return .ignored }
-        if case .opened = event.kind {
-            lock.lock()
-            if dropsEveryStoredOpen { opensStoredSinceUnreadDiscard.insert(event.identifier.rawValue) }
-            lock.unlock()
-        }
+        // A tap, including a new tap on a notification whose earlier tap was dropped, is a decision to open now.
+        if case .opened = event.kind { setOpenable(event.identifier.rawValue, true) }
         do {
             for entry in entries { try journal.append(entry) }
         } catch {
+            if case .opened = event.kind { setOpenable(event.identifier.rawValue, false) }
             ingestFailure(event)
             return .failed
-        }
-        // A new tap on a notification whose earlier tap was dropped is a new decision to open.
-        if case .opened = event.kind {
-            lock.lock()
-            droppedOpenNotificationIDs.remove(event.identifier.rawValue)
-            lock.unlock()
-            try? journal.remove(Self.discardMarker(for: event.identifier.rawValue))
         }
         if startsDeliveryOnIngest { _ = enqueuePass() }
         return .persisted
@@ -141,93 +132,34 @@ final class ActionHandler: @unchecked Sendable {
         await enqueuePass().value
     }
 
-    /// Drops every stored open, after the person declined or failed to unlock for it. Later unlocks then replay
+    /// Drops every held open, after the person declined or failed to unlock for it. Later unlocks then replay
     /// nothing, so a stale tap cannot replace the screen the person chose.
     ///
-    /// The drop is decided when this is called, not when the queued work runs: the opens stored now are marked
-    /// dropped at once, so a pass that runs first, even one made runnable by an unrelated authentication, discards
-    /// them instead of opening them. The marks outlive a journal that cannot be read or written, so a later pass
-    /// still discards them. The removal runs in order with the passes.
+    /// The drop is decided when this is called, in memory, before any journal access: a pass that runs first, even
+    /// one made runnable by an unrelated authentication, discards the opens instead of opening them, and a journal
+    /// that cannot be read, omits an entry or cannot remove one changes nothing. The pass this queues removes the
+    /// dropped entries when the journal allows; one it cannot remove is discarded again by a later pass.
     func discardHeldOpens() async {
-        let snapshot = try? journal.pending()
-        let discard: Task<Void, Never>
         lock.lock()
-        if let snapshot {
-            for entry in snapshot where entry.operation == .open {
-                droppedOpenNotificationIDs.insert(entry.notificationID)
-                // Durable, so a removal that fails and a relaunch cannot bring the open back.
-                try? journal.append(Self.discardMarker(for: entry.notificationID))
-            }
-        } else {
-            dropsEveryStoredOpen = true
-        }
-        let previous = tail
-        discard = Task { [self] in
-            _ = await previous?.value
-            removeDroppedOpens()
-        }
-        tail = discard
+        openableNotificationIDs.removeAll()
         lock.unlock()
-        await discard.value
+        await reconcile()
     }
 
-    private func removeDroppedOpens() {
-        guard let entries = try? journal.pending() else { return }
-        let dropped = adoptDurableDiscards(from: entries)
-        for entry in entries where entry.operation == .open && dropped.contains(entry.notificationID) {
-            do {
-                try journal.remove(entry)
-            } catch {
-                continue
-            }
-        }
-        // A mark stays until no stored open it names is left, so a removal that failed is still discarded later.
-        let remaining = Set(((try? journal.pending()) ?? entries).filter { $0.operation == .open }.map(\.notificationID))
-        lock.lock()
-        droppedOpenNotificationIDs.formIntersection(remaining)
-        lock.unlock()
-        removeSpentDiscardMarkers(in: (try? journal.pending()) ?? entries, remainingOpens: remaining)
-    }
-
-    private static func discardMarker(for notificationID: String) -> NotificationActionEntry {
-        NotificationActionEntry(
-            operation: .discardOpen, notificationID: notificationID, targetID: nil, occurredAtUnixMilliseconds: 0)
-    }
-
-    /// Turns what a journal read shows into the in-memory marks: stored discard markers, and a discard that could not
-    /// read the journal when it was made (which covers the opens stored then, not taps made since). Returns the marks.
-    private func adoptDurableDiscards(from entries: [NotificationActionEntry]) -> Set<String> {
-        var newlyDropped: [String] = []
-        lock.lock()
-        for entry in entries where entry.operation == .discardOpen {
-            droppedOpenNotificationIDs.insert(entry.notificationID)
-        }
-        if dropsEveryStoredOpen {
-            for entry in entries where entry.operation == .open
-                && !opensStoredSinceUnreadDiscard.contains(entry.notificationID) {
-                droppedOpenNotificationIDs.insert(entry.notificationID)
-                newlyDropped.append(entry.notificationID)
-            }
-            dropsEveryStoredOpen = false
-            opensStoredSinceUnreadDiscard = []
-        }
-        let marks = droppedOpenNotificationIDs
-        lock.unlock()
-        for notificationID in newlyDropped { try? journal.append(Self.discardMarker(for: notificationID)) }
-        return marks
-    }
-
-    /// A discard marker is spent once no stored open it names is left.
-    private func removeSpentDiscardMarkers(in entries: [NotificationActionEntry], remainingOpens: Set<String>) {
-        for entry in entries where entry.operation == .discardOpen && !remainingOpens.contains(entry.notificationID) {
-            try? journal.remove(entry)
-        }
-    }
-
-    private func isDroppedOpen(_ entry: NotificationActionEntry) -> Bool {
+    private func setOpenable(_ notificationID: String, _ openable: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        return droppedOpenNotificationIDs.contains(entry.notificationID)
+        if openable {
+            openableNotificationIDs.insert(notificationID)
+        } else {
+            openableNotificationIDs.remove(notificationID)
+        }
+    }
+
+    private func isOpenable(_ entry: NotificationActionEntry) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return openableNotificationIDs.contains(entry.notificationID)
     }
 
     /// Reconciles whenever the session authenticates, which is when deferred entries become runnable.
@@ -292,11 +224,7 @@ final class ActionHandler: @unchecked Sendable {
             report.retained += 1
             return report
         }
-        _ = adoptDurableDiscards(from: entries)
-        let openIDsBeforePass = Set(entries.filter { $0.operation == .open }.map(\.notificationID))
-        var openIDsLeft = openIDsBeforePass
         for entry in entries {
-            if entry.operation == .discardOpen { continue }
             var openedItemID: String?
             let disposition = await process(entry, openedItemID: &openedItemID)
             switch disposition {
@@ -316,12 +244,9 @@ final class ActionHandler: @unchecked Sendable {
                 report.retained += 1
                 continue
             }
-            if entry.operation == .open { openIDsLeft.remove(entry.notificationID) }
             if disposition == .settled { report.settled += 1 } else { report.discarded += 1 }
             if let openedItemID { report.openedItemIDs.append(openedItemID) }
         }
-        // Read again: markers written by `adoptDurableDiscards` during this pass are not in `entries`.
-        removeSpentDiscardMarkers(in: (try? journal.pending()) ?? entries, remainingOpens: openIDsLeft)
         // A tap that is waiting for authentication asks the person to unlock, once per pass, as a prompt tap does.
         if heldOpen { requestUnlock() }
         return report
@@ -341,12 +266,10 @@ final class ActionHandler: @unchecked Sendable {
             case .complete:
                 guard authorization.currentAuthorization() != nil else { return .deferred }
                 _ = try await core.complete(notificationID: entry.notificationID, itemID: entry.targetID)
-            case .discardOpen:
-                // Markers are read by `adoptDurableDiscards` and never delivered.
-                return .retained
             case .open:
-                // A tap the person declined to unlock for is never opened, even if a session authenticated since.
-                if isDroppedOpen(entry) { return .discarded }
+                // A tap the person declined to unlock for, or one from an earlier launch, is never opened, even if a
+                // session authenticated since.
+                guard isOpenable(entry) else { return .discarded }
                 guard let admitted = authorization.currentAuthorization() else { return .deferred }
                 let answer = try await core.resolve(notificationID: entry.notificationID)
                 if answer.outcome == "item", let itemID = answer.itemID {
@@ -356,6 +279,8 @@ final class ActionHandler: @unchecked Sendable {
                     openItem(itemID)
                     openedItemID = itemID
                 }
+                // Answered once: an entry that cannot be removed is not opened a second time.
+                setOpenable(entry.notificationID, false)
             }
             return .settled
         } catch let failure as CoreFailure {
