@@ -69,6 +69,7 @@ actor ResetService {
     private let exportTemporaries: ResetExportTemporaries
     private let credentials: ResetCredentialRemoving
     private let markers: ResetMarkerStore
+    private let changes: ItemChangePublishing?
     private var isRunning = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -78,7 +79,8 @@ actor ResetService {
         itemCleanup: ResetItemCleanup,
         exportTemporaries: ResetExportTemporaries,
         credentials: ResetCredentialRemoving,
-        markers: ResetMarkerStore
+        markers: ResetMarkerStore,
+        changes: ItemChangePublishing? = nil
     ) {
         self.core = core
         self.staging = staging
@@ -86,6 +88,7 @@ actor ResetService {
         self.exportTemporaries = exportTemporaries
         self.credentials = credentials
         self.markers = markers
+        self.changes = changes
     }
 
     /// The user's reset tap with their explicit credential choice.
@@ -385,6 +388,7 @@ actor ResetService {
             }
         }
         let state: ResetState = blockers.isEmpty && latest.phase == .completed ? .completed : .pending
+        if state == .completed { changes?.publish(.allItems) }
         return ResetReport(state: state, progress: latest, blockers: blockers, itemCleanup: cleanup)
     }
 

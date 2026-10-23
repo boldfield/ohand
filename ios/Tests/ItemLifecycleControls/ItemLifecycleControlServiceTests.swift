@@ -148,4 +148,38 @@ final class ItemLifecycleControlServiceTests: XCTestCase {
                 .unreadable, .unreadable,
             ])
     }
+
+    // MARK: Change signal
+
+    func testEachControlThatTheCoreAppliedPublishesTheItemAndRefusalsPublishNothing() async {
+        let publisher = RecordingChangePublisher()
+        let core = ScriptedItemLifecycleControlCore([
+            .success(applied()), .success(applied()), .success(applied()), .success(applied(replayed: true)),
+            .success(ItemLifecycleControlAnswer(outcome: "stale_revision", currentRevision: 7)),
+            .success(ItemLifecycleControlAnswer(outcome: "item_deleted")),
+            .failure(CoreFailure(errorClass: .transient, code: "store_busy", message: "busy")),
+        ])
+        let service = ItemLifecycleControlService(
+            core: core, session: makeSession(authenticated: true), changes: publisher)
+
+        _ = try? await service.complete(commandID: "c-1", itemID: "item-1", expectedRevision: 2)
+        _ = try? await service.cancel(commandID: "c-2", itemID: "item-1", expectedRevision: 3)
+        _ = try? await service.notNow(commandID: "c-3", itemID: "item-1", expectedRevision: 4)
+        _ = try? await service.stopSuggesting(commandID: "c-4", itemID: "item-1", expectedRevision: 5)
+        XCTAssertEqual(publisher.changes, Array(repeating: .item("item-1"), count: 4))
+
+        _ = try? await service.complete(commandID: "c-5", itemID: "item-1", expectedRevision: 2)
+        _ = try? await service.cancel(commandID: "c-6", itemID: "item-1", expectedRevision: 2)
+        _ = try? await service.notNow(commandID: "c-7", itemID: "item-1", expectedRevision: 2)
+        XCTAssertEqual(publisher.changes.count, 4, "stale, deleted and failed commands announce nothing")
+    }
+
+    func testACaptureOnlySessionPublishesNothing() async {
+        let publisher = RecordingChangePublisher()
+        let service = ItemLifecycleControlService(
+            core: ScriptedItemLifecycleControlCore([.success(applied())]), session: makeSession(authenticated: false),
+            changes: publisher)
+        _ = try? await service.complete(commandID: "c-1", itemID: "item-1", expectedRevision: 0)
+        XCTAssertTrue(publisher.changes.isEmpty)
+    }
 }

@@ -526,14 +526,15 @@ final class ResetWorld {
         staging.relaunch(recordedRequest: choice.recordedRequest)
     }
 
-    func makeService() -> ResetService {
+    func makeService(changes: ItemChangePublishing? = nil) -> ResetService {
         ResetService(
             core: core,
             staging: staging,
             itemCleanup: deletion.makeService(),
             exportTemporaries: exports,
             credentials: credentials,
-            markers: choice)
+            markers: choice,
+            changes: changes)
     }
 
     /// An item with its files and notifications, registered with the reset core as captured before any reset now.
