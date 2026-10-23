@@ -123,6 +123,10 @@ class FailureJourneyTestCase: XCTestCase {
     private let engine = SyntheticVoiceEngine()
     private let microphone = FakeMicrophonePermission()
     private let poller = ManualPoller()
+    /// Kept across a restart: the credentials a person entered live in the Keychain, which outlives the process.
+    private var credentials: CredentialService?
+    private(set) var recognizer: FailureJourneyRecognizer?
+    private(set) var grant: FakeBackgroundGrant?
 
     /// The controlled clock every production instant derives from.
     let fixedNow = Date(timeIntervalSince1970: 1_768_478_400)  // 2026-01-15T12:00:00Z
@@ -134,19 +138,57 @@ class FailureJourneyTestCase: XCTestCase {
     }()
 
     /// Brings the rig up with the provider transport in `mode`. Tests call this first so the mode is theirs to pick.
-    func startRig(providerMode: FailureJourneyProviderSender.Mode) throws {
+    func startRig(
+        providerMode: FailureJourneyProviderSender.Mode, withRecognizer: Bool = false, withBackgroundGrant: Bool = false
+    ) throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("failure-journeys-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
         baselineBuffers = CoreHandle.liveResultBufferCount
+        try bringUp(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
+    }
+
+    /// Ends the running process the way a clean exit does, then launches a new one over the same storage with fresh
+    /// in-memory state: a new core handle, job runner, read session and notification center. The recognizer and
+    /// background grant are new too, so a test scripts the second run independently of the first.
+    func restartRig(
+        providerMode: FailureJourneyProviderSender.Mode, withRecognizer: Bool = false, withBackgroundGrant: Bool = false
+    ) throws {
+        stopRig()
+        try launchRig(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
+    }
+
+    /// Ends the running process, leaving the storage as it was. A test may change the stored rows before it launches
+    /// the next run, to leave them as a process that was killed mid-job would.
+    func stopRig() {
+        settleBackgroundWork()
+        services.shutDown()
+        services = nil
+        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "the run closed every core handle")
+    }
+
+    func launchRig(
+        providerMode: FailureJourneyProviderSender.Mode, withRecognizer: Bool = false, withBackgroundGrant: Bool = false
+    ) throws {
+        try bringUp(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
+    }
+
+    private func bringUp(
+        providerMode: FailureJourneyProviderSender.Mode, withRecognizer: Bool, withBackgroundGrant: Bool
+    ) throws {
         sender = FailureJourneyProviderSender(mode: providerMode)
+        recognizer = withRecognizer ? FailureJourneyRecognizer() : nil
+        grant = withBackgroundGrant ? FakeBackgroundGrant() : nil
         center = FakeNotificationCenter()
         retrieval = RetrievalSearchModule(calendar: utcCalendar)
         lifecycle = LifecycleCoordinator()
         let lifecycleCenter = NotificationCenter()
-        let credentials = CredentialService(
-            serviceName: "com.boldfield.ohand.tests.failure-journeys.\(UUID().uuidString)", keychain: FakeKeychain())
+        let credentials =
+            self.credentials
+            ?? CredentialService(
+                serviceName: "com.boldfield.ohand.tests.failure-journeys.\(UUID().uuidString)", keychain: FakeKeychain())
+        self.credentials = credentials
         let root = try ServiceCompositionRoot(
             testing: CompositionConfiguration(
                 storageRootPath: storageRoot.path, captureRouteID: Self.routeID, jobRetryDelaySeconds: 3600),
@@ -157,7 +199,8 @@ class FailureJourneyTestCase: XCTestCase {
                 sender: sender,
                 readSession: ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary()),
                 notificationCenter: center, reachability: FakeReachability(reachable: true),
-                lifecycleNotifications: lifecycleCenter, credentials: credentials),
+                backgroundGrant: grant, lifecycleNotifications: lifecycleCenter, recognizer: recognizer,
+                credentials: credentials),
             modules: [lifecycle, retrieval])
         var environment = VoiceRecordingEnvironment.live(protectRecordingFile: { _ in })
         environment.isForeground = { true }
@@ -281,6 +324,22 @@ class FailureJourneyTestCase: XCTestCase {
         return try XCTUnwrap(captureEntry.acknowledgment?.savedItemID)
     }
 
+    /// Records and stops one voice capture through the controller the app's capture surface uses, and returns the item
+    /// the core confirmed. The synthetic engine writes real audio; only the speech recognizer is a stand-in.
+    func recordVoiceCapture() throws -> String {
+        let controller = services.voice.controller
+        var started: Result<VoiceRecordingStarted, VoiceStartFailure>?
+        controller.start { started = $0 }
+        _ = try XCTUnwrap(started, "the microphone was granted, so start completes at once").get()
+        controller.stop()
+        XCTAssertTrue(pump(timeout: 10) { controller.lastOutcome != nil }, "the recording ended")
+        guard case .saved(_, let acknowledgment)? = controller.lastOutcome else {
+            XCTFail("expected a saved voice capture, got \(String(describing: controller.lastOutcome))")
+            throw CoreFailure.handleClosed
+        }
+        return acknowledgment.itemID
+    }
+
     func search(_ request: RetrievalSearchRequest) -> Result<RetrievalPage, RetrievalSearchFailure> {
         let box = FailureSearchBox()
         retrieval.search(request) { box.set($0) }
@@ -364,5 +423,53 @@ class FailureJourneyTestCase: XCTestCase {
 
     func jobColumn(_ column: String, of itemID: String) -> String {
         scalar("SELECT \(column) FROM jobs WHERE item_id = '\(itemID)' ORDER BY created_at DESC LIMIT 1")
+    }
+}
+
+/// An on-device recognizer the test controls. Each call waits until the test answers it, and gives up as cancelled
+/// when the job runner cancels the work, as the speech framework's task does.
+final class FailureJourneyRecognizer: OnDeviceRecognizing, @unchecked Sendable {
+    let recognizerName = "failure-journey-recognizer/1.0"
+    private let lock = NSLock()
+    private var scripted: OnDeviceRecognitionOutcome?
+    private var calls = 0
+    private var cancellations = 0
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    var cancellationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancellations
+    }
+
+    /// Answers the call in flight, and every later one, with `outcome`.
+    func answer(with outcome: OnDeviceRecognitionOutcome) {
+        lock.lock()
+        scripted = outcome
+        lock.unlock()
+    }
+
+    func recognize(audioURL: URL, localeIdentifier: String) async -> OnDeviceRecognitionOutcome {
+        lock.lock()
+        calls += 1
+        lock.unlock()
+        while true {
+            lock.lock()
+            let ready = scripted
+            lock.unlock()
+            if let ready { return ready }
+            if Task.isCancelled {
+                lock.lock()
+                cancellations += 1
+                lock.unlock()
+                return .cancelled
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }
