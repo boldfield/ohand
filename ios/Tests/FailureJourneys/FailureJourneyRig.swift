@@ -126,7 +126,7 @@ class FailureJourneyTestCase: XCTestCase {
     /// Kept across a restart: the credentials a person entered live in the Keychain, which outlives the process.
     private var credentials: CredentialService?
     private(set) var recognizer: FailureJourneyRecognizer?
-    private(set) var grant: FakeBackgroundGrant?
+    private(set) var grant: LeasedBackgroundGrant?
     private var appNotifications = NotificationCenter()
 
     /// The controlled clock every production instant derives from.
@@ -160,8 +160,8 @@ class FailureJourneyTestCase: XCTestCase {
         try launchRig(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
     }
 
-    /// Ends the running process without waiting for its drain, leaving the storage as it was. A test may change the stored rows before it launches
-    /// the next run, to leave them as a process that was killed mid-job would.
+    /// Ends the running process without waiting for its drain, leaving the storage as it was. A test may change the
+    /// stored rows before it launches the next run, to leave them as a process that was killed mid-job would.
     func stopRig() {
         services.shutDown()
         services = nil
@@ -179,7 +179,7 @@ class FailureJourneyTestCase: XCTestCase {
     ) throws {
         sender = FailureJourneyProviderSender(mode: providerMode)
         recognizer = withRecognizer ? FailureJourneyRecognizer() : nil
-        grant = withBackgroundGrant ? FakeBackgroundGrant() : nil
+        grant = withBackgroundGrant ? LeasedBackgroundGrant() : nil
         center = FakeNotificationCenter()
         retrieval = RetrievalSearchModule(calendar: utcCalendar)
         lifecycle = LifecycleCoordinator()
@@ -479,5 +479,58 @@ final class FailureJourneyRecognizer: OnDeviceRecognizing, @unchecked Sendable {
             }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+}
+
+/// A background-time grant that keeps every lease it hands out, each with its own token and expiration handler. The
+/// completion service and the job-runner lifecycle observer both ask for time, so a test can expire exactly one lease,
+/// as the system does, without the second request replacing the first lease's handler.
+final class LeasedBackgroundGrant: BackgroundExecutionGrant, @unchecked Sendable {
+    private let lock = NSLock()
+    private var expirations: [Int: @Sendable () -> Void] = [:]
+    private var beginOrder: [Int] = []
+    private var endedTokens: [Int] = []
+    private var nextToken = 100
+
+    var beginCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return beginOrder.count
+    }
+
+    var endedTokenList: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return endedTokens
+    }
+
+    /// The tokens in the order the leases were requested.
+    var leaseTokens: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return beginOrder
+    }
+
+    func begin(expiration: @escaping @Sendable () -> Void) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        nextToken += 1
+        expirations[nextToken] = expiration
+        beginOrder.append(nextToken)
+        return nextToken
+    }
+
+    func end(_ token: Int) {
+        lock.lock()
+        endedTokens.append(token)
+        lock.unlock()
+    }
+
+    /// Takes back the time of one lease, as the system does when that lease's background time runs out.
+    func expire(token: Int) {
+        lock.lock()
+        let handler = expirations[token]
+        lock.unlock()
+        handler?()
     }
 }

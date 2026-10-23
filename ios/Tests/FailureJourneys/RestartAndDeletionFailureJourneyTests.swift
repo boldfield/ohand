@@ -63,15 +63,24 @@ final class RestartAndDeletionFailureJourneyTests: FailureJourneyTestCase {
         let itemID = try recordVoiceCapture()
         let firstRecognizer = try XCTUnwrap(recognizer)
         XCTAssertTrue(pump { firstRecognizer.callCount == 1 }, "recognition started on the saved recording")
-        XCTAssertGreaterThan(try XCTUnwrap(grant).beginCount, 0, "the save asked for background time")
+        let backgroundGrant = try XCTUnwrap(grant)
+        XCTAssertEqual(backgroundGrant.beginCount, 1, "the save asked for background time")
+        let completionLease = try XCTUnwrap(backgroundGrant.leaseTokens.first)
 
         // The person leaves the app; the open completion window lets the drain carry on, until the system takes the
         // background time back while the recognizer is still working.
         enterBackground()
         XCTAssertEqual(firstRecognizer.cancellationCount, 0, "the granted background time lets recognition continue")
-        try XCTUnwrap(grant).fireExpiration()
-        XCTAssertTrue(pump { firstRecognizer.cancellationCount == 1 }, "the recognizer was stopped")
-        XCTAssertTrue(pump { !self.services.root.jobRunner.isDraining }, "the drain stopped at a checkpoint")
+        XCTAssertEqual(backgroundGrant.beginCount, 2, "leaving the app asked for a second, separate lease")
+        // The system takes back the completion lease itself, well before the service's own 20-second window ends.
+        backgroundGrant.expire(token: completionLease)
+        XCTAssertTrue(
+            pump(timeout: 5) { firstRecognizer.cancellationCount == 1 }, "the expiration stopped the recognizer promptly")
+        XCTAssertTrue(
+            pump(timeout: 5) { !self.services.root.jobRunner.isDraining }, "the drain stopped at a checkpoint")
+        XCTAssertTrue(
+            pump(timeout: 5) { backgroundGrant.endedTokenList.contains(completionLease) },
+            "the completion lease was ended")
 
         // Interrupted work is back in the queue and the source is untouched.
         XCTAssertTrue(
