@@ -316,7 +316,9 @@ final class SourceDetailHostedTests: XCTestCase {
         try FileManager.default.createDirectory(
             at: audioURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let sampleRate: UInt32 = 8000
-        let dataSize: UInt32 = sampleRate * 4  // two seconds, so playback is still going when the test acts
+        // A minute, so playback is still going when the test acts however long a loaded simulator takes to get there: a clip
+        // that ends on its own is not an end by deletion.
+        let dataSize: UInt32 = sampleRate * 2 * 60
         func le32(_ value: UInt32) -> [UInt8] { (0..<4).map { UInt8((value >> (8 * UInt32($0))) & 0xff) } }
         func le16(_ value: UInt16) -> [UInt8] { [UInt8(value & 0xff), UInt8(value >> 8)] }
         var bytes: [UInt8] = Array("RIFF".utf8) + le32(36 + dataSize) + Array("WAVEfmt ".utf8)
