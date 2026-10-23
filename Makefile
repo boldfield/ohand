@@ -1,7 +1,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test provider-probe-test apple-build-test ios-check ios-credential-probe bindings-check bindings-test hygiene-check hygiene-test
+.PHONY: check test contract-check contract-test provider-probe-test apple-build-test release-test ios-check ios-credential-probe bindings-check bindings-test hygiene-check hygiene-test
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
@@ -9,7 +9,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 check: contract-check cargo-check cargo-fmt-check cargo-clippy bindings-check ios-check
 
 # test: Run contract validation tests and cargo test suite.
-test: contract-test hygiene-test provider-probe-test apple-build-test cargo-test bindings-test
+test: contract-test hygiene-test provider-probe-test apple-build-test release-test cargo-test bindings-test
 
 .PHONY: cargo-check cargo-test cargo-build cargo-fmt-check cargo-clippy
 
@@ -47,6 +47,10 @@ provider-probe-test:
 # stand-ins on PATH; hermetic, needs no Apple tool, credential or device.
 apple-build-test:
 	$(PYTHON) -m unittest discover --start-directory tools/apple-build --pattern 'test_*.py' --verbose
+
+# release-test: T10. Tests for build identifier generation and release metadata.
+release-test:
+	$(PYTHON) -m unittest discover --start-directory tools/release --pattern 'test_*.py' --verbose
 
 # ios-check: Validate iOS project configuration (any host with PyYAML).
 # Runs static checks on project.yml structure, bundle identifiers, signing config, and plists.
