@@ -847,6 +847,15 @@ fn record_reminder(
     }
 
     let phrase = match agreement {
+        // A hedged request that claims no instant and calls the time ambiguous agrees with the
+        // hedge: it is kept as needing correction even where the resolver could read the phrase.
+        Agreement::Contradicts(_)
+            if hedged
+                && candidate.instant.is_none()
+                && candidate.quality == TimeResolutionQuality::Ambiguous =>
+        {
+            phrase
+        }
         Agreement::Contradicts(contradiction) => {
             return Ok(ReminderDisposition::CandidateRejected(contradiction));
         }
@@ -2501,7 +2510,32 @@ fn request_hedge(tokens: &[IntentToken], cue_start: usize, verb: &str) -> Option
     }
     let (clause_words, hedged_near_cue) = skip_hedges(&clause_words);
     let (clause_words, hedged_at_start) = trim_leading_hedges(clause_words);
-    is_first_person_request(clause_words, verb).then_some(hedged_near_cue || hedged_at_start)
+    is_first_person_request(clause_words, verb).then(|| {
+        hedged_near_cue || hedged_at_start || hedged_by_earlier_clauses(&tokens[..cue_start])
+    })
+}
+
+/// Whether the clauses just before the request's own clause hold only politeness and hedge words
+/// with at least one hedge ("Maybe, remind me", "Okay, maybe. Remind me"), so a punctuated hedge
+/// leaves the timing unconfirmed like an unpunctuated one. A hedge in a separate sentence counts
+/// the same: the hedge word has no other function there.
+fn hedged_by_earlier_clauses(tokens_before_cue: &[IntentToken]) -> bool {
+    let own_clause_start = tokens_before_cue
+        .iter()
+        .rposition(|token| token.clause_break)
+        .unwrap_or(0);
+    let mut hedged = false;
+    for token in tokens_before_cue[..own_clause_start].iter().rev() {
+        if token.clause_break {
+            continue;
+        }
+        if HEDGE_WORDS.contains(&token.text.as_str()) {
+            hedged = true;
+        } else if !POLITENESS_WORDS.contains(&token.text.as_str()) {
+            return false;
+        }
+    }
+    hedged
 }
 
 /// Trims politeness and hedge words from the start of the clause (the end of the nearest-first
