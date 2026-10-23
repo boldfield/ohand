@@ -85,6 +85,10 @@ targets:
       OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
       HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
       SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge/CoreC
+    preBuildScripts:
+      - name: Generate and inject build identifier
+        script: '"${SRCROOT}/../ios/scripts/generate_build_info.sh"'
+        basedOnDependencyAnalysis: false
     dependencies:
       - target: OhAndServices
       - target: OhAndCoreBridge

@@ -24,15 +24,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCHEME="${SCHEME:-OhAndApp}"
-INSTALL_FLAG="--install"
+INSTALL_FLAG=""
 TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-PROFILE_MAP_FLAG=""
 
 # Check for flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-install)
             INSTALL_FLAG=""
+            ;;
+        --install)
+            INSTALL_FLAG="--install"
             ;;
         --scheme)
             SCHEME="$2"
@@ -66,23 +68,12 @@ echo "Timestamp: $collected_at" >&2
 mkdir -p "$REPO_ROOT/docs/releases/m1-trial"
 mkdir -p "$REPO_ROOT/docs/validation/evidence/apple-signing"
 
-# OhAndApp requires profile map argument
-if [ "$SCHEME" = "OhAndApp" ]; then
-    PROFILE_MAP_FLAG="--profile-map"
-fi
-
 # Run the signing script (with or without install depending on flags)
 echo "Signing $SCHEME for trial..." >&2
-if [ -n "$INSTALL_FLAG" ]; then
-    python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
-        --scheme "$SCHEME" \
-        $PROFILE_MAP_FLAG \
-        $INSTALL_FLAG
-else
-    python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" \
-        --scheme "$SCHEME" \
-        $PROFILE_MAP_FLAG
-fi
+SIGN_ARGS="--scheme $SCHEME"
+[ -n "$INSTALL_FLAG" ] && SIGN_ARGS="$SIGN_ARGS --install"
+
+python3 "$REPO_ROOT/tools/apple-build/sign_probe.py" $SIGN_ARGS
 
 echo "Trial candidate signed successfully" >&2
 echo "Use the build identifier: $build_identifier" >&2

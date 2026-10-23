@@ -214,25 +214,27 @@ final class SimulatorUpgradePersistenceTests: XCTestCase {
 
     private func scalar(root: ServiceCompositionRoot, query: String) -> String {
         var result = ""
-        do {
-            // Access the underlying core handle to run direct SQL queries for verification
-            let handle = root.coreHandle
-            var stmt: OpaquePointer?
-            defer { sqlite3_finalize(stmt) }
+        let dbPath = storageRoot.appendingPathComponent("store.db").path
+        var database: OpaquePointer?
+        guard sqlite3_open(dbPath, &database) == SQLITE_OK, let database = database else {
+            XCTFail("failed to open database")
+            return ""
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5000)
 
-            guard sqlite3_prepare_v2(handle.pointer, query, -1, &stmt, nil) == SQLITE_OK else {
-                XCTFail("failed to prepare query: \(String(cString: sqlite3_errmsg(handle.pointer)))")
-                return ""
-            }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
 
-            if sqlite3_step(stmt) == SQLITE_ROW {
-                let colValue = sqlite3_column_text(stmt, 0)
-                if let colValue = colValue {
-                    result = String(cString: colValue)
-                }
+        guard sqlite3_prepare_v2(database, query, -1, &stmt, nil) == SQLITE_OK else {
+            XCTFail("failed to prepare query: \(String(cString: sqlite3_errmsg(database)))")
+            return ""
+        }
+
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            if let colValue = sqlite3_column_text(stmt, 0) {
+                result = String(cString: colValue)
             }
-        } catch {
-            XCTFail("failed to query database: \(error)")
         }
 
         return result
