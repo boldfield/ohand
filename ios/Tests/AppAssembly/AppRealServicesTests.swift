@@ -118,6 +118,21 @@ final class AppRealServicesTests: XCTestCase {
         }
     }
 
+    private final class ChangeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var changes: [ItemChange] = []
+        var all: [ItemChange] {
+            lock.lock()
+            defer { lock.unlock() }
+            return changes
+        }
+        func add(_ change: ItemChange) {
+            lock.lock()
+            changes.append(change)
+            lock.unlock()
+        }
+    }
+
     private final class UnreachableProviderSender: ProviderRequestSender, @unchecked Sendable {
         func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
             throw URLError(.notConnectedToInternet)
@@ -272,6 +287,53 @@ final class AppRealServicesTests: XCTestCase {
         XCTAssertGreaterThan(completionObserverRuns.count, runsBeforeSave, "the completion observer ran after the drain")
         XCTAssertTrue(reminderScheduled(), "the reminder pass ran after the same drain")
         settleBackgroundWork(services)
+    }
+
+    func testACompletedInterpretationDrainPublishesTheItemChangeSignalThroughTheProductionRoot() throws {
+        let services = try AppServices.production(
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
+        created.append(services)
+        let changes = ChangeBox()
+        let stopObserving = services.root.observeItemChanges { changes.add($0) }
+        defer { stopObserving() }
+
+        services.captureEntry.textModel.updateText("remind me 2099-01-01 09:00:00 to call mom")
+        services.captureEntry.saveText()
+        wait { changes.all.contains(.allItems) }
+
+        XCTAssertTrue(changes.all.contains(.allItems), "applied interpretation asks every list to read again")
+        XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM reminders"), "0", "the drain really applied its result")
+        settleBackgroundWork(services)
+    }
+
+    func testDeliveredNotificationsAreRecordedOnceAtForegroundThroughTheProductionRoot() throws {
+        let center = FakeNotificationCenter()
+        let services = try makeInjectedServices(
+            grant: nil, center: center, lifecycleCenter: NotificationCenter(), recognizer: nil)
+        services.start(isActive: true)
+        services.root.saveText(
+            captureID: UUID().uuidString, text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
+        ) { _ in }
+        func reminderRequest() -> NotificationCenterRequest? {
+            center.addedRequests.first { $0.identifier != PendingProcessingAlert.identifier }
+        }
+        wait { reminderRequest() != nil }
+        let request = try XCTUnwrap(reminderRequest(), "the reminder was scheduled")
+        settleBackgroundWork(services)
+        XCTAssertEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
+
+        // The OS delivered it while the app was away, and nothing tapped it.
+        center.deliver(identifier: request.identifier, at: Date())
+        services.lifecycle.foregroundActivated()
+        wait { self.scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'") == "1" }
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1")
+        XCTAssertNotEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
+
+        services.lifecycle.foregroundActivated()
+        settleBackgroundWork(services)
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1",
+            "a second return to the foreground records nothing new")
     }
 
     func testASaveThatFailsRequestsNoDrainAndTakesNoBackgroundTime() throws {

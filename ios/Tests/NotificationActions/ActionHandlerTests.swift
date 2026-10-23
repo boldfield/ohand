@@ -334,6 +334,38 @@ final class ActionHandlerTests: XCTestCase {
         XCTAssertEqual(rig.core.calls, ["evidence:opened:rem-1#2"])
     }
 
+    func testDroppedOpenIsNotReplayedWhenAnUnrelatedAuthenticationWinsTheRace() async {
+        let rig = makeRig()
+        rig.handler.ingest(event(.opened))
+        await rig.handler.reconcile()
+        rig.authorization.isAuthenticated = true
+
+        await rig.handler.discardHeldOpens()
+        await rig.handler.reconcile()
+
+        XCTAssertTrue(rig.openedItems.isEmpty, "the person declined, so a session that authenticated first opens nothing")
+        XCTAssertTrue(rig.journal.stored.isEmpty)
+    }
+
+    func testDroppedOpenSurvivesAJournalThatCannotRemoveIt() async {
+        let rig = makeRig()
+        rig.handler.ingest(event(.opened))
+        await rig.handler.reconcile()
+        rig.journal.failsRemovals = true
+
+        await rig.handler.discardHeldOpens()
+        XCTAssertEqual(rig.journal.stored.map(\.operation), [.open], "the removal failed, so the entry is still stored")
+
+        rig.authorization.isAuthenticated = true
+        await rig.handler.reconcile()
+        XCTAssertTrue(rig.openedItems.isEmpty, "a stored but dropped open is not replayed")
+
+        rig.journal.failsRemovals = false
+        await rig.handler.reconcile()
+        XCTAssertTrue(rig.journal.stored.isEmpty)
+        XCTAssertTrue(rig.openedItems.isEmpty)
+    }
+
     func testDiscardingHeldOpensKeepsOtherDeferredWork() async {
         let rig = makeRig()
         rig.handler.ingest(event(action(NotificationActionIdentifier.complete)))

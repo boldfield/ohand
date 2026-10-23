@@ -1239,12 +1239,7 @@ public final class ServiceCompositionRoot {
         completionDrain = JobRunnerCompletionDrain(runner: assembly.jobRunner)
         assembly.rootReference.set(self)
         let drainForCompletion = completionDrain
-        let changesForDrain = assembly.itemChanges
-        let runnerForDrain = assembly.jobRunner
         jobRunner.setDrainIdleObserver { [weak self] in
-            if let change = Self.itemChange(afterDrain: runnerForDrain.lastOutcome) {
-                changesForDrain.publish(change)
-            }
             self?.runReminderPassAfterDrain()
             drainForCompletion.drainWentIdle()
         }
@@ -1628,6 +1623,9 @@ public final class ServiceCompositionRoot {
     public func discardHeldNotificationOpens() async {
         await notificationActions.handler.discardHeldOpens()
     }
+
+    /// The ingestor every notification bridge shares, so callbacks the bridges see reach the journal and the core.
+    var notificationEventIngestor: NotificationEventIngestor { notificationActions.ingestor }
 
     /// Records the notifications the OS delivered while the app was away, once each. Delivery evidence needs no
     /// authenticated session. Call at launch and on each return to the foreground.
@@ -2121,7 +2119,15 @@ public final class ServiceCompositionRoot {
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
                 retryDelay: configuration.jobRetryDelaySeconds)
             undo.append { jobRunner.shutDown() }
-            router.register { jobRunner.handle($0) }
+            // Each drain's end is checked as it happens, not only the last one of a re-run chain: a drain that
+            // applied results and was followed at once by an empty drain must still refresh the lists.
+            router.register { event in
+                let handled = jobRunner.handle(event)
+                if handled, let change = ServiceCompositionRoot.itemChange(afterDrain: jobRunner.lastOutcome) {
+                    itemChanges.publish(change)
+                }
+                return handled
+            }
 
             let providerTransport = try adapters.attachProviderTransport(core, adapters.sender)
             undo.append { providerTransport.shutDown() }
