@@ -75,6 +75,9 @@ final class SimulatorHappyPathTests: XCTestCase {
     private let permission = FakeMicrophonePermission()
     private let poller = ManualPoller()
 
+    /// The controlled clock every production instant (capture, reminder resolution, retrieval bounds) derives from.
+    private let fixedNow = Date(timeIntervalSince1970: 1_768_478_400)  // 2026-01-15T12:00:00Z
+
     private var utcCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -97,6 +100,7 @@ final class SimulatorHappyPathTests: XCTestCase {
             testing: CompositionConfiguration(
                 storageRootPath: storageRoot.path, captureRouteID: "route-end-to-end", jobRetryDelaySeconds: 3600),
             environment: CompositionEnvironment(
+                now: { [fixedNow] in fixedNow },
                 timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
                 sender: sender,
@@ -133,7 +137,7 @@ final class SimulatorHappyPathTests: XCTestCase {
 
     func testSilentCaptureThroughReminderSchedulingAndNotificationActionCompletion() throws {
         unlock()
-        let words = "remind me 2099-01-01 09:00:00 to call mom"
+        let words = "remind me 2026-01-16 09:00:00 to call mom"
 
         let itemID = try captureSilently(words)
 
@@ -193,35 +197,40 @@ final class SimulatorHappyPathTests: XCTestCase {
 
     func testWithNoProviderASessionTopicAndFacetCorrectionAreRetrievedBySinceDateWithoutNetwork() throws {
         unlock()
-        let garageID = try captureSilently("synthetic garage shelf")
-        let kitchenID = try captureSilently("synthetic kitchen tap")
+        let therapyWords = "Bring this up in therapy: synthetic sleep schedule"
+        let therapyID = try captureSilently(therapyWords)
+        let otherID = try captureSilently("synthetic kitchen tap")
 
-        for (index, pair) in [(garageID, "Garage"), (kitchenID, "Kitchen")].enumerated() {
-            let start = try revision(of: pair.0)
-            _ = try correct { corrections in
-                try await corrections.correctSessionTopic(
-                    commandID: "e2e-topic-\(index)", itemID: pair.0, expectedRevision: start, sessionTopic: pair.1
-                ).revision
-            }
-        }
-        let facetRevision = try revision(of: garageID)
+        // The offline grammar derives the session-topic facet from the explicit phrase, with no provider.
+        XCTAssertTrue(
+            pump { self.scalar("SELECT current_session_topic FROM items WHERE item_id = '\(therapyID)'") == "therapy" },
+            "the explicit phrase derived the therapy session topic locally")
+        XCTAssertEqual(scalar("SELECT IFNULL(current_session_topic, '') FROM items WHERE item_id = '\(otherID)'"), "")
+
+        // Correct the derived facet itself.
+        let topicRevision = try revision(of: therapyID)
         _ = try correct { corrections in
-            try await corrections.correctType(
-                commandID: "e2e-facet", itemID: garageID, expectedRevision: facetRevision, itemType: .idea
+            try await corrections.correctSessionTopic(
+                commandID: "e2e-topic", itemID: therapyID, expectedRevision: topicRevision, sessionTopic: "Coaching"
             ).revision
         }
-        let yesterday = Date().addingTimeInterval(-86_400)
-
-        let page = try XCTUnwrap(
-            search(RetrievalSearchRequest(sessionTopic: "garage", since: yesterday)).get())
-
-        XCTAssertEqual(page.rows.map(\.reference.value), [garageID], "the topic matches whatever its case")
-        let row = try XCTUnwrap(page.rows.first)
-        XCTAssertEqual(row.itemType, .idea, "the corrected facet is shown")
-        XCTAssertEqual(row.text, "synthetic garage shelf", "the original words come back")
-        let tomorrow = Date().addingTimeInterval(86_400)
         XCTAssertEqual(
-            try XCTUnwrap(search(RetrievalSearchRequest(sessionTopic: "garage", since: tomorrow)).get())
+            scalar("SELECT current_session_topic FROM items WHERE item_id = '\(therapyID)'"), "Coaching",
+            "the user's correction replaced the derived topic")
+
+        let yesterday = fixedNow.addingTimeInterval(-86_400)
+        let page = try XCTUnwrap(
+            search(RetrievalSearchRequest(sessionTopic: "coaching", since: yesterday)).get())
+
+        XCTAssertEqual(page.rows.map(\.reference.value), [therapyID], "the corrected topic matches whatever its case")
+        let row = try XCTUnwrap(page.rows.first)
+        XCTAssertEqual(row.text, therapyWords, "the original words come back")
+        XCTAssertEqual(
+            try XCTUnwrap(search(RetrievalSearchRequest(sessionTopic: "therapy", since: yesterday)).get())
+                .totalAccessible, 0, "the superseded derived topic no longer matches")
+        let tomorrow = fixedNow.addingTimeInterval(86_400)
+        XCTAssertEqual(
+            try XCTUnwrap(search(RetrievalSearchRequest(sessionTopic: "coaching", since: tomorrow)).get())
                 .totalAccessible, 0, "the since date drops items captured before it")
         XCTAssertEqual(sender.attemptCount, 0, "no provider configured, no network request")
         XCTAssertTrue(center.addedRequests.allSatisfy { $0.identifier == PendingProcessingAlert.identifier })
