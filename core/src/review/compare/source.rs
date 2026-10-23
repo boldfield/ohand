@@ -6,7 +6,8 @@ use super::arm::{ArmError, ArmLabel};
 use super::pair::RequestMismatch;
 use crate::interpretation::instructions::{content_version, OUTPUT_CONTRACT_VERSION};
 use crate::providers::contracts::{
-    DiagnosticRequestError, InterpretationRequest, RequestValidationError, RequestedSettings, TextBasis,
+    DiagnosticRequestError, InterpretationRequest, RequestValidationError, RequestedSettings,
+    TextBasis,
 };
 use crate::time::{TimeContext, TimeResolver};
 

@@ -1370,7 +1370,7 @@ mod voice_capture_interpretation {
                  'job-synthetic-transcription', '5a1c0000-0000-4000-8000-0000000000f1', ?, 0, \
                  'staging/2026-10-08/clip-d.wav', ?, 'fake-recognizer/1', 'en-US', 0.9, \
                  '2026-10-08T09:30:02Z')",
-                rusqlite::params![TRANSCRIPT_TEXT, "0".repeat(64)],
+                rusqlite::params![ITEM_ID, TRANSCRIPT_TEXT, "0".repeat(64)],
             )
             .unwrap();
     }
