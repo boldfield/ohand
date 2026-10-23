@@ -55,18 +55,39 @@ final class RetrievalSearchModel: ObservableObject {
     private let calendar: Calendar
     private var generation = 0
     private var lastRequest: RetrievalSearchRequest?
+    /// The last search sent from its first result: the words and filters on screen, whether its answer is awaited,
+    /// came back or failed. Loading more pages does not change it.
+    private var shownRequest: RetrievalSearchRequest?
     private var handedOffToDetail = false
+    /// True from leaving for a result's detail (search kept) until the screen is back.
+    private var awayInDetail = false
+    private var isInDetail: Bool { handedOffToDetail || awayInDetail }
+    /// True once an item changed after the shown results were asked for, so they may be out of date.
+    private var resultsMayBeStale = false
+    private var removeChangeObserver: (() -> Void)?
 
     init(
         searcher: RetrievalSearching,
         readScope: @escaping () -> CompositionReadScope,
         onSelect: @escaping (RetrievalItemReference) -> Void,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        observeItemChanges: (@escaping @Sendable (ItemChange) -> Void) -> () -> Void = { _ in {} }
     ) {
         self.searcher = searcher
         self.readScope = readScope
         self.onSelect = onSelect
         self.calendar = calendar
+        removeChangeObserver = observeItemChanges { [weak self] change in
+            if Thread.isMainThread {
+                self?.itemsDidChange(change)
+            } else {
+                DispatchQueue.main.async { self?.itemsDidChange(change) }
+            }
+        }
+    }
+
+    deinit {
+        removeChangeObserver?()
     }
 
     var currentRequest: RetrievalSearchRequest {
@@ -105,10 +126,44 @@ final class RetrievalSearchModel: ObservableObject {
     /// Call when the screen appears or the app becomes active: a session that is no longer authenticated empties it.
     func revalidate() {
         handedOffToDetail = false
+        awayInDetail = false
         if readScope() != .authenticated, phase != .idle {
             clear()
             phase = .locked
+            return
         }
+        if resultsMayBeStale { runAgain() }
+    }
+
+    /// An item changed (deleted, corrected, completed, cancelled, reminder edited, or everything reset). The result for
+    /// it is dropped at once, so a deleted item is never shown while the query runs again. The query runs again right
+    /// away when the results are on screen (or beside an item pane), and on return when the person is in an item's
+    /// detail. Results nobody asked for yet, or none, need nothing.
+    func itemsDidChange(_ change: ItemChange) {
+        guard phase != .idle, phase != .locked else { return }
+        resultsMayBeStale = true
+        switch change {
+        case .allItems:
+            rows = []
+            totalAccessible = 0
+            canLoadMore = false
+            selectedReference = nil
+        case .item(let itemID):
+            let before = rows.count
+            rows.removeAll { $0.reference.value == itemID.lowercased() }
+            totalAccessible = max(0, totalAccessible - (before - rows.count))
+        }
+        if !isInDetail { runAgain() }
+    }
+
+    /// Runs the query again from its first result, keeping the item pane's selection. That is the search whose words and
+    /// filters are on screen, even while it is still running or after it failed, never an older one that answered.
+    private func runAgain() {
+        guard let request = shownRequest else { return }
+        resultsMayBeStale = false
+        var first = request
+        first.offset = 0
+        run(first, restoring: selectedReference)
     }
 
     /// Call when the screen goes away. Going on to a result's detail keeps the search, so coming back finds it, but only
@@ -116,6 +171,7 @@ final class RetrievalSearchModel: ObservableObject {
     func screenDidDisappear() {
         let keepsSearch = handedOffToDetail && readScope() == .authenticated
         handedOffToDetail = false
+        awayInDetail = keepsSearch
         if !keepsSearch { clear() }
     }
 
@@ -135,9 +191,14 @@ final class RetrievalSearchModel: ObservableObject {
         problem = nil
         lastRequest = nil
         selectedReference = nil
+        resultsMayBeStale = false
+        awayInDetail = false
+        shownRequest = nil
     }
 
-    private func run(_ request: RetrievalSearchRequest, appending: Bool = false) {
+    private func run(
+        _ request: RetrievalSearchRequest, appending: Bool = false, restoring: RetrievalItemReference? = nil
+    ) {
         problem = nil
         if let message = request.problem(calendar: calendar) {
             problem = message
@@ -151,27 +212,40 @@ final class RetrievalSearchModel: ObservableObject {
         generation += 1
         let thisGeneration = generation
         if !appending {
-            selectedReference = nil
+            // A repeat of the query keeps the pane's item; a new search drops it.
+            if restoring == nil { selectedReference = nil }
             rows = []
             totalAccessible = 0
             canLoadMore = false
         }
         phase = .searching
+        if !appending { shownRequest = request }
         searcher.search(request) { [weak self] result in
             DispatchQueue.main.async {
-                self?.finish(result, for: request, generation: thisGeneration, appending: appending)
+                self?.finish(
+                    result, for: request, generation: thisGeneration, appending: appending, restoring: restoring)
             }
         }
     }
 
     private func finish(
         _ result: Result<RetrievalPage, RetrievalSearchFailure>, for request: RetrievalSearchRequest,
-        generation finishedGeneration: Int, appending: Bool
+        generation finishedGeneration: Int, appending: Bool, restoring: RetrievalItemReference? = nil
     ) {
         guard finishedGeneration == generation else { return }
         guard readScope() == .authenticated else {
             clear()
             phase = .locked
+            return
+        }
+        // An item changed while this was being read, so the page may still hold it. Ask again instead of showing it.
+        if resultsMayBeStale, case .success = result {
+            lastRequest = request
+            if isInDetail {
+                if !appending { rows = [] }
+            } else {
+                runAgain()
+            }
             return
         }
         switch result {
@@ -183,6 +257,7 @@ final class RetrievalSearchModel: ObservableObject {
                 rows = []
                 totalAccessible = 0
                 canLoadMore = false
+                selectedReference = nil
                 phase = (failure == .notAuthenticated || failure == .relocked) ? .locked : .failed(failure)
             }
         case .success(let page):
@@ -191,6 +266,8 @@ final class RetrievalSearchModel: ObservableObject {
             rows = appending ? rows + page.rows : page.rows
             canLoadMore = page.hasMore
             phase = rows.isEmpty ? .empty : .results
+            // The pane keeps its item even when the row is gone: a deleted item still shows its deletion result there,
+            // until the person selects another result or searches again.
         }
     }
 }
@@ -204,6 +281,7 @@ extension RetrievalSearchModel {
         RetrievalSearchModel(
             searcher: searcher,
             readScope: { [weak root] in root?.readScope ?? .captureOnly },
-            onSelect: { [weak navigation] reference in navigation?.pushItem(itemID: reference.value) })
+            onSelect: { [weak navigation] reference in navigation?.pushItem(itemID: reference.value) },
+            observeItemChanges: { [weak root] handler in root?.observeItemChanges(handler) ?? {} })
     }
 }

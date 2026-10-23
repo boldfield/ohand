@@ -215,6 +215,15 @@
       ],
       "old_task_id": "7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0",
       "old_pr": "https://github.com/boldfield/ohand/pull/27"
+    },
+    "U10": {
+      "reason": "Automated audits and their fixes are simulator-checkable; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them.",
+      "children": [
+        "U10a",
+        "U10b"
+      ],
+      "old_task_id": "f5423770-230e-46e0-9451-80a56f6a7b3a",
+      "old_pr": null
     }
   },
   "tasks": [
@@ -3753,6 +3762,70 @@
         "core/src/ffi/core_handle/instance.rs:243",
         "core/src/store/schema/mod.rs:128"
       ]
+    },
+    {
+      "key": "U10a",
+      "parent": "U10",
+      "title": "Fix and gate the simulator-checkable accessibility of the M1 app",
+      "file_scope": [
+        "ios/UITests/Accessibility/",
+        "ios/scripts/accessibility-simulator.sh",
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "docs/validation/accessibility.md",
+        "app/"
+      ],
+      "intent": "Find, fix and gate every accessibility defect the simulator can detect, so the device pass confirms the app instead of discovering its defects.",
+      "acceptance": [
+        "See the U10a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2
+      ],
+      "depends_on": [
+        "C06",
+        "DS04b",
+        "DS05",
+        "DS06",
+        "DS07",
+        "DS09",
+        "U03b",
+        "U04b",
+        "U07c",
+        "U08b",
+        "U09"
+      ],
+      "source_pointers": [
+        "ios/project.yml:330",
+        ".github/workflows/ios.yml:329",
+        "docs/features/m1-ui-design.md",
+        "docs/validation/evidence/device-feasibility/2026-10-10-latency-accessibility.json"
+      ]
+    },
+    {
+      "key": "U10b",
+      "parent": "U10",
+      "title": "Record the actual-device accessibility pass",
+      "file_scope": [
+        "docs/validation/accessibility.md",
+        "docs/validation/evidence/accessibility/"
+      ],
+      "intent": "Fold the maintainer's device pass into docs/validation/accessibility.md as cited evidence.",
+      "acceptance": [
+        "See the U10b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3
+      ],
+      "depends_on": [
+        "U10a"
+      ],
+      "source_pointers": [
+        "docs/validation/accessibility.md"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4247,19 +4320,6 @@
       "U08b",
       "T08"
     ],
-    "U10": [
-      "C06",
-      "DS04b",
-      "DS05",
-      "DS06",
-      "DS07",
-      "DS09",
-      "U03b",
-      "U04b",
-      "U07c",
-      "U08b",
-      "U09"
-    ],
     "T03": [
       "N06",
       "S03",
@@ -4318,7 +4378,7 @@
       "T09",
       "T10",
       "T12b",
-      "U10"
+      "U10b"
     ],
     "T06": [
       "T05"
@@ -4535,7 +4595,23 @@
     "F40": [
       "U06b"
     ],
-    "F41": []
+    "F41": [],
+    "U10a": [
+      "C06",
+      "DS04b",
+      "DS05",
+      "DS06",
+      "DS07",
+      "DS09",
+      "U03b",
+      "U04b",
+      "U07c",
+      "U08b",
+      "U09"
+    ],
+    "U10b": [
+      "U10a"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -4717,6 +4793,10 @@
     {
       "date": "2026-10-21",
       "change": "Added F40 (exact-destination grant read; F39 depends on it) and F41 (export cancellation and secure_delete; T04b depends on it). F31 owns DeletionViewTests.swift and the walkthrough Audio export step. F28 whole-capture scope amendment."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "U10 split into U10a (simulator-checkable accessibility fixes and CI gate) and U10b (maintainer actual-device pass); original task f5423770 retired; T05 depends on U10b."
     }
   ]
 }

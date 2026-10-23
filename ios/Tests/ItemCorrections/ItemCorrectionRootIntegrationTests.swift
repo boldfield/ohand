@@ -11,6 +11,23 @@ private final class UnreachableProviderSender: ProviderRequestSender, @unchecked
     }
 }
 
+private final class ChangeLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [ItemChange] = []
+
+    var changes: [ItemChange] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func append(_ change: ItemChange) {
+        lock.lock()
+        stored.append(change)
+        lock.unlock()
+    }
+}
+
 private final class CorrectionResultBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Result<Value, Error>?
@@ -94,6 +111,25 @@ final class ItemCorrectionRootIntegrationTests: XCTestCase {
             XCTAssertEqual(error as? ItemCorrectionError, .staleRevision(currentRevision: start + 1))
         }
         XCTAssertEqual(try revision(of: itemID), start + 1, "a refused correction writes nothing")
+    }
+
+    func testAStoredCorrectionSignalsTheChangeAndAStaleOneDoesNot() throws {
+        let root = try makeRoot(authenticated: true)
+        defer { root.shutDown() }
+        let corrections = root.itemCorrections
+        let itemID = try saveCapture(root)
+        let start = try revision(of: itemID)
+        let seen = ChangeLog()
+        let remove = root.observeItemChanges { seen.append($0) }
+        defer { remove() }
+
+        _ = try run { try await corrections.correctText(
+            commandID: "cmd-1", itemID: itemID, expectedRevision: start, text: "call the roofer tomorrow") }
+        XCTAssertTrue(pump(until: { !seen.changes.isEmpty }), "the signal reaches the main thread")
+        XCTAssertThrowsError(try run { try await corrections.correctText(
+            commandID: "cmd-2", itemID: itemID, expectedRevision: start, text: "stale") })
+        _ = pump(until: { false }, timeout: 0.3)
+        XCTAssertEqual(seen.changes, [.item(itemID)], "only the stored correction published, and only the identifier")
     }
 
     func testARepeatedCommandReportsTheFirstOutcomeAndAChangedOneConflicts() throws {
