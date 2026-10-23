@@ -307,4 +307,40 @@ final class ReminderControlServiceTests: XCTestCase {
         XCTAssertTrue(core.commands.isEmpty)
         XCTAssertTrue(core.reads.isEmpty)
     }
+
+    // MARK: Change signal
+
+    func testACorrectionAndACancelPublishTheItemAndRefusalsPublishNothing() async {
+        let publisher = RecordingChangePublisher()
+        let core = ScriptedReminderControlCore(commands: [
+            .success(applied()), .success(applied("cancelled")),
+            .success(ReminderControlAnswer(outcome: "stale_revision", currentRevision: 7)),
+            .success(ReminderControlAnswer(outcome: "time_in_past")),
+            .failure(CoreFailure(errorClass: .transient, code: "storage_error", message: "x")),
+        ])
+        let service = ReminderControlService(
+            core: core, session: makeSession(authenticated: true), changes: publisher)
+
+        _ = try? await service.correctTime(
+            commandID: "c-1", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 1, instant: instant,
+            timeZoneID: "UTC")
+        _ = try? await service.cancel(commandID: "c-2", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 2)
+        XCTAssertEqual(publisher.changes, [.item("item-1"), .item("item-1")])
+
+        _ = try? await service.cancel(commandID: "c-3", itemID: "item-1", expectedRevision: 1, expectedReminderVersion: 2)
+        _ = try? await service.correctTime(
+            commandID: "c-4", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 1, instant: instant,
+            timeZoneID: "UTC")
+        _ = try? await service.cancel(commandID: "c-5", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 2)
+        XCTAssertEqual(publisher.changes.count, 2, "stale, refused and failed commands announce nothing")
+    }
+
+    func testACaptureOnlySessionPublishesNothing() async {
+        let publisher = RecordingChangePublisher()
+        let service = ReminderControlService(
+            core: ScriptedReminderControlCore(commands: [.success(applied())]),
+            session: makeSession(authenticated: false), changes: publisher)
+        _ = try? await service.cancel(commandID: "c-1", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 2)
+        XCTAssertTrue(publisher.changes.isEmpty)
+    }
 }

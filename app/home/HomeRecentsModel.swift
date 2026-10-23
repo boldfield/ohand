@@ -1,5 +1,6 @@
 import Foundation
 import OhAndCoreBridge
+import OhAndServices
 
 /// What the home needs from the read session and the recent-captures read. Every read goes through the private read
 /// gate, so a capture-only session is refused there as well; the model still never asks.
@@ -15,6 +16,13 @@ protocol HomeRecentsSource: AnyObject {
     /// Calls the handler after every scope change and every change of the quiet-attempt flag, on any thread. Returns the
     /// closure that removes the registration.
     func observeAccess(_ handler: @escaping @Sendable () -> Void) -> () -> Void
+    /// Calls the handler on the main thread after an item changed (see `ItemChange`). Returns the closure that removes
+    /// the registration.
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void
+}
+
+extension HomeRecentsSource {
+    func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void { {} }
 }
 
 /// The three states of the home body. Only `unlocked` ever holds anything derived from stored history.
@@ -61,6 +69,16 @@ final class HomeRecentsModel: ObservableObject {
     /// Raised at every loss of access, so a page that arrives afterwards is dropped.
     private var generation = 0
     private var removeObserver: (() -> Void)?
+    private var removeChangeObserver: (() -> Void)?
+    /// How many items the last first-page read returned: the head of the list that a reload replaces.
+    private var headCount = 0
+    /// Set when an item changed while the first page was being read, so that read may predate the change.
+    private var reloadFirstPageWhenDone = false
+    /// Items that changed while the first page was being read; that page may still hold them in their old state.
+    private var changedDuringFirstRead: Set<String> = []
+    /// Raised at every item change. A first-page read started before the latest change may hold an item in its old
+    /// state, so the poll and the post-interpretation refresh merge only a page read entirely after it.
+    private var itemChangeCount = 0
 
     /// Waits before the given poll attempt; tests replace it so no real time passes.
     private let pause: (TimeInterval) async -> Void
@@ -88,12 +106,20 @@ final class HomeRecentsModel: ObservableObject {
                 DispatchQueue.main.async { self?.accessDidChange() }
             }
         }
+        removeChangeObserver = source.observeItemChanges { [weak self] change in
+            if Thread.isMainThread {
+                self?.itemsDidChange(change)
+            } else {
+                DispatchQueue.main.async { self?.itemsDidChange(change) }
+            }
+        }
         if bodyState == .unlocked { loadFirstPage() }
     }
 
     deinit {
         cancelReads()
         removeObserver?()
+        removeChangeObserver?()
     }
 
     /// Ends the model: no read starts afterwards, every read in flight is cancelled and the observer is removed. Called
@@ -102,6 +128,8 @@ final class HomeRecentsModel: ObservableObject {
         isShutDown = true
         removeObserver?()
         removeObserver = nil
+        removeChangeObserver?()
+        removeChangeObserver = nil
         dropHistory()
     }
 
@@ -147,6 +175,57 @@ final class HomeRecentsModel: ObservableObject {
         isLoadingFirstPage = false
         isLoadingMore = false
         loadFailed = false
+        headCount = 0
+        reloadFirstPageWhenDone = false
+        changedDuringFirstRead = []
+    }
+
+    // MARK: Item changes
+
+    /// An item was deleted, corrected, completed, cancelled or had its reminder changed (or a reset removed them all).
+    /// A locked home holds nothing, so it loads nothing; the unlock reads the list afresh. An item the list does not show
+    /// needs nothing. A shown one is dropped at once, so a deleted item is gone before the read returns, and the first
+    /// page is read again so a changed one comes back current.
+    func itemsDidChange(_ change: ItemChange) {
+        itemChangeCount += 1
+        guard !isShutDown, bodyState == .unlocked else { return }
+        switch change {
+        case .allItems:
+            resetList()
+        case .item(let itemID):
+            let wasSorting = justSaved.removeValue(forKey: itemID) != nil
+            if isLoadingFirstPage { changedDuringFirstRead.insert(itemID) }
+            guard let index = loadedItems.firstIndex(where: { $0.itemID == itemID }) else {
+                if isLoadingMore {
+                    // The next page being read may hold the item in its old state; start over rather than append it.
+                    resetList()
+                    return
+                }
+                // A first page still being read may predate the change and hold the item.
+                if wasSorting || isLoadingFirstPage { reloadFirstPage() }
+                return
+            }
+            if index >= headCount {
+                // Past the head, a reload of the first page would not bring the item back.
+                resetList()
+                return
+            }
+            loadedItems.remove(at: index)
+            reloadFirstPage()
+        }
+    }
+
+    private func resetList() {
+        dropHistory()
+        loadFirstPage()
+    }
+
+    private func reloadFirstPage() {
+        if isLoadingFirstPage {
+            reloadFirstPageWhenDone = true
+        } else {
+            loadFirstPage()
+        }
     }
 
     // MARK: Entries
@@ -237,6 +316,13 @@ final class HomeRecentsModel: ObservableObject {
             handleFailure(error, startedIn: startedIn)
             if startedIn == generation { isLoadingFirstPage = false }
         }
+        if startedIn == generation, reloadFirstPageWhenDone {
+            reloadFirstPageWhenDone = false
+            // The page just merged may have brought a changed item back; the next read puts it right.
+            loadedItems.removeAll { changedDuringFirstRead.contains($0.itemID) }
+            changedDuringFirstRead = []
+            loadFirstPage()
+        }
     }
 
     /// Asks for the next page when the card that just appeared is among the last few.
@@ -283,6 +369,7 @@ final class HomeRecentsModel: ObservableObject {
 
     /// Replaces the head of the list with a fresh first page, keeping the pages already scrolled to.
     private func merge(firstPage page: CoreRecentItemsPage) {
+        headCount = page.items.count
         if loadedItems.isEmpty {
             loadedItems = page.items
             nextCursor = page.nextCursor
@@ -329,8 +416,11 @@ final class HomeRecentsModel: ObservableObject {
                 guard let self, !Task.isCancelled, startedIn == self.generation, !self.justSaved.isEmpty else { break }
                 delay = min(delay * 2, Self.longestPollDelay)
                 do {
+                    let changesBeforeRead = self.itemChangeCount
                     let page = try await self.readPage(cursor: nil)
                     guard startedIn == self.generation, self.source.isAuthenticated else { break }
+                    // An item changed under the read: the page may hold it as it was, so leave it to the next round.
+                    guard changesBeforeRead == self.itemChangeCount else { continue }
                     self.merge(firstPage: page)
                     try await self.clearFinishedInterpretations(startedIn: startedIn)
                 } catch {
@@ -347,12 +437,18 @@ final class HomeRecentsModel: ObservableObject {
     @MainActor
     private func refreshAfterInterpretation(itemID: String) async {
         let startedIn = generation
-        guard !Task.isCancelled else { return }
         do {
-            let page = try await readPage(cursor: nil)
-            guard startedIn == generation, source.isAuthenticated else { return }
-            merge(firstPage: page)
-            justSaved.removeValue(forKey: itemID)
+            while true {
+                guard !Task.isCancelled, startedIn == generation else { return }
+                let changesBeforeRead = itemChangeCount
+                let page = try await readPage(cursor: nil)
+                guard startedIn == generation, source.isAuthenticated else { return }
+                // An item changed under the read: the page may hold it as it was, so read it again.
+                guard changesBeforeRead == itemChangeCount else { continue }
+                merge(firstPage: page)
+                justSaved.removeValue(forKey: itemID)
+                return
+            }
         } catch {
             handleFailure(error, startedIn: startedIn)
         }

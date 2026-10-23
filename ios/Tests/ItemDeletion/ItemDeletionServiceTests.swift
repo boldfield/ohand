@@ -312,4 +312,39 @@ final class ItemDeletionServiceTests: XCTestCase {
         }
         XCTAssertEqual(core.commands, Array(repeating: .progress(itemID: "item-1"), count: 6))
     }
+
+    // MARK: Change signal
+
+    func testARecordedDeletionPublishesOnlyTheItemIdentifierAndARefusalOrFailurePublishesNothing() async throws {
+        let publisher = RecordingChangePublisher()
+        let core = ScriptedItemDeletionCore([
+            .success(recorded()), .success(progress(complete)),
+            .success(ItemDeletionAnswer(outcome: "stale_revision", currentRevision: 5)),
+            .failure(CoreFailure(errorClass: .transient, code: "storage_error", message: "x")),
+        ])
+        let service = ItemDeletionService(core: core, session: makeSession(authenticated: true), changes: publisher)
+
+        _ = try await service.delete(itemID: "item-1", expectedRevision: 1)
+        XCTAssertEqual(publisher.changes, [.item("item-1")])
+
+        for expectedRevision in [1, 5] {
+            do {
+                _ = try await service.delete(itemID: "item-1", expectedRevision: expectedRevision)
+                XCTFail("expected a refusal")
+            } catch {}
+        }
+        XCTAssertEqual(publisher.changes, [.item("item-1")], "a stale revision and a failure announce nothing")
+    }
+
+    func testACaptureOnlySessionPublishesNothing() async {
+        let publisher = RecordingChangePublisher()
+        let service = ItemDeletionService(
+            core: ScriptedItemDeletionCore([.success(recorded())]), session: makeSession(authenticated: false),
+            changes: publisher)
+        do {
+            _ = try await service.delete(itemID: "item-1", expectedRevision: 1)
+            XCTFail("expected a refusal")
+        } catch {}
+        XCTAssertTrue(publisher.changes.isEmpty)
+    }
 }
