@@ -3618,5 +3618,68 @@ Acceptance:
 5. **Native test.** A test in `ios/Tests/VoiceCapture/` asserts that the generated ID parses as a UUID and has no prefix.
 6. `make check` and `make test` pass. This is a native change, so exact-head macOS CI evidence is required, as AGENTS.md describes.
 
+**Amended (coordinator, 2026-10-23, before any attempt).** Acceptance 3 is withdrawn from F42 and moved to F43. The Status screen's "Try again" only asks the queue to drain (`JobRunnerService.requestDrain`), and a drain never reruns a job that failed terminally, so no existing retry path exists for this. F42 keeps acceptance 1, 2, 4, 5 and 6.
+
 After landing: the maintainer reinstalls and retries the failed voice notes from Status. The four voice notes on the phone keep their legacy IDs, which is what acceptance 2 is for.
+
+### F43
+
+Name the notes whose sorting failed, and run them again on purpose
+
+On 2026-10-22 every voice note failed to sort (F42). The person could not see which notes had failed or why, and could not run them again:
+- The processing health snapshot (`core/src/jobs/health/mod.rs`) holds counts and machine labels only, so Status could say only "Some work needs you".
+- Status's "Try again" asks the queue to drain. A drain never reruns a job that ended `failed`.
+- `repin_waiting_interpretations` (`core/src/jobs/configuration/repin.rs`) moves only unpinned waiting work. By design it never touches a job that was pinned to a profile and then failed.
+
+F43 adds the core read and the core operation. F44 adds the screens.
+
+Owned paths: `core/src/jobs/configuration/` (a new `failed_work` module beside `repin.rs`, plus its re-exports in `mod.rs`), `core/src/ffi/job_configuration.rs`, `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift`, `ios/Services/JobConfiguration/`, `core/tests/job_configuration/` and `ios/Tests/JobConfiguration/`.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. **A read of failed interpretation work.** It returns, for each active item whose latest `interpret` job ended `failed` and was not since replaced, the following:
+   - the item ID;
+   - the capture instant;
+   - the job's failure reason as a fixed machine label;
+   - whether the job was pinned to a provider, and to which profile version;
+   - a recovery label: `run_again` when running it again could succeed, or `change_settings` when it cannot run until the person changes a setting.
+
+   It is an authenticated (private) read, gated like the other item reads. It returns no text. It is ordered newest first and pages with a cursor, like the other job lists. The health snapshot is unchanged.
+2. **An operation that runs failed work again.** It takes a list of item IDs, or "all listed", and for each item makes a new `interpret` job at the item's current revision, pinned to whatever `resolve_profile_pin` selects now, linked to the failed job in `job_requeues`. This is the same rule `repin.rs` uses for waiting work.
+   - Reuse that code. Do not write a second pinning path.
+   - The failed job itself is never modified.
+   - An item whose current pin is `None`, because no provider is allowed, is not moved, and the result says so.
+   - The operation is idempotent: repeating it before the new job runs creates nothing.
+   - It returns the number moved and the number skipped, with reasons.
+3. **Tests.**
+   - A pinned job that failed as `rejected` appears in the read, and after the operation it has a new pinned job that a drain sends. Use the FFI job-runner recording host, as `core/src/ffi/job_runner/tests.rs` does.
+   - An unpinned `unsupported` failure is moved too, once a provider is allowed.
+   - A deleted or archived item is never listed or moved.
+   - A locked read is refused.
+   - Repeating the operation creates nothing.
+4. **Bridge.** The Swift bridge and `JobConfigurationService` expose the read and the operation, with tests in `ios/Tests/JobConfiguration/`. Exact-head macOS CI evidence is required.
+
+### F44
+
+Show which notes failed to sort and why, with a "Try again" that runs them again
+
+The screens for F43. Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths: `app/status/`, `app/source-detail/`, `ios/Tests/Status/`, `ios/Tests/SourceDetail/`, plus `ios/UITests/Walkthrough/WalkthroughUITests.swift`, only to add a Status screenshot with one failed note.
+
+Dependencies: F43.
+
+Acceptance:
+
+1. **Status, when unlocked.** When F43's read lists failed notes, "Some work needs you" lists up to 5 of them, newest first, each with:
+   - the first line of its text, read through the existing private item read;
+   - the time it was captured;
+   - one plain reason line. Map each machine label to fixed copy that a reviewer checks against the cause. For example, `rejected` becomes "The request was not accepted", and `unsupported` becomes "No provider was allowed when it was saved".
+
+   When there are more than 5, a "Show all" row leads to the full list. Locked, the section keeps today's count-only wording and offers unlock.
+2. **"Try again" re-runs failed work.** It calls F43's operation for the listed notes, then reports what happened in one line: the number queued again, and the number that cannot run until a setting changes, with a link to Processing when that is the cause. The existing drain request stays for work that is only waiting.
+3. **The note's detail screen**, when its sorting failed, shows one line with the same reason and a "Try again" for that one note. When the note is being sorted, it shows "Sorting…"; otherwise nothing.
+4. **Hosted view tests** cover Status in each case: locked, unlocked with 1 note, unlocked with more than 5, after a try-again that queued notes, and after one that could not queue because no provider was allowed. They also cover the detail line. Run them in both appearances. A walkthrough screenshot shows Status with one failed note. Exact-head macOS CI evidence is required.
 

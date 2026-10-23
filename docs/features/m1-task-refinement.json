@@ -3852,6 +3852,54 @@
         "core/src/review/compare/source.rs:79",
         "docs/architecture/m1-contracts.md:19"
       ]
+    },
+    {
+      "key": "F43",
+      "parent": null,
+      "title": "Name the notes whose sorting failed, and run them again on purpose",
+      "file_scope": [
+        "core/src/jobs/configuration/",
+        "core/src/ffi/job_configuration.rs",
+        "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift",
+        "ios/Services/JobConfiguration/",
+        "core/tests/job_configuration/",
+        "ios/Tests/JobConfiguration/"
+      ],
+      "intent": "A private read of failed interpretation work and an explicit operation that requeues it on the current pin, reusing repin.",
+      "acceptance": [
+        "See the F43 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/jobs/health/mod.rs:193",
+        "core/src/jobs/configuration/repin.rs:54",
+        "app/status/StatusModel.swift:11"
+      ]
+    },
+    {
+      "key": "F44",
+      "parent": null,
+      "title": "Show which notes failed to sort and why, with a Try again that runs them again",
+      "file_scope": [
+        "app/status/",
+        "app/source-detail/",
+        "ios/Tests/Status/",
+        "ios/Tests/SourceDetail/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
+      ],
+      "intent": "Status and item detail name failed notes, give the reason, and offer a try-again that actually reruns terminal failures.",
+      "acceptance": [
+        "See the F44 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F43"
+      ],
+      "source_pointers": [
+        "app/status/StatusText.swift:30",
+        "app/source-detail/SourceDetailView.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4638,7 +4686,11 @@
     "U10b": [
       "U10a"
     ],
-    "F42": []
+    "F42": [],
+    "F43": [],
+    "F44": [
+      "F43"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -4828,6 +4880,10 @@
     {
       "date": "2026-10-23",
       "change": "Added F42: voice captures minted voice-<uuid> capture IDs, which interpretation requests reject, so no voice note was sorted. Mint UUIDs; accept the exact legacy form; end-to-end voice-through-provider test."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F43 (failed-work read and explicit requeue, core and bridge) and F44 (Status and detail show failed notes with a working Try again; depends on F43). F42 acceptance 3 moved to F43."
     }
   ]
 }
