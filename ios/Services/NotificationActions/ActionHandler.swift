@@ -81,6 +81,8 @@ final class ActionHandler: @unchecked Sendable {
     private var tail: Task<Void, Never>?
     private var droppedOpenNotificationIDs: Set<String> = []
     private var dropsEveryStoredOpen = false
+    /// Notifications tapped since a discard that could not read the journal; that discard must not sweep them up.
+    private var opensStoredSinceUnreadDiscard: Set<String> = []
 
     init(
         core: NotificationActionCore,
@@ -110,6 +112,11 @@ final class ActionHandler: @unchecked Sendable {
     func ingest(_ event: NotificationEvent) -> NotificationActionIngestResult {
         let entries = Self.entries(for: event)
         guard !entries.isEmpty else { return .ignored }
+        if case .opened = event.kind {
+            lock.lock()
+            if dropsEveryStoredOpen { opensStoredSinceUnreadDiscard.insert(event.identifier.rawValue) }
+            lock.unlock()
+        }
         do {
             for entry in entries { try journal.append(entry) }
         } catch {
@@ -121,6 +128,7 @@ final class ActionHandler: @unchecked Sendable {
             lock.lock()
             droppedOpenNotificationIDs.remove(event.identifier.rawValue)
             lock.unlock()
+            try? journal.remove(Self.discardMarker(for: event.identifier.rawValue))
         }
         if startsDeliveryOnIngest { _ = enqueuePass() }
         return .persisted
@@ -145,7 +153,11 @@ final class ActionHandler: @unchecked Sendable {
         let discard: Task<Void, Never>
         lock.lock()
         if let snapshot {
-            for entry in snapshot where entry.operation == .open { droppedOpenNotificationIDs.insert(entry.notificationID) }
+            for entry in snapshot where entry.operation == .open {
+                droppedOpenNotificationIDs.insert(entry.notificationID)
+                // Durable, so a removal that fails and a relaunch cannot bring the open back.
+                try? journal.append(Self.discardMarker(for: entry.notificationID))
+            }
         } else {
             dropsEveryStoredOpen = true
         }
@@ -161,13 +173,7 @@ final class ActionHandler: @unchecked Sendable {
 
     private func removeDroppedOpens() {
         guard let entries = try? journal.pending() else { return }
-        lock.lock()
-        if dropsEveryStoredOpen {
-            for entry in entries where entry.operation == .open { droppedOpenNotificationIDs.insert(entry.notificationID) }
-            dropsEveryStoredOpen = false
-        }
-        let dropped = droppedOpenNotificationIDs
-        lock.unlock()
+        let dropped = adoptDurableDiscards(from: entries)
         for entry in entries where entry.operation == .open && dropped.contains(entry.notificationID) {
             do {
                 try journal.remove(entry)
@@ -180,6 +186,42 @@ final class ActionHandler: @unchecked Sendable {
         lock.lock()
         droppedOpenNotificationIDs.formIntersection(remaining)
         lock.unlock()
+        removeSpentDiscardMarkers(in: entries, remainingOpens: remaining)
+    }
+
+    private static func discardMarker(for notificationID: String) -> NotificationActionEntry {
+        NotificationActionEntry(
+            operation: .discardOpen, notificationID: notificationID, targetID: nil, occurredAtUnixMilliseconds: 0)
+    }
+
+    /// Turns what a journal read shows into the in-memory marks: stored discard markers, and a discard that could not
+    /// read the journal when it was made (which covers the opens stored then, not taps made since). Returns the marks.
+    private func adoptDurableDiscards(from entries: [NotificationActionEntry]) -> Set<String> {
+        var newlyDropped: [String] = []
+        lock.lock()
+        for entry in entries where entry.operation == .discardOpen {
+            droppedOpenNotificationIDs.insert(entry.notificationID)
+        }
+        if dropsEveryStoredOpen {
+            for entry in entries where entry.operation == .open
+                && !opensStoredSinceUnreadDiscard.contains(entry.notificationID) {
+                droppedOpenNotificationIDs.insert(entry.notificationID)
+                newlyDropped.append(entry.notificationID)
+            }
+            dropsEveryStoredOpen = false
+            opensStoredSinceUnreadDiscard = []
+        }
+        let marks = droppedOpenNotificationIDs
+        lock.unlock()
+        for notificationID in newlyDropped { try? journal.append(Self.discardMarker(for: notificationID)) }
+        return marks
+    }
+
+    /// A discard marker is spent once no stored open it names is left.
+    private func removeSpentDiscardMarkers(in entries: [NotificationActionEntry], remainingOpens: Set<String>) {
+        for entry in entries where entry.operation == .discardOpen && !remainingOpens.contains(entry.notificationID) {
+            try? journal.remove(entry)
+        }
     }
 
     private func isDroppedOpen(_ entry: NotificationActionEntry) -> Bool {
@@ -250,7 +292,11 @@ final class ActionHandler: @unchecked Sendable {
             report.retained += 1
             return report
         }
+        _ = adoptDurableDiscards(from: entries)
+        let openIDsBeforePass = Set(entries.filter { $0.operation == .open }.map(\.notificationID))
+        var openIDsLeft = openIDsBeforePass
         for entry in entries {
+            if entry.operation == .discardOpen { continue }
             var openedItemID: String?
             let disposition = await process(entry, openedItemID: &openedItemID)
             switch disposition {
@@ -270,9 +316,11 @@ final class ActionHandler: @unchecked Sendable {
                 report.retained += 1
                 continue
             }
+            if entry.operation == .open { openIDsLeft.remove(entry.notificationID) }
             if disposition == .settled { report.settled += 1 } else { report.discarded += 1 }
             if let openedItemID { report.openedItemIDs.append(openedItemID) }
         }
+        removeSpentDiscardMarkers(in: entries, remainingOpens: openIDsLeft)
         // A tap that is waiting for authentication asks the person to unlock, once per pass, as a prompt tap does.
         if heldOpen { requestUnlock() }
         return report

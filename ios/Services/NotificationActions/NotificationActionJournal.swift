@@ -11,6 +11,9 @@ struct NotificationActionEntry: Codable, Equatable, Sendable {
         case complete
         /// The tap's route to the item, which needs a private read and therefore an authenticated session.
         case open
+        /// A durable terminal disposition: the person declined or failed to unlock for the open of this notification,
+        /// so that open is never replayed. It is removed once no stored open it names is left.
+        case discardOpen
 
         /// Replay order for entries with the same time: evidence first, then the user's decisions.
         fileprivate var replayRank: Int {
@@ -20,6 +23,7 @@ struct NotificationActionEntry: Codable, Equatable, Sendable {
             case .acknowledge: return 2
             case .complete: return 3
             case .open: return 4
+            case .discardOpen: return 5
             }
         }
     }
