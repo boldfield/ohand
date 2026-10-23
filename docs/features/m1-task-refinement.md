@@ -3772,3 +3772,61 @@ Acceptance:
    - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
 5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
 
+### F47
+
+Make the iOS test suite deterministic: fix the intermittent failures
+
+The macOS suite fails intermittently often enough to slow every native merge. In the last 80 `ios.yml` runs (2026-10-21 23:11 to 2026-10-23 16:00 UTC), 80 job attempts failed across 19 PR branches:
+- 54 in "Run OhAndTests on simulator";
+- 22 in the screenshot walkthrough (16 compact, 6 regular);
+- 3 in the NotificationProbe UI tests;
+- 1 in the Tauri handoff.
+
+A few were real compile errors in the PR under test. Most passed unchanged on a rerun. F29 needed 3 attempts, and F42 has had 7 attempts fail in code it does not touch. Each rerun costs about 20 minutes of macOS time.
+
+These tests failed on branches whose change did not touch them. The number in brackets is how many distinct branches each failed on:
+- `WalkthroughUITests.testWalkthrough` (5);
+- `StatusIntegrationTests`: `testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged` (3), plus four others (1 each);
+- `CaptureEntryViewTests.testAConfirmedSaveClearsTheTextShowsTheSavedPillAndStillStatesTheReminder` (3);
+- `PlaybackRootIntegrationTests.testTheLifecycleDeletionCleanupUsesTheRootsFence` (2);
+- once each:
+  - `SourceDetailHostedTests.testTheRenderedScreenShowsSectionsPlayAndThenTheDisabledNoticeAfterDeletion`;
+  - two `SimulatorHappyPathTests`;
+  - `RetrievalSearchItemPaneTests.testAChangeStoredWhileThePanesReminderSaveIsInFlightIsShownOnceTheSaveSettles`;
+  - `LifecycleCoordinatorRealCoreTests.testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground`;
+  - `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable`;
+  - `ItemControlsRealCoreTests.testAStaleSaveShowsTheConflictAndTheHostCardShowsTheNewerValues`;
+  - two `HomeRecentsModelTests`;
+  - two `CompositionRootTests`, including `testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration`;
+  - four `AppServicesTests`, including the system-time-change test F27 addressed, which failed again after F27 landed;
+  - two `ActionHandlerTests`.
+
+Twelve test files wait with a fixed `settle()` (a set number of `Task.yield()` calls) instead of waiting for the state they assert. On a loaded simulator, that wait can end before the work it is waiting for.
+
+Owned paths: test code only. That is the test files named above and the twelve files that define a fixed-yield `settle()`:
+- `ios/Tests/Status/`, `ios/Tests/CaptureEntry/`, `ios/Tests/Playback/`, `ios/Tests/SourceDetail/`, `ios/Tests/EndToEnd/`;
+- `ios/Tests/Retrieval/`, `ios/Tests/Services/`, `ios/Tests/JobRunner/`, `ios/Tests/ItemControls/`, `ios/Tests/HomeRecents/`;
+- `ios/Tests/AppAssembly/`, `ios/Tests/NotificationActions/`;
+- any other `ios/Tests/` file that defines a fixed-yield `settle()`;
+- a new `ios/Tests/Support/` for one shared wait helper;
+- `ios/UITests/Walkthrough/WalkthroughUITests.swift`.
+
+No production code.
+
+Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`) and F42 (owns one `HomeRecentsModelTests` test). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+
+Acceptance:
+
+1. **One shared helper.** A bounded condition wait, for example `waitUntil(timeout:file:line:_:)`, that polls with `Task.yield()` and short sleeps. It fails the test with a clear message naming the condition when the timeout (default 5 s) passes. Every fixed-yield `settle()` that comes before an assertion about asynchronous work is replaced by a wait for the asserted condition. A `settle()` used only to prove that nothing happens may stay, but must yield at least as much as today.
+2. **Every named test is diagnosed.** For each one, the PR lists the cause: test timing, state shared between tests (a leaked task, recording session, notification center, Keychain item or simulator state), or a real race in product code.
+   - Fix test timing and shared state in the tests.
+   - A real product race is not fixed here. Report it in the task result with its evidence and block, so the coordinator can file it.
+3. **Walkthrough.** Each step waits for its element to exist and be hittable with an explicit timeout before acting. When it fails, it names the step and the element. The screenshots and their order are unchanged.
+4. **Nothing is weakened.**
+   - No assertion is removed or loosened.
+   - No test is skipped, disabled or moved out of the suite.
+   - No `-retry-tests-on-failure`, no `XCTExpectFailure`, and no retry loop around an assertion.
+   - Nothing in `ios.yml` changes.
+   - No timeout over 10 s without a stated reason.
+5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, with no test from the list failing. Rerun the whole workflow after the first success, not only a failed job. Link all three in the PR. Any failure during those runs is reported, with its test and cause, not hidden by a rerun.
+

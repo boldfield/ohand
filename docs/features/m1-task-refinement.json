@@ -3901,7 +3901,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F43"
+        "F43",
+        "F47"
       ],
       "source_pointers": [
         "app/status/StatusText.swift:30",
@@ -3928,7 +3929,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F37"
+        "F37",
+        "F47"
       ],
       "source_pointers": [
         "ios/Services/Assembly/CompositionRoot.swift:441",
@@ -3958,6 +3960,40 @@
       "source_pointers": [
         "core/src/time/expression.rs:1",
         "core/src/time/expression.rs:293"
+      ]
+    },
+    {
+      "key": "F47",
+      "parent": null,
+      "title": "Make the iOS test suite deterministic: fix the intermittent failures",
+      "file_scope": [
+        "ios/Tests/Status/",
+        "ios/Tests/CaptureEntry/",
+        "ios/Tests/Playback/",
+        "ios/Tests/SourceDetail/",
+        "ios/Tests/EndToEnd/",
+        "ios/Tests/Retrieval/",
+        "ios/Tests/Services/",
+        "ios/Tests/JobRunner/",
+        "ios/Tests/ItemControls/",
+        "ios/Tests/HomeRecents/",
+        "ios/Tests/AppAssembly/",
+        "ios/Tests/NotificationActions/",
+        "ios/Tests/Support/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
+      ],
+      "intent": "Replace fixed-yield waits with bounded condition waits, diagnose each intermittently failing test, stabilize the walkthrough, without weakening any check.",
+      "acceptance": [
+        "See the F47 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F37",
+        "F42"
+      ],
+      "source_pointers": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
+        ".github/workflows/ios.yml"
       ]
     }
   ],
@@ -4750,13 +4786,19 @@
     "F42": [],
     "F43": [],
     "F44": [
-      "F43"
+      "F43",
+      "F47"
     ],
     "F45": [
-      "F37"
+      "F37",
+      "F47"
     ],
     "F46": [
       "F29"
+    ],
+    "F47": [
+      "F37",
+      "F42"
     ]
   },
   "retained_dependency_overrides": {
@@ -4963,6 +5005,10 @@
     {
       "date": "2026-10-23",
       "change": "Added F46: split day/task/clock reminders (\"remind me today to call the dentist at 10am\") are held for correction; add the shape to the time grammar. Depends on F29."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F47 (deterministic iOS tests: shared bounded wait, diagnose each intermittent test, stabilize the walkthrough; test code only). Depends on F37 and F42; F44 and F45 now wait for F47."
     }
   ]
 }
