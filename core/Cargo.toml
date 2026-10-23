@@ -24,6 +24,10 @@ name = "capture_processing_resilience"
 path = "../tests/resilience/capture-processing/main.rs"
 
 [[test]]
+name = "notification_resilience"
+path = "../tests/resilience/notifications/main.rs"
+
+[[test]]
 name = "outbound_privacy"
 path = "../tests/privacy/main.rs"
 

@@ -3564,6 +3564,11 @@ Acceptance:
 
 Keyboard navigation is not asserted in the simulator; it belongs to U10b.
 
+**Amended (coordinator, 2026-10-23, after the first attempt blocked).** The worker was right: the "walkthrough's launch arguments and synthetic fixtures" this section told it to reuse do not exist. The walkthrough calls `app.launch()` with no arguments, and nothing reads launch arguments. U10a now depends on F45, which adds a debug-only fixture launch mode, and on F44, which edits `app/status/` and `app/source-detail/` first. The changes:
+- Reach the screens and states in item 1 through F45's fixture mode.
+- Test item 3's announcements in hosted view-model tests, through an injectable announcer in `app/` (U10a may add `app/accessibility/` for it), not in UI tests, because XCUITest cannot observe announcements.
+- Everything else is unchanged.
+
 Contributes to original U10 criteria: 1 (automated audits), 2 (fixes recorded).
 
 ### U10b
@@ -3585,4 +3590,130 @@ Acceptance:
 3. Raw recordings and personal content stay with the maintainer. The repository holds only the sanitized record and an auditable reference to the private evidence.
 
 Contributes to original U10 criteria: 1 (device pass), 2, 3.
+
+### F42
+
+Sort voice notes: give voice captures contract-conforming IDs and accept the legacy form
+
+Found on the maintainer's phone on 2026-10-22. Typed notes are sorted by Anthropic. Every voice note fails at once with failure reason `rejected`, and no request reaches the provider (the provider's request log shows none at those times). Status shows "Some work needs you", and Home shows "Not yet sorted".
+
+Cause:
+- `VoiceRecordingController.generateCaptureID()` (`ios/Capture/Voice/VoiceRecordingController.swift:113`) mints `"voice-" + UUID`. The contract (`docs/architecture/m1-contracts.md`, "Capture ID") says a capture ID is a random UUID.
+- Ingress stores the ID without checking it.
+- When the interpretation request is built, `InterpretationRequest::validate` (`core/src/providers/contracts/request.rs:132`) requires `capture_id` to be a UUID. It returns `InvalidIdentifier("capture_id")`, the Anthropic adapter reports that as `TransportError::Rejected`, and the job fails permanently before the transport is reached.
+- `core/src/review/compare/source.rs:79` has the same check.
+- Every existing test, the E02 live harness and the provider connection check use typed or synthetic captures with UUID IDs, so none covered a voice capture through a provider.
+
+This was reproduced by replaying the phone's failed jobs through the FFI job runner (`ohand_core_start_job_drain`) with a recording host: both jobs failed and the host received no send command.
+
+Owned paths: `ios/Capture/Voice/VoiceRecordingController.swift`, `ios/Tests/VoiceCapture/`, `core/src/providers/contracts/request.rs`, `core/src/review/compare/source.rs`, `core/src/ffi/job_runner/tests.rs`, `core/tests/` (new tests only) and `docs/architecture/m1-contracts.md` (the Capture ID section).
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. **New voice captures get a plain random UUID.** Lowercase hyphenated, with no prefix, minted once as today. Nothing else about voice ingress changes. Audio file names may keep the `voice-` prefix: they are not capture IDs.
+2. **Voice captures already saved with a legacy ID can still be sorted.**
+   - Core accepts a capture ID that is either a UUID or exactly `voice-` followed by a lowercase hyphenated UUID. Nothing else is accepted.
+   - One shared function decides this, and both `request.rs` and `review/compare/source.rs` use it.
+   - No stored ID is rewritten, because capture IDs are immutable idempotency keys.
+   - The Capture ID section of `m1-contracts.md` records the legacy form, says only builds before this fix minted it, and keeps "a random UUID" as the rule for new IDs.
+3. **A job that already failed this way can be retried.** An interpret job that failed as `rejected` for this reason runs again through the existing retry path that the Status screen uses, and is sorted. A test covers this: a legacy-ID voice capture with a failed `rejected` interpret job is retried and reaches the send.
+4. **Voice through a provider is tested end to end.** A test in `core/src/ffi/job_runner/tests.rs` drives a voice capture through the FFI job drain with the recording host, once with a legacy `voice-<uuid>` ID and once with a plain UUID. The capture is imported with an audio reference, has its transcript attached, and is interpreted with a pinned Anthropic profile. Each run must produce a send command to the host, and complete when the host answers with a valid reply. Also add a request-validation unit test that rejects malformed IDs, including `voice-` with no UUID, an uppercase UUID after the prefix, and any other prefix.
+5. **Native test.** A test in `ios/Tests/VoiceCapture/` asserts that the generated ID parses as a UUID and has no prefix.
+6. `make check` and `make test` pass. This is a native change, so exact-head macOS CI evidence is required, as AGENTS.md describes.
+
+**Amended (coordinator, 2026-10-23, before any attempt).** Acceptance 3 is withdrawn from F42 and moved to F43. The Status screen's "Try again" only asks the queue to drain (`JobRunnerService.requestDrain`), and a drain never reruns a job that failed terminally, so no existing retry path exists for this. F42 keeps acceptance 1, 2, 4, 5 and 6.
+
+After landing: the maintainer reinstalls and retries the failed voice notes from Status. The four voice notes on the phone keep their legacy IDs, which is what acceptance 2 is for.
+
+### F43
+
+Name the notes whose sorting failed, and run them again on purpose
+
+On 2026-10-22 every voice note failed to sort (F42). The person could not see which notes had failed or why, and could not run them again:
+- The processing health snapshot (`core/src/jobs/health/mod.rs`) holds counts and machine labels only, so Status could say only "Some work needs you".
+- Status's "Try again" asks the queue to drain. A drain never reruns a job that ended `failed`.
+- `repin_waiting_interpretations` (`core/src/jobs/configuration/repin.rs`) moves only unpinned waiting work. By design it never touches a job that was pinned to a profile and then failed.
+
+F43 adds the core read and the core operation. F44 adds the screens.
+
+Owned paths: `core/src/jobs/configuration/` (a new `failed_work` module beside `repin.rs`, plus its re-exports in `mod.rs`), `core/src/ffi/job_configuration.rs`, `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift`, `ios/Services/JobConfiguration/`, `core/tests/job_configuration/` and `ios/Tests/JobConfiguration/`.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. **A read of failed interpretation work.** It returns, for each active item whose latest `interpret` job ended `failed` and was not since replaced, the following:
+   - the item ID;
+   - the capture instant;
+   - the job's failure reason as a fixed machine label;
+   - whether the job was pinned to a provider, and to which profile version;
+   - a recovery label: `run_again` when running it again could succeed, or `change_settings` when it cannot run until the person changes a setting.
+
+   It is an authenticated (private) read, gated like the other item reads. It returns no text. It is ordered newest first and pages with a cursor, like the other job lists. The health snapshot is unchanged.
+2. **An operation that runs failed work again.** It takes a list of item IDs, or "all listed", and for each item makes a new `interpret` job at the item's current revision, pinned to whatever `resolve_profile_pin` selects now, linked to the failed job in `job_requeues`. This is the same rule `repin.rs` uses for waiting work.
+   - Reuse that code. Do not write a second pinning path.
+   - The failed job itself is never modified.
+   - An item whose current pin is `None`, because no provider is allowed, is not moved, and the result says so.
+   - The operation is idempotent: repeating it before the new job runs creates nothing.
+   - It returns the number moved and the number skipped, with reasons.
+3. **Tests.**
+   - A pinned job that failed as `rejected` appears in the read, and after the operation it has a new pinned job that a drain sends. Use the FFI job-runner recording host, as `core/src/ffi/job_runner/tests.rs` does.
+   - An unpinned `unsupported` failure is moved too, once a provider is allowed.
+   - A deleted or archived item is never listed or moved.
+   - A locked read is refused.
+   - Repeating the operation creates nothing.
+4. **Bridge.** The Swift bridge and `JobConfigurationService` expose the read and the operation, with tests in `ios/Tests/JobConfiguration/`. Exact-head macOS CI evidence is required.
+
+### F44
+
+Show which notes failed to sort and why, with a "Try again" that runs them again
+
+The screens for F43. Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths: `app/status/`, `app/source-detail/`, `ios/Tests/Status/`, `ios/Tests/SourceDetail/`, plus `ios/UITests/Walkthrough/WalkthroughUITests.swift`, only to add a Status screenshot with one failed note.
+
+Dependencies: F43.
+
+Acceptance:
+
+1. **Status, when unlocked.** When F43's read lists failed notes, "Some work needs you" lists up to 5 of them, newest first, each with:
+   - the first line of its text, read through the existing private item read;
+   - the time it was captured;
+   - one plain reason line. Map each machine label to fixed copy that a reviewer checks against the cause. For example, `rejected` becomes "The request was not accepted", and `unsupported` becomes "No provider was allowed when it was saved".
+
+   When there are more than 5, a "Show all" row leads to the full list. Locked, the section keeps today's count-only wording and offers unlock.
+2. **"Try again" re-runs failed work.** It calls F43's operation for the listed notes, then reports what happened in one line: the number queued again, and the number that cannot run until a setting changes, with a link to Processing when that is the cause. The existing drain request stays for work that is only waiting.
+3. **The note's detail screen**, when its sorting failed, shows one line with the same reason and a "Try again" for that one note. When the note is being sorted, it shows "Sorting…"; otherwise nothing.
+4. **Hosted view tests** cover Status in each case: locked, unlocked with 1 note, unlocked with more than 5, after a try-again that queued notes, and after one that could not queue because no provider was allowed. They also cover the detail line. Run them in both appearances. A walkthrough screenshot shows Status with one failed note. Exact-head macOS CI evidence is required.
+
+### F45
+
+Add a debug-only fixture launch mode for UI tests
+
+U10a, and any future UI test, needs to open the app in a known state: locked, unlocked with a populated store, with a failed note, with a reminder that needs correction, or before first-run permissions. Today a UI test can only launch the real app empty and type into it. The composition root already has a debug-only substitute adapter set (`CompositionAdapterSet.injectedForTests`, `ios/Services/Assembly/CompositionRoot.swift`) that a release build cannot construct. F45 makes it reachable from a UI test.
+
+Owned paths: `ios/AppAssembly/AppDelegate.swift`, `ios/AppAssembly/AppConfiguration.swift`, `ios/AppAssembly/AppServices.swift`, a new `ios/AppAssembly/UITestFixtures/`, `ios/Services/Assembly/CompositionRoot.swift` (only the debug adapter factory and its fixture hook), `ios/UITests/Fixtures/` (new, a shared launch helper), `ios/Tests/AppAssembly/` and `ios/project.yml`, the last only to add the new source folders to existing targets.
+
+Dependencies: F37, which owns `CompositionRoot.swift`, `AppServices.swift` and `ios/Tests/AppAssembly/` until it lands.
+
+Acceptance:
+
+1. **Debug only.** In a Debug build, the launch argument `-OhAndUITestFixture <name>` selects the fixture mode. In a Release build, the code that reads the argument is compiled out (`#if DEBUG`), and a test proves the release configuration has no path to it, the way the existing `injectedForTests` factory is guarded. Without the argument, behaviour is unchanged.
+2. **Isolated.** Each fixture launch uses a fresh temporary store. It never opens, reads or writes the production store or the Keychain items production uses. It uses the existing `injectedForTests` adapters:
+   - a scripted provider sender that answers from fixtures and never touches the network;
+   - a scripted on-device recognizer;
+   - a controllable read session that starts locked or unlocked as the fixture says and unlocks on the normal unlock action;
+   - a fake notification center with a chosen permission state.
+3. **Named fixtures, seeded through the production core operations** (import, transcript attach, profile, grant, interpretation through the scripted sender), never by writing SQL. At least these:
+   - `empty-first-run`: permissions not yet asked;
+   - `locked`;
+   - `populated`: typed and voice notes of each item type, one sorted reminder;
+   - `needs-correction`: a reminder whose time needs correction;
+   - `failed-sorting`: one note whose provider request was rejected;
+   - `offline`: the network is unavailable, with waiting work.
+
+   All fixture content is synthetic.
+4. **A shared helper** in `ios/UITests/Fixtures/` launches the app with a fixture. A UI test in it opens each fixture and asserts one identifying element. Exact-head macOS CI evidence is required.
 
