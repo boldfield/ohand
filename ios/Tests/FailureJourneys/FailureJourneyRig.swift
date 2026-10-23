@@ -160,10 +160,9 @@ class FailureJourneyTestCase: XCTestCase {
         try launchRig(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
     }
 
-    /// Ends the running process, leaving the storage as it was. A test may change the stored rows before it launches
+    /// Ends the running process without waiting for its drain, leaving the storage as it was. A test may change the stored rows before it launches
     /// the next run, to leave them as a process that was killed mid-job would.
     func stopRig() {
-        settleBackgroundWork()
         services.shutDown()
         services = nil
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "the run closed every core handle")
