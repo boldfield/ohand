@@ -127,6 +127,7 @@ class FailureJourneyTestCase: XCTestCase {
     private var credentials: CredentialService?
     private(set) var recognizer: FailureJourneyRecognizer?
     private(set) var grant: FakeBackgroundGrant?
+    private var appNotifications = NotificationCenter()
 
     /// The controlled clock every production instant derives from.
     let fixedNow = Date(timeIntervalSince1970: 1_768_478_400)  // 2026-01-15T12:00:00Z
@@ -184,6 +185,7 @@ class FailureJourneyTestCase: XCTestCase {
         retrieval = RetrievalSearchModule(calendar: utcCalendar)
         lifecycle = LifecycleCoordinator()
         let lifecycleCenter = NotificationCenter()
+        appNotifications = lifecycleCenter
         let credentials =
             self.credentials
             ?? CredentialService(
@@ -322,6 +324,13 @@ class FailureJourneyTestCase: XCTestCase {
                 return savedItemID != previousItemID
             }, "the core confirmed the save")
         return try XCTUnwrap(captureEntry.acknowledgment?.savedItemID)
+    }
+
+    /// The app goes to the background, as the system announces it to the running app.
+    func enterBackground() {
+        appNotifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        let delivered = Date().addingTimeInterval(0.3)
+        _ = pump(timeout: 1) { Date() >= delivered }
     }
 
     /// Records and stops one voice capture through the controller the app's capture surface uses, and returns the item

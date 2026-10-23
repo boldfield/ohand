@@ -65,7 +65,10 @@ final class RestartAndDeletionFailureJourneyTests: FailureJourneyTestCase {
         XCTAssertTrue(pump { firstRecognizer.callCount == 1 }, "recognition started on the saved recording")
         XCTAssertGreaterThan(try XCTUnwrap(grant).beginCount, 0, "the save asked for background time")
 
-        // The system takes the background time back while the recognizer is still working.
+        // The person leaves the app; the open completion window lets the drain carry on, until the system takes the
+        // background time back while the recognizer is still working.
+        enterBackground()
+        XCTAssertEqual(firstRecognizer.cancellationCount, 0, "the granted background time lets recognition continue")
         try XCTUnwrap(grant).fireExpiration()
         XCTAssertTrue(pump { firstRecognizer.cancellationCount == 1 }, "the recognizer was stopped")
         XCTAssertTrue(pump { !self.services.root.jobRunner.isDraining }, "the drain stopped at a checkpoint")
