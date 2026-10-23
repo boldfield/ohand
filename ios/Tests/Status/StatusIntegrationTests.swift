@@ -319,6 +319,10 @@ final class StatusIntegrationTests: XCTestCase {
                 && !built.root.jobRunner.isDraining
         }
 
+        // With no provider configured the save's own job has ended `unsupported`, which the real status rightly reports as
+        // a provider fault beside any stall. This test is about the stall, so that finished job is removed first.
+        execute(["DELETE FROM jobs WHERE job_id <> 'job-stalled'"])
+
         // Work becomes due after the launch drain and nothing is draining it: the real core reports a stall.
         execute(dueJobStatements)
         run { await status.refresh() }
