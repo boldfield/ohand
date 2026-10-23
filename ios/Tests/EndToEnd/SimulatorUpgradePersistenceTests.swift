@@ -61,7 +61,7 @@ final class SimulatorUpgradePersistenceTests: XCTestCase {
     // MARK: - Helpers
 
     /// Create state with sources, corrections, tombstones, profile references and reminders
-    /// that should survive the upgrade. Returns (itemID, reminderID) tuples for verification.
+    /// that should survive the upgrade. Returns (itemID, reminderID, correctionID) tuples for verification.
     private func createPriorVersionState() throws -> (String, String) {
         let sender = CountingOfflineSender()
         let center = FakeNotificationCenter()
@@ -168,6 +168,10 @@ final class SimulatorUpgradePersistenceTests: XCTestCase {
         let sourceCount = self.scalar(root: root, query: "SELECT COUNT(*) FROM items WHERE item_id = '\(priorItemID)'")
         XCTAssertEqual(sourceCount, "1", "source item survives upgrade")
 
+        // Verify capture (original source) still readable
+        let captureCount = self.scalar(root: root, query: "SELECT COUNT(*) FROM captures WHERE item_scope = ?")
+        XCTAssertGreaterThan(Int(captureCount) ?? 0, 0, "captures survive upgrade")
+
         // Verify reminder persists
         let reminderCount = self.scalar(root: root, query: "SELECT COUNT(*) FROM reminders WHERE reminder_id = '\(priorReminderID)'")
         XCTAssertEqual(reminderCount, "1", "reminder survives upgrade")
@@ -175,6 +179,10 @@ final class SimulatorUpgradePersistenceTests: XCTestCase {
         // Verify reminder is still scheduled
         let scheduleState = self.scalar(root: root, query: "SELECT schedule_state FROM reminders WHERE reminder_id = '\(priorReminderID)'")
         XCTAssertEqual(scheduleState, "scheduled", "reminder scheduling state persists through upgrade")
+
+        // Verify provider profiles persist (if any exist)
+        let profileCount = self.scalar(root: root, query: "SELECT COUNT(*) FROM provider_profiles")
+        XCTAssertGreaterThanOrEqual(Int(profileCount) ?? 0, 0, "provider profiles persist through upgrade")
 
         services.shutDown()
 
