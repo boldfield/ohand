@@ -14,7 +14,14 @@
 //! job pinned to it. Waiting unpinned work moves onto a newly authorized profile only through
 //! the explicit [`repin_waiting_interpretations`].
 
+mod failed_work;
 mod repin;
+
+pub use failed_work::{
+    list_failed_interpretations, rerun_failed_interpretations, rerun_failed_interpretations_in_tx,
+    FailedInterpretation, FailedInterpretationPage, FailedWorkRecovery, RerunOutcome,
+    RerunSelection, RerunSkipReason, MAX_RERUN_BATCH,
+};
 
 pub use repin::{
     repin_waiting_interpretations, repin_waiting_interpretations_in_tx, MAX_REPIN_BATCH,
