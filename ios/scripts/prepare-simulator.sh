@@ -18,7 +18,7 @@ set -euo pipefail
 
 responsive_probe_limit_seconds=3
 responsive_probes_required=10
-responsive_timeout_seconds=240
+responsive_timeout_seconds=480
 probe_hard_limit_seconds=10
 
 udid=""
