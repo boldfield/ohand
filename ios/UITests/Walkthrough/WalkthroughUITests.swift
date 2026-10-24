@@ -183,8 +183,9 @@ final class WalkthroughUITests: XCTestCase {
     /// True when `element` exists and is hittable, asked of a predicate expectation. Reading `isHittable` (or `frame`)
     /// directly fails the test when the element has no activation point or has gone between the query and the read
     /// ("Activation point invalid", "No matches found"), which a screen in transition does all the time; XCTest's own
-    /// predicate polling tolerates it.
-    private func isShowing(_ element: XCUIElement, within seconds: TimeInterval = 0.3) -> Bool {
+    /// predicate polling tolerates it. Resolving the element on a busy simulator takes a good part of a second, so the
+    /// answer is given up on only after `seconds`: a shorter wait always reads as "not there".
+    private func isShowing(_ element: XCUIElement, within seconds: TimeInterval = 3) -> Bool {
         let showing = XCTNSPredicateExpectation(predicate: Self.existsAndHittable, object: element)
         return XCTWaiter().wait(for: [showing], timeout: seconds) == .completed
     }
