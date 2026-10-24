@@ -22,7 +22,7 @@ responsive_timeout_seconds=480
 probe_hard_limit_seconds=10
 # After the readiness gate passes, a first or cloned boot keeps the runner saturated with first-boot daemons for minutes,
 # which starves the next UI query or screenshot. Wait (bounded, never failing) until the host has been mostly idle for a while.
-settle_timeout_seconds=300
+settle_timeout_seconds=480
 settle_idle_percent_required=25
 settle_samples_required=3
 
