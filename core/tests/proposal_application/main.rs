@@ -2768,6 +2768,96 @@ fn a_hedged_request_with_a_clock_time_is_never_scheduled() {
 }
 
 #[test]
+fn a_hedged_recurring_request_is_kept_as_needing_correction_not_as_an_unsupported_recurrence() {
+    // The hedge is decided before the phrase is read, so a recurrence does not move a hedged
+    // request to the unsupported-recurrence state: it needs correction, with the hedge reason.
+    for (text, quoted) in [
+        (
+            "Maybe remind me every Friday to water the plants",
+            "every Friday",
+        ),
+        (
+            "perhaps remind me every day to water the plants",
+            "every day",
+        ),
+        (
+            "Possibly can you remind me every Friday to water the plants",
+            "every Friday",
+        ),
+        (
+            "Maybe, remind me every Friday to water the plants",
+            "every Friday",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal_with(
+            text,
+            quoted,
+            None,
+            TimeResolutionQuality::Ambiguous,
+            "water the plants",
+        );
+        assert_hedged_and_unscheduled(&fixture, disposition);
+        assert_eq!(fixture.reminder_row().unsupported_reason, None, "{text}");
+        // An explicit instant claimed for the recurrence is still rejected as a contradiction.
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-09T09:00:00-04:00", "water the plants");
+        assert_rejected_and_unscheduled_for(text, &fixture, disposition);
+    }
+}
+
+#[test]
+fn a_hedged_request_leaves_a_committed_recurrence_unchanged() {
+    // A recurrence already recorded as unsupported is protected: when a correction hedges the
+    // request, the hedged request neither reduces it to a one-shot nor rewrites its state.
+    let text = "remind me to call the roofer every Monday";
+    let mut fixture = Fixture::new(text);
+    let first = fixture.claim_job(0, capture_instant());
+    let recurring = fixture
+        .action_proposal(&first, text, "call the roofer")
+        .with_reminder_proposal(Some(reminder_candidate(
+            text,
+            "every Monday",
+            None,
+            TimeResolutionQuality::Ambiguous,
+        )));
+    assert_eq!(
+        applied_reminder(fixture.apply(&first, &recurring).unwrap()),
+        ReminderDisposition::Recorded(ReminderRequestState::UnsupportedRecurrence)
+    );
+    let stored = fixture.reminder_effects().unwrap();
+
+    let corrected = "maybe remind me to call the roofer every Monday";
+    let correction_id = fixture.correct(CorrectionKind::Text, Some(text), corrected, 0);
+    let second = fixture.claim_job(1, capture_instant());
+    let mut hedged = fixture.proposal_for(&second, 1);
+    hedged.text_basis = TextBasis::Correction {
+        correction_record_id: correction_id,
+        item_revision: 1,
+    };
+    let hedged = hedged
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(corrected, "call the roofer")]))
+        .with_reminder_proposal(Some(reminder_candidate(
+            corrected,
+            "every Monday",
+            None,
+            TimeResolutionQuality::Ambiguous,
+        )));
+    assert_eq!(
+        applied_reminder(fixture.apply(&second, &hedged).unwrap()),
+        ReminderDisposition::ExistingKept
+    );
+
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "unsupported_recurrence");
+    assert_eq!(reminder.schedule_state, "not_scheduled");
+    assert_eq!(reminder.resolved_instant, None);
+    assert_eq!(reminder.ambiguity_reason, None);
+    assert_eq!(fixture.reminder_effects().unwrap(), stored);
+    assert!(stored.2.is_empty());
+}
+
+#[test]
 fn a_hedge_does_not_turn_a_non_request_into_one() {
     for text in [
         "maybe Bob will remind me Friday at 3 p.m. to call Sam",

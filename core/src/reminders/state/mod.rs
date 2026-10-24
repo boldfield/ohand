@@ -480,8 +480,9 @@ pub fn apply_derived_request(
 pub const HEDGED_REQUEST_REASON: &str = "the request is hedged";
 
 /// Like [`apply_derived_request`], but for a hedged request: whatever the phrase resolves to,
-/// the reminder is stored as not scheduled yet and needing correction, with
-/// [`HEDGED_REQUEST_REASON`]. Recurrence and committed-time protections still apply.
+/// even a recurrence ("Maybe remind me every Friday"), the reminder is stored as not scheduled
+/// yet and needing correction, with [`HEDGED_REQUEST_REASON`]. A reminder already committed as a
+/// recurrence or to an instant is still protected: the hedged request leaves it unchanged.
 pub fn apply_hedged_request(
     tx: &Transaction<'_>,
     clock: &dyn Clock,
@@ -501,16 +502,22 @@ fn apply_derived_request_with_hedge(
     let context = load_capture_time_context(tx, &item.capture_id)?;
     require_phrase_in_text(&item, &request.phrase)?;
 
-    let outcome = match text_repeat_reason(&item, &context) {
-        Some(reason) => TimeOutcome::UnsupportedRecurrence {
-            reason,
-            timezone_id: context.timezone.clone(),
-        },
-        None if hedged => TimeOutcome::NeedsCorrection {
+    // A hedge is decided before the phrase is read at all: a hedged request is kept as needing
+    // correction whether its phrase is a one-shot time or a recurrence, so neither can schedule
+    // it or move it to the unsupported-recurrence state.
+    let outcome = if hedged {
+        TimeOutcome::NeedsCorrection {
             reason: HEDGED_REQUEST_REASON.to_string(),
             timezone_id: context.timezone.clone(),
-        },
-        None => resolve_phrase(&request.phrase, &context, clock.now())?,
+        }
+    } else {
+        match text_repeat_reason(&item, &context) {
+            Some(reason) => TimeOutcome::UnsupportedRecurrence {
+                reason,
+                timezone_id: context.timezone.clone(),
+            },
+            None => resolve_phrase(&request.phrase, &context, clock.now())?,
+        }
     };
 
     let existing = load_reminder_by_item(tx, &request.item_id)?;
