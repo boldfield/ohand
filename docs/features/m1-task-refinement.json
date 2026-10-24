@@ -3808,7 +3808,8 @@
         "U04b",
         "U07c",
         "U08b",
-        "U09"
+        "U09",
+        "F49"
       ],
       "source_pointers": [
         "ios/project.yml:330",
@@ -3941,7 +3942,8 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F37",
-        "F47"
+        "F47",
+        "F50"
       ],
       "source_pointers": [
         "ios/Services/Assembly/CompositionRoot.swift:441",
@@ -4000,7 +4002,9 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F37"
+        "F37",
+        "F49",
+        "F50"
       ],
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
@@ -4102,6 +4106,53 @@
         "core/src/retrieval/recent/mod.rs:36",
         "core/src/ffi/notification_reconciliation.rs:591",
         "app/reminders/ReminderEditText.swift:44"
+      ]
+    },
+    {
+      "key": "F49",
+      "parent": null,
+      "title": "Stop the hosted macOS runner from starving when it boots simulators",
+      "file_scope": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/walkthrough-simulator.sh",
+        "ios/scripts/smoke-simulator.sh",
+        "ios/scripts/",
+        "AGENTS.md"
+      ],
+      "intent": "Each macos-26 job cold-boots several erased simulators and the 3-core/7 GB runner reaches load ~480 with ~100 MB free, failing the readiness gate and UI queries; pay at most one first boot per device type per job.",
+      "acceptance": [
+        "See the F49 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/walkthrough-simulator.sh",
+        ".github/workflows/ios.yml:90"
+      ]
+    },
+    {
+      "key": "F50",
+      "parent": null,
+      "title": "Find and fix the product races behind two intermittent test failures",
+      "file_scope": [
+        "ios/Services/Reset/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/JobRunner/",
+        "core/src/lifecycle/reset/",
+        "ios/Tests/RaceRegressions/"
+      ],
+      "intent": "A capture held at an interrupted reset's boundary was never saved after start, and a deferred job type's capability-unavailable count flakes; reproduce by iteration, fix in product code, add deterministic regression tests.",
+      "acceptance": [
+        "See the F50 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/Services/CompositionRootTests.swift:1666",
+        "ios/Tests/JobRunner/JobRunnerBoundaryTests.swift:383",
+        "ios/Services/Assembly/CompositionRoot.swift"
       ]
     }
   ],
@@ -4878,6 +4929,7 @@
       "F44",
       "F45",
       "F48",
+      "F49",
       "T10a",
       "U03b",
       "U04b",
@@ -4896,14 +4948,16 @@
     ],
     "F45": [
       "F37",
-      "F47"
+      "F47",
+      "F50"
     ],
     "F46": [
       "F29"
     ],
     "F47": [
       "F37",
-      "F42"
+      "F49",
+      "F50"
     ],
     "T10a": [
       "F45",
@@ -4917,7 +4971,9 @@
     ],
     "F48": [
       "F44"
-    ]
+    ],
+    "F49": [],
+    "F50": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5143,6 +5199,10 @@
     {
       "date": "2026-10-24",
       "change": "F46 now also owns core/src/interpretation/apply/mod.rs for the split-shape seam: resolve the combined day+clock phrase when the proposal quotes only the clock."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "Added F49 (hosted-runner simulator starvation: at most one first boot per device type per job) and F50 (product races behind the CompositionRoot reset-boundary and JobRunner deferred-job test failures). F47 now depends on F37, F49 and F50 (its stale F42 edge removed); F45 also waits for F50 (CompositionRoot.swift); U10a also waits for F49 (ios.yml)."
     }
   ]
 }
