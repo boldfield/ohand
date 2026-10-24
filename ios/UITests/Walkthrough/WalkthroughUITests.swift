@@ -120,7 +120,7 @@ final class WalkthroughUITests: XCTestCase {
             // The row query is re-resolved on every check and can match a control on the opened screen (Export's own
             // "Export" button), so the screen counts as open once the Settings header has gone.
             XCTAssertTrue(
-                waitForScreen(screen.title, leaving: settingsHeader, originIsText: true, timeout: screenTimeout), "\(screen.title) did not open")
+                waitForScreen(screen.title, leaving: settingsHeader, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
             if screen.title == "Processing" {
                 // The two screens one level down hold the dense controls, so each is captured too.
@@ -164,24 +164,15 @@ final class WalkthroughUITests: XCTestCase {
     /// True once the screen titled `title` is showing: the restyled settings screens draw their title as header text
     /// and hide the navigation bar, the others show it in the navigation bar. `leaving` is the control that opened the
     /// screen; it must be gone, so a row or link with the same text as the title does not count as the screen.
-    private func waitForScreen(
-        _ title: String, leaving origin: XCUIElement, originIsText: Bool = false, timeout: TimeInterval
-    ) -> Bool {
-        waitForScreen(
-            shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, originIsText: originIsText,
-            timeout: timeout)
+    private func waitForScreen(_ title: String, leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
+        waitForScreen(shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, timeout: timeout)
     }
 
     /// True once any of `markers` exists and `origin` has gone.
-    private func waitForScreen(
-        shownBy markers: [XCUIElement], leaving origin: XCUIElement, originIsText: Bool = false, timeout: TimeInterval
-    ) -> Bool {
+    private func waitForScreen(shownBy markers: [XCUIElement], leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            // A static text has no activation point while its screen slides away, and asking for one fails the test, so a
-            // text origin counts as showing for as long as it exists.
-            let originIsShowing = originIsText ? origin.exists : isShowing(origin)
-            if markers.contains(where: { $0.exists }), !originIsShowing { return true }
+            if markers.contains(where: { $0.exists }), !isShowing(origin) { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
@@ -189,11 +180,13 @@ final class WalkthroughUITests: XCTestCase {
 
     private static let existsAndHittable = NSPredicate(format: "exists == true AND hittable == true")
 
-    /// True when `element` exists and is hittable, asked as a predicate: reading `isHittable` or `frame` directly fails
-    /// the test when the element goes away between the query and the read ("No matches found", "Activation point
-    /// invalid"), which a screen in transition does all the time.
-    private func isShowing(_ element: XCUIElement) -> Bool {
-        Self.existsAndHittable.evaluate(with: element)
+    /// True when `element` exists and is hittable, asked of a predicate expectation. Reading `isHittable` (or `frame`)
+    /// directly fails the test when the element has no activation point or has gone between the query and the read
+    /// ("Activation point invalid", "No matches found"), which a screen in transition does all the time; XCTest's own
+    /// predicate polling tolerates it.
+    private func isShowing(_ element: XCUIElement, within seconds: TimeInterval = 0.3) -> Bool {
+        let showing = XCTNSPredicateExpectation(predicate: Self.existsAndHittable, object: element)
+        return XCTWaiter().wait(for: [showing], timeout: seconds) == .completed
     }
 
     /// Waits until `element` exists and is hittable, then taps it. A step that cannot act fails naming the step and the
@@ -205,12 +198,10 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     private func waitUntilHittable(_ element: XCUIElement, step: String, elementName: String) {
-        let deadline = Date().addingTimeInterval(screenTimeout)
-        while Date() < deadline {
-            if isShowing(element) { return }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
-        XCTFail("step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
+        let showing = XCTNSPredicateExpectation(predicate: Self.existsAndHittable, object: element)
+        XCTAssertEqual(
+            XCTWaiter().wait(for: [showing], timeout: screenTimeout), .completed,
+            "step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
     }
 
     /// The app makes one quiet Face ID attempt at launch. Its system prompt takes focus, so typing while it is up loses
