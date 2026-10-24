@@ -6,6 +6,8 @@ Addendum 2026-10-08: V08 was originally excluded as an externally blocked eviden
 
 Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable accessibility, fixed and gated in CI) and U10b (the maintainer's actual-device VoiceOver, Dynamic Type and keyboard pass). The original task `f5423770` blocked on the missing device evidence and is retired. T05 now depends on U10b.
 
+Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity, metrics build field, the signing wrapper and an automated simulator upgrade check) and T10b (the maintainer's signed candidate and device upgrade). The original task `ddc1fc6c` blocked on the device criteria after three rejected rounds and is retired. T05 now depends on T10b. U10a now also depends on T10a, because both edit `ios/project.yml`.
+
 ## Execution authority
 
 Read this document with `m1-task-refinement.json`, `m1-plan.md` and the architecture contract. The original `m1-tasks.json` remains the immutable baseline and ownership-group catalog used by the existing contract checker. For current execution, apply this overlay: each replaced group delegates its listed paths to the child tasks below, and consumers depend on its last child. An archived parent is an audit record, not completed implementation.
@@ -338,6 +340,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | V08 | V08a, V08b | The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block. |
 | P08 | P08a, P08b | Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block. |
 | U10 | U10a, U10b | Automated audits and their fixes can be done and checked in the simulator; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them instead of finding them. |
+| T10 | T10a, T10b | The fleet can version builds, test the signing wrapper with stubbed tools and check an upgrade in the simulator; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling and the automated check land while the device evidence stays an honest block. |
 
 ## Retained unstarted tasks
 
@@ -395,7 +398,6 @@ Each was reviewed for sizing. The following remain one bounded module, integrati
 | U10 | Complete native accessibility and interaction validation |
 | T03 | Test reminder and suggestion resilience after a lapse |
 | T09 | Exercise the full simulator loop with fake providers |
-| T10 | Version trial builds and verify upgrade persistence |
 | T05 | Run the actual-device M1 functional exit matrix |
 | T06 | Produce the signed M1 trial build and installation guide |
 | T07 | Write M1 setup and operational recovery documentation |
@@ -3727,3 +3729,194 @@ Acceptance:
    All fixture content is synthetic.
 4. **A shared helper** in `ios/UITests/Fixtures/` launches the app with a fixture. A UI test in it opens each fixture and asserts one identifying element. Exact-head macOS CI evidence is required.
 
+### F46
+
+Schedule a reminder whose day and clock time sit on either side of the task
+
+"Remind me today to call the dentist at 10am" is held for correction and never scheduled. The maintainer found it on the phone on 2026-10-23, and a live replay on main 3dee81f with `claude-haiku-5-5` (capture at 07:00 America/Los_Angeles) confirmed it:
+- The model's proposal is right: `explicit`, `2026-10-23T10:00:00-07:00`, with the reminder span "today to call the dentist at 10am".
+- Core still holds it. The F28 grammar (`core/src/time/expression.rs`, module comment) knows two shapes: time first ("today at 10am to call the dentist") and task first ("to call the dentist today at 10am"). Both of those replay correctly.
+- It does not know the split shape, where the day and the clock sit on either side of the task. The span covering day, task and clock is not a time expression. The clock alone is day-less, and the sentence names a day before it, so it fails closed.
+
+This is a new shape, not a hole in F28's rule, so per F28's own instruction it is a separate task, not another F28 extension.
+
+Owned paths: `core/src/time/`, `core/tests/time/`, `core/tests/proposal_application/`, and `fixtures/intent/contrastive-fixtures.json` (only to add the two fixtures below, and any fixture-count constants that adding them requires in `core/tests/fixture_validation/` and `core/tests/live_providers/`).
+
+Dependencies: F29, which owns `core/tests/proposal_application/` until it lands.
+
+Acceptance:
+
+1. **The split shape is a covered time expression,** in either order, in one sentence:
+   - day, task, clock: "remind me today to call the dentist at 10am", "Remind me Friday to call Sam at 3 p.m.";
+   - clock, task, day: "remind me at 10am to call the dentist tomorrow".
+
+   All of these must hold:
+   - the first part directly follows the request prefix, and the last part ends the sentence, apart from closing punctuation or a filler;
+   - each part is a single complete expression that F28's grammar already accepts on its own (a day, or a clock that names no day);
+   - the task between them holds no clause mark and no temporal token, and opens with `to` or a filler as in F28's time-first rule;
+   - the whole-capture rule still applies: no other sentence may hold a temporal token.
+
+   The proposal's span may be the whole stretch from the first part to the last, or the clock part alone. Either is covered only when the sentence has exactly this shape.
+2. **Core resolves the day and the clock together** and schedules only when the model's instant equals that resolution, in the capture's zone. A different instant is rejected through the existing guard, as for any explicit reminder.
+3. **Everything F28 holds for correction stays held**, and is tested:
+   - two days ("remind me today to call Sam tomorrow at 10am");
+   - two clocks;
+   - a clause mark in the task ("today to call the dentist, about the bill, at 10am");
+   - a number or time word in the task ("today to call the dentist about 2 fillings at 10am");
+   - a hedge ("maybe today to call … at 10am"), per F29;
+   - a temporal token in another sentence;
+   - a day or clock part that is not complete on its own ("today to call … at 10").
+
+   Every existing `core/tests/time/` and `proposal_application` test passes unchanged.
+4. **Tests.**
+   - Guard-table tests for each positive and negative case.
+   - End-to-end `proposal_application` tests, using `apply_clock_proposal` as the F28 tests do, for the three positive captures with both span forms, and for each negative capture.
+   - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
+5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
+
+### F47
+
+Make the iOS test suite deterministic: fix the intermittent failures
+
+The macOS suite fails intermittently often enough to slow every native merge. In the last 80 `ios.yml` runs (2026-10-21 23:11 to 2026-10-23 16:00 UTC), 80 job attempts failed across 19 PR branches:
+- 54 in "Run OhAndTests on simulator";
+- 22 in the screenshot walkthrough (16 compact, 6 regular);
+- 3 in the NotificationProbe UI tests;
+- 1 in the Tauri handoff.
+
+A few were real compile errors in the PR under test. Most passed unchanged on a rerun. F29 needed 3 attempts, and F42 has had 7 attempts fail in code it does not touch. Each rerun costs about 20 minutes of macOS time.
+
+These tests failed on branches whose change did not touch them. The number in brackets is how many distinct branches each failed on:
+- `WalkthroughUITests.testWalkthrough` (5);
+- `StatusIntegrationTests`: `testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged` (3), plus four others (1 each);
+- `CaptureEntryViewTests.testAConfirmedSaveClearsTheTextShowsTheSavedPillAndStillStatesTheReminder` (3);
+- `PlaybackRootIntegrationTests.testTheLifecycleDeletionCleanupUsesTheRootsFence` (2);
+- once each:
+  - `SourceDetailHostedTests.testTheRenderedScreenShowsSectionsPlayAndThenTheDisabledNoticeAfterDeletion`;
+  - two `SimulatorHappyPathTests`;
+  - `RetrievalSearchItemPaneTests.testAChangeStoredWhileThePanesReminderSaveIsInFlightIsShownOnceTheSaveSettles`;
+  - `LifecycleCoordinatorRealCoreTests.testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground`;
+  - `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable`;
+  - `ItemControlsRealCoreTests.testAStaleSaveShowsTheConflictAndTheHostCardShowsTheNewerValues`;
+  - two `HomeRecentsModelTests`;
+  - two `CompositionRootTests`, including `testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration`;
+  - four `AppServicesTests`, including the system-time-change test F27 addressed, which failed again after F27 landed;
+  - two `ActionHandlerTests`.
+
+Twelve test files wait with a fixed `settle()` (a set number of `Task.yield()` calls) instead of waiting for the state they assert. On a loaded simulator, that wait can end before the work it is waiting for.
+
+Owned paths: test code only. That is the test files named above and the twelve files that define a fixed-yield `settle()`:
+- `ios/Tests/Status/`, `ios/Tests/CaptureEntry/`, `ios/Tests/Playback/`, `ios/Tests/SourceDetail/`, `ios/Tests/EndToEnd/`;
+- `ios/Tests/Retrieval/`, `ios/Tests/Services/`, `ios/Tests/JobRunner/`, `ios/Tests/ItemControls/`, `ios/Tests/HomeRecents/`;
+- `ios/Tests/AppAssembly/`, `ios/Tests/NotificationActions/`;
+- any other `ios/Tests/` file that defines a fixed-yield `settle()`;
+- a new `ios/Tests/Support/` for one shared wait helper;
+- `ios/UITests/Walkthrough/WalkthroughUITests.swift`.
+
+No production code.
+
+Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+
+Amendment (2026-10-23): F47 no longer waits for F42. F42 was blocked until F47 landed, so the two waited on each other. F42's pull request no longer edits `ios/Tests/HomeRecents/`, and its remaining test edits are in `ios/Tests/VoiceCapture/`, outside F47's scope. F47 now owns `testAFailedReadKeepsTheListAndOffersARetry`; the F42 amendment's permission to edit that test is withdrawn. F42 resubmits after F47 lands and needs its own green exact-head run.
+
+Acceptance:
+
+1. **One shared helper.** A bounded condition wait, for example `waitUntil(timeout:file:line:_:)`, that polls with `Task.yield()` and short sleeps. It fails the test with a clear message naming the condition when the timeout (default 5 s) passes. Every fixed-yield `settle()` that comes before an assertion about asynchronous work is replaced by a wait for the asserted condition. A `settle()` used only to prove that nothing happens may stay, but must yield at least as much as today.
+2. **Every named test is diagnosed.** For each one, the PR lists the cause: test timing, state shared between tests (a leaked task, recording session, notification center, Keychain item or simulator state), or a real race in product code.
+   - Fix test timing and shared state in the tests.
+   - A real product race is not fixed here. Report it in the task result with its evidence and block, so the coordinator can file it.
+3. **Walkthrough.** Each step waits for its element to exist and be hittable with an explicit timeout before acting. When it fails, it names the step and the element. The screenshots and their order are unchanged.
+4. **Nothing is weakened.**
+   - No assertion is removed or loosened.
+   - No test is skipped, disabled or moved out of the suite.
+   - No `-retry-tests-on-failure`, no `XCTExpectFailure`, and no retry loop around an assertion.
+   - Nothing in `ios.yml` changes.
+   - No timeout over 10 s without a stated reason.
+5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, with no test from the list failing. Rerun the whole workflow after the first success, not only a failed job. Link all three in the PR. Any failure during those runs is reported, with its test and cause, not hidden by a rerun.
+
+
+### T10a
+
+Version trial builds, carry the build identity into metrics, and check upgrades in the simulator
+
+Make each trial build identify its revision, give the maintainer a tested way to produce the signed candidate, and prove automatically that installing a newer build over an older one keeps the person's data.
+
+Why T10 was split: T10's criteria mix work the fleet can do with a signed build and an upgrade on the maintainer's iPhone, which only the maintainer can do. Its round-3 attempt (PR #356) was rejected for two reasons. Its simulator test did not compile, because it ran SQL through `CoreHandle`, which has no database handle. It also never installed an earlier build: it opened the same store twice with the same code. The worker then blocked on the device criteria. PR #356 (branch `mr/ddc1fc6c`, head `2b9d970`) can be reused where it is correct, notably `tools/release/build_info.py` and its tests, but neither reviewer finding may carry over.
+
+Owned paths:
+- `tools/release/` (build identity, the candidate signing wrapper, the simulator upgrade check, and their tests);
+- `ios/UITests/Upgrade/` (new UI test target) and `ios/scripts/generate_build_info.sh`;
+- `ios/project.yml`, only for the build-identity settings and the new target and scheme;
+- `.github/workflows/upgrade.yml` (new);
+- `ios/AppAssembly/UpgradeCheck/` (new, debug-only), with a call site in `ios/AppAssembly/` added after F45;
+- additive changes in `core/src/metrics/` and `ios/Services/Metrics/` for the build identity;
+- `docs/testing/m1-upgrade-evidence.md` (procedure and simulator results), `docs/releases/m1-trial/README.md` (the candidate record format) and `docs/validation/evidence/upgrade/` (simulator records).
+
+Not owned: `.github/workflows/ios.yml` (U10a), `tools/apple-build/` (P08a and P11a; call it, do not change it), `tools/apple-build/trial/` (T06), `ios/UITests/Walkthrough/`, and the device sections of `docs/testing/m1-upgrade-evidence.md` (T10b).
+
+Dependencies: T10's dependencies (P08b, T09, P11b), all merged, and F45, which owns `ios/project.yml` and `ios/AppAssembly/` first.
+
+Acceptance:
+
+1. **Build identity.**
+   - Every app build carries its marketing version, a build number, the full git revision and a dirty flag in its Info.plist.
+   - The build number is reproducible from the revision and increases along `main`, so a later trial build always installs over an earlier one. For example, use the first-parent commit count.
+   - The candidate build refuses a dirty tree.
+   - Tests cover the derivation, a dirty tree and a missing git checkout. An unknown revision fails the build; it is never written as a placeholder.
+2. **Metrics name the build.** The content-free metrics export (`export_metrics`, `ohand.metrics.v1`) gains a `build` object: version, build number, revision and dirty flag, which the app supplies from its Info.plist. The change is additive. If old readers would break, bump the schema version and say why. Core and Swift tests show the exported report names the build. Nothing else enters the report.
+3. **Simulator upgrade check.** `tools/release/simulator_upgrade_check.sh`:
+   1. builds `OhAndApp` (Debug, simulator) at a prior revision, taken from a git worktree, and at the candidate revision;
+   2. installs the prior build;
+   3. seeds it with synthetic data through the app's own services: several text captures, at least one correction, one deleted item (a tombstone), a configured provider profile with a synthetic endpoint and credential, and one explicitly scheduled reminder. The data is written by driving the prior app, either through the UI or through F45's fixture mode where it writes through production services. Writing to the database directly, or through a test-only path that bypasses the services, does not count;
+   4. installs the candidate over the prior build with `simctl install`, never uninstalling or erasing;
+   5. launches the candidate, authenticates the way the walkthrough does, and verifies the data.
+
+   Suggested route: a UI test target with no target application, which drives the installed app through `XCUIApplication(bundleIdentifier:)`, so xcodebuild does not reinstall it.
+4. **What the check proves.** The check records the installed build number (`simctl appinfo`) before seeding, after the upgrade and after relaunch, and records the data container path before and after, which must be the same. After the upgrade it requires:
+   - every seeded source and correction is present and authoritative;
+   - the deleted item stays deleted, and search and recents do not show it;
+   - the provider profile and its credential are still configured, and Processing still routes to it;
+   - the reminder keeps the same identifier and fire time. Exactly one pending notification request exists for it, with no orphan or duplicate.
+
+   The reads come from a debug-only, content-free upgrade report. The candidate writes it to its own data container when launched with a launch argument, and only after the app's own authentication succeeds. The report holds counts, states, identifiers that the synthetic run created and instants. It never holds text. It is compiled out of Release builds, and a test shows it is absent there. When the prior revision also contains the report, the check records reminder identifiers before the upgrade and requires them to be equal afterwards.
+5. **Prior revision.** The prior revision is an earlier `main` commit, named by full SHA in the record. For this task's own evidence, use the PR's merge base. Rebuilding the same revision with a different build number does not count as an upgrade.
+6. **CI.** `.github/workflows/upgrade.yml` runs the check on macOS for pull requests that touch `tools/release/`, `ios/UITests/Upgrade/`, `ios/AppAssembly/UpgradeCheck/` or the core store's migrations, and on `workflow_dispatch`. It has `contents: read`, needs no secrets, uploads the report and logs, and keeps them for 7 days. The exact-head run must succeed and be linked, as AGENTS.md requires for native changes. The committed simulator record under `docs/validation/evidence/upgrade/` names the run, both revisions and build numbers, the simulator and runtime, and the collection time.
+7. **Candidate signing wrapper.**
+   - `tools/release/sign_trial_candidate.sh` calls the P08a/P11a tooling to build and export the signed `OhAndApp` candidate with its embedded extension.
+   - It writes a candidate record in the format `docs/releases/m1-trial/README.md` defines: revision, version and build, the SHA-256 of the exported archive, the signing route, and the profile expiry date.
+   - The record never holds team identifiers, profile UUIDs, certificate names or hashes, device identifiers, or any hash of them.
+   - Behaviour tests on Linux use stubbed Apple tools, as P08a's do. They cover a dirty tree, a missing profile mapping for either bundle identifier, and a checksum mismatch.
+8. **Procedure for T10b.** `docs/testing/m1-upgrade-evidence.md` gives the maintainer's steps:
+   - produce the candidate;
+   - upgrade the existing trial-phone install in place, without deleting it;
+   - check sources, corrections, deleted items, the provider profile and a scheduled reminder through the app;
+   - record the result in a named evidence format.
+
+   The procedure records counts and outcomes, never capture text.
+
+Contributes to original T10 criteria: 1 (simulator), 2, 3 (tooling), 4 (simulator records).
+
+### T10b
+
+Record the signed trial candidate and the maintainer's device upgrade
+
+Fold the maintainer's signed candidate and the result of upgrading it on the trial iPhone into the release and upgrade documents as cited evidence.
+
+Owned paths: `docs/releases/m1-trial/` (the candidate record), the device sections of `docs/testing/m1-upgrade-evidence.md`, and `docs/validation/evidence/upgrade/` (device records).
+
+Dependencies: T10a and U10a, so the one signed candidate serves U10b's device pass and T05.
+
+Context: this task starts blocked. The maintainer:
+1. runs `tools/release/sign_trial_candidate.sh` on a clean `main` checkout that contains T10a and U10a;
+2. installs the candidate over the phone's existing install, following the T10a procedure;
+3. commits the sanitized candidate record and the device upgrade record;
+4. unblocks this task, naming both files.
+
+A worker claimed without those files must re-block, naming the exact missing file, and must not substitute simulator results.
+
+Acceptance:
+1. The candidate record names the revision, version and build, the archive's SHA-256, the signing route and the profile expiry date, and holds nothing T10a's criterion 7 excludes.
+2. The device record names the candidate build, the build that was on the phone before, the device model and the collection time. It also records the outcome for each check in the procedure. Any lost, duplicated or resurrected data, and any lost or duplicated reminder, fails the check until a fix lands and the upgrade is repeated with a new candidate.
+3. Every observed result cites the named record. Raw screenshots and personal content stay with the maintainer, and the repository holds an auditable reference to them. T06 distributes this candidate. A rebuilt binary needs the affected device checks repeated.
+
+Contributes to original T10 criteria: 1 (device), 3, 4.

@@ -579,7 +579,7 @@ extension LifecycleCoordinator {
         let layout = ProtectedStorageLayout(
             rootDirectory: URL(fileURLWithPath: root.configuration.storageRootPath, isDirectory: true))
         let notifications = NotificationBridge(
-            center: root.adapters.notificationCenter, ingestor: NotificationEventIngestor(handler: { _ in }))
+            center: root.adapters.notificationCenter, ingestor: root.notificationEventIngestor)
         let deletion = DeletionCleanupService(
             core: deletionClient, notifications: notifications,
             localCleanup: DeletionLocalCleanup(

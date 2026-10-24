@@ -224,6 +224,15 @@
       ],
       "old_task_id": "f5423770-230e-46e0-9451-80a56f6a7b3a",
       "old_pr": null
+    },
+    "T10": {
+      "reason": "Build identity, the signing wrapper and a simulator upgrade check are fleet work; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling lands while the device evidence stays an honest block.",
+      "children": [
+        "T10a",
+        "T10b"
+      ],
+      "old_task_id": "ddc1fc6c-a3d9-41a1-ba79-e33855644a3f",
+      "old_pr": 356
     }
   },
   "tasks": [
@@ -3793,6 +3802,7 @@
         "DS09",
         "F44",
         "F45",
+        "T10a",
         "U03b",
         "U04b",
         "U07c",
@@ -3901,7 +3911,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F43"
+        "F43",
+        "F47"
       ],
       "source_pointers": [
         "app/status/StatusText.swift:30",
@@ -3928,11 +3939,135 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F37"
+        "F37",
+        "F47"
       ],
       "source_pointers": [
         "ios/Services/Assembly/CompositionRoot.swift:441",
         "ios/AppAssembly/AppDelegate.swift:11"
+      ]
+    },
+    {
+      "key": "F46",
+      "parent": null,
+      "title": "Schedule a reminder whose day and clock time sit on either side of the task",
+      "file_scope": [
+        "core/src/time/",
+        "core/tests/time/",
+        "core/tests/proposal_application/",
+        "fixtures/intent/contrastive-fixtures.json",
+        "core/tests/fixture_validation/",
+        "core/tests/live_providers/"
+      ],
+      "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
+      "acceptance": [
+        "See the F46 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F29"
+      ],
+      "source_pointers": [
+        "core/src/time/expression.rs:1",
+        "core/src/time/expression.rs:293"
+      ]
+    },
+    {
+      "key": "F47",
+      "parent": null,
+      "title": "Make the iOS test suite deterministic: fix the intermittent failures",
+      "file_scope": [
+        "ios/Tests/Status/",
+        "ios/Tests/CaptureEntry/",
+        "ios/Tests/Playback/",
+        "ios/Tests/SourceDetail/",
+        "ios/Tests/EndToEnd/",
+        "ios/Tests/Retrieval/",
+        "ios/Tests/Services/",
+        "ios/Tests/JobRunner/",
+        "ios/Tests/ItemControls/",
+        "ios/Tests/HomeRecents/",
+        "ios/Tests/AppAssembly/",
+        "ios/Tests/NotificationActions/",
+        "ios/Tests/Support/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
+      ],
+      "intent": "Replace fixed-yield waits with bounded condition waits, diagnose each intermittently failing test, stabilize the walkthrough, without weakening any check.",
+      "acceptance": [
+        "See the F47 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F37"
+      ],
+      "source_pointers": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
+        ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "T10a",
+      "parent": "T10",
+      "title": "Version trial builds, carry the build identity into metrics, and check upgrades in the simulator",
+      "file_scope": [
+        "tools/release/",
+        "ios/UITests/Upgrade/",
+        "ios/scripts/generate_build_info.sh",
+        "ios/project.yml",
+        ".github/workflows/upgrade.yml",
+        "ios/AppAssembly/UpgradeCheck/",
+        "core/src/metrics/",
+        "ios/Services/Metrics/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/releases/m1-trial/README.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Make each trial build name its revision, give the maintainer a tested signing wrapper, and prove automatically that a newer build installed over an older one keeps the data.",
+      "acceptance": [
+        "See the T10a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "depends_on": [
+        "F45",
+        "P08b",
+        "P11b",
+        "T09"
+      ],
+      "source_pointers": [
+        "core/src/metrics/mod.rs:458",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift:185",
+        "ios/scripts/smoke-simulator.sh"
+      ]
+    },
+    {
+      "key": "T10b",
+      "parent": "T10",
+      "title": "Record the signed trial candidate and the maintainer's device upgrade",
+      "file_scope": [
+        "docs/releases/m1-trial/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Fold the maintainer's signed candidate and device upgrade result into the release and upgrade documents as cited evidence.",
+      "acceptance": [
+        "See the T10b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        3,
+        4
+      ],
+      "depends_on": [
+        "T10a",
+        "U10a"
+      ],
+      "source_pointers": [
+        "docs/testing/m1-upgrade-evidence.md"
       ]
     }
   ],
@@ -4445,11 +4580,6 @@
       "B03",
       "N07"
     ],
-    "T10": [
-      "P08b",
-      "T09",
-      "P11b"
-    ],
     "T02a": [
       "C05b",
       "J02b",
@@ -4484,7 +4614,7 @@
       "T03",
       "T04b",
       "T09",
-      "T10",
+      "T10b",
       "T12b",
       "U10b"
     ],
@@ -4713,6 +4843,7 @@
       "DS09",
       "F44",
       "F45",
+      "T10a",
       "U03b",
       "U04b",
       "U07c",
@@ -4725,10 +4856,29 @@
     "F42": [],
     "F43": [],
     "F44": [
-      "F43"
+      "F43",
+      "F47"
     ],
     "F45": [
-      "F37"
+      "F37",
+      "F47"
+    ],
+    "F46": [
+      "F29"
+    ],
+    "F47": [
+      "F37",
+      "F42"
+    ],
+    "T10a": [
+      "F45",
+      "P08b",
+      "P11b",
+      "T09"
+    ],
+    "T10b": [
+      "T10a",
+      "U10a"
     ]
   },
   "retained_dependency_overrides": {
@@ -4931,6 +5081,22 @@
     {
       "date": "2026-10-23",
       "change": "F42 owns contracts/mod.rs (proposal capture-id check) and the one flaky HomeRecents test wait; F43 owns an additive PrivateReadGate scope and the FFI job_configuration tests."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F46: split day/task/clock reminders (\"remind me today to call the dentist at 10am\") are held for correction; add the shape to the time grammar. Depends on F29."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Added F47 (deterministic iOS tests: shared bounded wait, diagnose each intermittent test, stabilize the walkthrough; test code only). Depends on F37 and F42; F44 and F45 now wait for F47."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "F47 no longer depends on F42 (the two were deadlocked); F47 owns the HomeRecents retry test."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Split T10 into T10a (build identity, metrics build field, signing wrapper, simulator upgrade check) and T10b (maintainer's signed candidate and device upgrade). T05 depends on T10b; U10a also depends on T10a (shared ios/project.yml)."
     }
   ]
 }
