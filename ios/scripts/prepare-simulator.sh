@@ -20,6 +20,11 @@ responsive_probe_limit_seconds=3
 responsive_probes_required=10
 responsive_timeout_seconds=480
 probe_hard_limit_seconds=10
+# After the readiness gate passes, a first or cloned boot keeps the runner saturated with first-boot daemons for minutes,
+# which starves the next UI query or screenshot. Wait (bounded, never failing) until the host has been mostly idle for a while.
+settle_timeout_seconds=300
+settle_idle_percent_required=25
+settle_samples_required=3
 
 udid=""
 erase=0
@@ -118,6 +123,29 @@ wait_for_simulator_to_respond() {
   return 1
 }
 
+wait_for_host_to_settle() {
+  local started=${SECONDS}
+  local quiet=0
+  local idle
+  while [ $((SECONDS - started)) -lt "${settle_timeout_seconds}" ]; do
+    sample_pressure
+    idle="$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
+    if [ -n "${idle}" ] && awk -v i="${idle}" -v m="${settle_idle_percent_required}" 'BEGIN { exit !(i >= m) }'; then
+      quiet=$((quiet + 1))
+    else
+      quiet=0
+    fi
+    log "settle: ${idle:-unknown}% idle (need ${settle_samples_required} samples in a row at ${settle_idle_percent_required}% or more, ${quiet} so far)"
+    if [ "${quiet}" -ge "${settle_samples_required}" ]; then
+      log "host settled after $((SECONDS - started))s"
+      return 0
+    fi
+    sleep 2
+  done
+  log "WARNING: host still busy after ${settle_timeout_seconds}s; continuing (diagnostic only)"
+  return 0
+}
+
 step() {
   local label="$1"
   shift
@@ -173,7 +201,9 @@ if ! wait_for_simulator_to_respond; then
 fi
 sample_pressure
 host_snapshot "after boot completed and simulator responsive"
-record_pressure "${kind}" "$((SECONDS - prepare_started))"
+responsive_seconds="$((SECONDS - prepare_started))"
+wait_for_host_to_settle
+record_pressure "${kind}" "${responsive_seconds}"
 if [ "${shutdown_after}" -eq 1 ]; then
   step "shutdown after settling" xcrun simctl shutdown "${udid}"
 fi
