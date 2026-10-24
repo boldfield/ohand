@@ -2799,8 +2799,12 @@ fn a_hedged_recurring_request_is_kept_as_needing_correction_not_as_an_unsupporte
         assert_hedged_and_unscheduled(&fixture, disposition);
         assert_eq!(fixture.reminder_row().unsupported_reason, None, "{text}");
         // An explicit instant claimed for the recurrence is still rejected as a contradiction.
-        let (fixture, disposition) =
-            apply_clock_proposal(text, quoted, "2026-10-09T09:00:00-04:00", "water the plants");
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            quoted,
+            "2026-10-09T09:00:00-04:00",
+            "water the plants",
+        );
         assert_rejected_and_unscheduled_for(text, &fixture, disposition);
     }
 }
