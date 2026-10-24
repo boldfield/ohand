@@ -8,6 +8,10 @@ Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable ac
 
 Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity, metrics build field, the signing wrapper and an automated simulator upgrade check) and T10b (the maintainer's signed candidate and device upgrade). The original task `ddc1fc6c` blocked on the device criteria after three rejected rounds and is retired. T05 now depends on T10b. U10a now also depends on T10a, because both edit `ios/project.yml`.
 
+Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
+
+Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
+
 ## Execution authority
 
 Read this document with `m1-task-refinement.json`, `m1-plan.md` and the architecture contract. The original `m1-tasks.json` remains the immutable baseline and ownership-group catalog used by the existing contract checker. For current execution, apply this overlay: each replaced group delegates its listed paths to the child tasks below, and consumers depend on its last child. An archived parent is an audit record, not completed implementation.
@@ -3774,6 +3778,10 @@ Acceptance:
    - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
 5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
 
+**Ownership amendment (coordinator, 2026-10-24, after the first claim blocked).** The worker was right. `record_reminder` and `candidate_agreement` (`core/src/interpretation/apply/mod.rs`) resolve only the quoted span. With the clock-only span form, the resolver sees "at 3 p.m." with no day, so it never sees Friday, and the model's correct instant is rejected. F46 now also owns `core/src/interpretation/apply/mod.rs`, only for this seam. When the span sits inside a covered split-shape sentence, resolve the combined day-and-clock phrase from `core/src/time/` instead of the span text. Use that same phrase for the agreement check and for `apply_derived_request`. Every other path through `record_reminder` is unchanged. F29, the last task that owned `apply/`, has landed.
+
+**Second ownership amendment (coordinator, 2026-10-24).** F46 also owns `docs/validation/intent-fixtures.md`, only to add the rows for `split-day-task-clock` and `split-clock-task-day`. `core/tests/fixture_validation/main.rs` fails when a contrastive fixture is missing from that document. The round-3 review's only blocking finding was this gap.
+
 ### F47
 
 Make the iOS test suite deterministic: fix the intermittent failures
@@ -3834,6 +3842,14 @@ Acceptance:
    - No timeout over 10 s without a stated reason.
 5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, with no test from the list failing. Rerun the whole workflow after the first success, not only a failed job. Link all three in the PR. Any failure during those runs is reported, with its test and cause, not hidden by a rerun.
 
+
+Amendment (2026-10-24): F47 blocked with its test fixes done. Its three-run evidence (acceptance 5) failed on causes outside its owned paths:
+- The simulator readiness gate in `ios/scripts/prepare-simulator.sh` timed out in the walkthrough job twice and the NotificationProbe step once, with the host at load average 400–480, 0% idle and about 100 MB of free memory. F49 owns this.
+- `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased` failed its 30 s condition wait on an unloaded host. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` is still undiagnosed. F50 owns both.
+
+F47 now depends on F37, F49 and F50. After both land, rebase onto main and collect acceptance 5 as written. Its criteria are unchanged.
+
+Amendment 2 (2026-10-24, later): F50 is retired. Neither named failure reproduced in 250 iterations each (run 40074375705), and a read-through found no product interleaving that leaves the reset gate held. The only reproduced failure was test-side, at `CompositionRootTests.swift:240`: `tearDownWithError` checks the process-wide `CoreHandle.liveResultBufferCount` against its baseline without waiting for quiescence. The resumed reset in the two reset tests finishes on a background task after the assertion, so the next test's baseline can start at 1. It failed in 2 and 8 of 250 iterations. F47 owns that file and fixes it under acceptance 2 (state shared between tests): poll the live buffer and handle counts back to the baseline with a deadline in tearDown, as `AppServicesTests.swift:77` and `:530` already do, and settle setUp's baseline the same way. The assertion stays. If a named reset or JobRunner test fails during the acceptance-5 runs, report it with its log, as acceptance 5 already requires. F47 now depends on F37 and F49 only.
 
 ### T10a
 
@@ -3957,3 +3973,104 @@ Acceptance:
    - Hosted view tests for Status (locked, unlocked with 1 and with more than 5) and for a Home row with and without the marker. Run them in both appearances.
    - `make check` and `make test` pass.
    - The exact-head macOS CI evidence that AGENTS.md requires.
+
+
+### F49
+
+Stop the hosted macOS runner from starving when it boots simulators
+
+Found from F47's evidence runs on 2026-10-24. This is not a test-timing problem. Each job on the standard `macos-26` runner (3 cores, 7 GB) boots several freshly erased simulators. An erased simulator's first boot saturates the runner for many minutes. The readiness gate then fails, or UI queries time out ("Failed to get matching snapshots: Timed out while evaluating UI query").
+
+Host snapshots from `ios/scripts/prepare-simulator.sh`:
+
+| Run, attempt, job | Moment | Load average (1 min) | Free memory | Result |
+|---|---|---|---|---|
+| 40063730585 a2, walkthrough, compact (iPhone) | before boot | 7.5 | 633 MB | |
+| | after responsive (184 s) | 406 | 97 MB, 15k swapouts | passed |
+| 40063730585 a2, walkthrough, regular (iPad) | before boot | 186 | 3.2 GB | |
+| | gate timeout (240 s) | 459 | 124 MB, 38k swapouts | failed |
+| 40063730585 a3, simulator job, NotificationProbe (second erase) | gate timeout (240 s) | 484 | 130 MB | failed |
+
+Each simulator boot adds about 255 simulator processes. Cold boots per job today:
+- `simulator`: the OhAndTests device, then one erase and boot per NotificationProbe suite (2).
+- `walkthrough`: an erased iPhone, then an erased iPad.
+
+The job that boots a second fresh device is the one that fails.
+
+Goal: no job starts a UI test on a starved host, and no job pays for more than one first boot of each device type. Use the standard free runners. A larger or paid runner needs the maintainer's separate authorization, and this task does not ask for it.
+
+Candidate approaches, best first. Measure them, then choose:
+1. **Boot once, then clone.** Boot each device type once, wait until it settles, shut it down, and give each suite a `simctl clone` of that settled device. The clone keeps the finished first-boot state and has no app data. Delete clones after use. The NotificationProbe suites need an undetermined notification decision for their bundle. A device that never ran NotificationProbe gives them that, and the Authorized and Denied suites must both still pass from it.
+2. **One cold boot per job.** Split work across jobs, for example the compact and regular walkthrough in separate jobs. This costs more concurrent macOS jobs, and the fleet already queues on them. Use it where cloning is not enough, and state the queue cost.
+3. **A longer readiness timeout.** This is allowed only together with 1 or 2, never on its own, and never above 480 s. The gate's thresholds (10 probes in a row within 3 s) stay unchanged.
+
+Shut down every simulator a step no longer needs before booting the next one, and record that in the log.
+
+Owned paths:
+- `.github/workflows/ios.yml`, for job structure and simulator preparation only;
+- `ios/scripts/prepare-simulator.sh`;
+- `ios/scripts/walkthrough-simulator.sh`, `ios/scripts/smoke-simulator.sh` and the other `ios/scripts/*-simulator.sh` scripts, only where they boot, erase or shut down a simulator;
+- tests for these scripts under `ios/scripts/`;
+- the "Required checks for macOS workers" section of `AGENTS.md`, only to describe the changed job layout.
+
+No test code under `ios/Tests/` or `ios/UITests/`, and no product code.
+
+Dependencies: none. F47's open PR does not touch these paths. U10a and F47 wait for F49.
+
+Acceptance:
+
+1. **Measured first.** The PR states, for each approach tried, the time to responsive and the peak load and lowest free memory after boot, from the existing host snapshots, each with a run link. The chosen approach is justified from those numbers.
+2. **At most one first boot per device type per job.** Each preparation logs whether it cold-booted, cloned or reused a device, and its time to responsive.
+3. **Pressure summary.** Each job writes `host-pressure.txt` into its uploaded evidence: every preparation's label, kind, time to responsive, highest 1-minute load and lowest free memory. This file is diagnostic only and not a pass/fail gate.
+4. **Nothing is weakened.**
+   - Every existing step, test and screenshot still runs.
+   - No `continue-on-error`, no retry of a failed test step, and no `-retry-tests-on-failure`.
+   - The readiness thresholds are unchanged, and the timeout is at most 480 s.
+   - The NotificationProbe Authorized and Denied suites each still start from an undetermined decision and pass with unchanged assertions.
+   - Evidence names and contents that AGENTS.md lists stay as they are, with `retention-days` at most 7.
+5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, triggered as full reruns, with no readiness-gate failure in any of them. Link all three. Any failure is reported with its job, step and host snapshot.
+6. `make check` passes, including `ios-check`.
+
+### F50
+
+**Retired 2026-10-24.** The diagnosis found no product race; see F47 amendment 2. This section is kept as an audit record.
+
+Find and fix the product races behind two intermittent test failures
+
+F47 kept these out of its test fixes, because they do not look like test timing:
+
+1. `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased`
+   - Failed in run 40063730585, attempt 1, at `ios/Tests/Services/CompositionRootTests.swift:1680`: "the capture is imported once the reset released the boundary", then "the held capture must be saved, got nil".
+   - The test failed after 36 s, on its 30 s condition wait. Suites before and after it in the same run finished in milliseconds, so the host was not starved.
+   - The shape: a first root saves a capture and is shut down. A reset tap is recorded but never started. A new root then takes a text capture before `start(isActive: true)`, and that capture waits at the reset boundary. After `start`, the resumed reset should release the boundary and save the held capture. It never did.
+   - The related `testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration` failed once on another branch (see F47).
+2. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` (`ios/Tests/JobRunner/JobRunnerBoundaryTests.swift:383`). Undiagnosed. F47's PR adds drain counts to its assertion messages.
+
+Find the cause of each by running it many times on the hosted macOS runner, for example `xcodebuild test -only-testing:<test> -test-iterations 50 -run-tests-until-failure`.
+- For these runs, the branch may add a temporary workflow on an intermediate commit. Remove it before the final head.
+- Link each diagnostic run.
+- A cause that cannot be reproduced in at least 200 iterations is reported as such, with the runs. Do not change code without a reproduced cause.
+
+Fix a product race in product code. Do not change test timing.
+
+Owned paths:
+- `ios/Services/Reset/`, `ios/Services/Assembly/CompositionRoot.swift` and `ios/Services/JobRunner/`;
+- `core/src/lifecycle/reset/`, only when the reproduced cause is there;
+- a new `ios/Tests/RaceRegressions/` for regression tests.
+
+The existing files in `ios/Tests/Services/` and `ios/Tests/JobRunner/` belong to F47 and are not edited. If a cause turns out to be in test code, block with the diagnosis and the proposed test change. The coordinator routes it to F47.
+
+Dependencies: none. F47's open PR edits only test files. F45 waits for F50, because both may edit `CompositionRoot.swift`.
+
+Acceptance:
+
+1. **Diagnosis.** For each test, the PR states the cause with evidence: the interleaving, and the log or added diagnostics that show it.
+2. **Fix and regression test.** Each reproduced product race is fixed in product code. A new test in `ios/Tests/RaceRegressions/` forces the bad interleaving deterministically, for example with a gate or an injected seam, not with a sleep.
+   - The test fails without the fix and passes with it.
+   - The PR links one CI run on an intermediate commit that shows the failure.
+3. **Reset invariants hold.**
+   - A capture taken during a reset is never lost and never erased by that reset.
+   - The reset still holds its generation.
+   - Existing reset, deletion and job-runner tests pass unchanged.
+4. **Iterations.** After the fix, each of the two named tests passes 200 iterations on the hosted runner, using the same temporary-workflow rule.
+5. `make check` and `make test` pass, plus the exact-head macOS CI evidence that AGENTS.md requires.

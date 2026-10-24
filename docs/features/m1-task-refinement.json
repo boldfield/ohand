@@ -3808,7 +3808,8 @@
         "U04b",
         "U07c",
         "U08b",
-        "U09"
+        "U09",
+        "F49"
       ],
       "source_pointers": [
         "ios/project.yml:330",
@@ -3958,7 +3959,9 @@
         "core/tests/proposal_application/",
         "fixtures/intent/contrastive-fixtures.json",
         "core/tests/fixture_validation/",
-        "core/tests/live_providers/"
+        "core/tests/live_providers/",
+        "core/src/interpretation/apply/mod.rs",
+        "docs/validation/intent-fixtures.md"
       ],
       "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
       "acceptance": [
@@ -3999,7 +4002,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F37"
+        "F37",
+        "F49"
       ],
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
@@ -4101,6 +4105,30 @@
         "core/src/retrieval/recent/mod.rs:36",
         "core/src/ffi/notification_reconciliation.rs:591",
         "app/reminders/ReminderEditText.swift:44"
+      ]
+    },
+    {
+      "key": "F49",
+      "parent": null,
+      "title": "Stop the hosted macOS runner from starving when it boots simulators",
+      "file_scope": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/walkthrough-simulator.sh",
+        "ios/scripts/smoke-simulator.sh",
+        "ios/scripts/",
+        "AGENTS.md"
+      ],
+      "intent": "Each macos-26 job cold-boots several erased simulators and the 3-core/7 GB runner reaches load ~480 with ~100 MB free, failing the readiness gate and UI queries; pay at most one first boot per device type per job.",
+      "acceptance": [
+        "See the F49 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/walkthrough-simulator.sh",
+        ".github/workflows/ios.yml:90"
       ]
     }
   ],
@@ -4877,6 +4905,7 @@
       "F44",
       "F45",
       "F48",
+      "F49",
       "T10a",
       "U03b",
       "U04b",
@@ -4902,7 +4931,7 @@
     ],
     "F47": [
       "F37",
-      "F42"
+      "F49"
     ],
     "T10a": [
       "F45",
@@ -4916,7 +4945,8 @@
     ],
     "F48": [
       "F44"
-    ]
+    ],
+    "F49": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5138,6 +5168,18 @@
     {
       "date": "2026-10-24",
       "change": "Added F48: reminders stored with no time (\"remind me later to call Joe\") are shown in Status and marked on Home rows. Depends on F44; U10a now also waits for F48 (both edit app/)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 now also owns core/src/interpretation/apply/mod.rs for the split-shape seam: resolve the combined day+clock phrase when the proposal quotes only the clock."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "Added F49 (hosted-runner simulator starvation: at most one first boot per device type per job) and F50 (product races behind the CompositionRoot reset-boundary and JobRunner deferred-job test failures). F47 now depends on F37, F49 and F50 (its stale F42 edge removed); F45 also waits for F50 (CompositionRoot.swift); U10a also waits for F49 (ios.yml)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 also owns docs/validation/intent-fixtures.md for its two fixture rows. F50 retired: no product race reproduced in 250 iterations; the reproduced teardown liveResultBufferCount check in CompositionRootTests goes to F47 (amendment 2). F47 depends on F37 and F49; F45 on F37 and F47."
     }
   ]
 }
