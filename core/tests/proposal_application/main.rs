@@ -3106,3 +3106,65 @@ fn a_hedged_split_shape_reminder_is_never_scheduled() {
         );
     }
 }
+
+#[test]
+fn a_split_shape_reminder_with_a_repeat_word_is_an_unsupported_recurrence() {
+    for (text, quoted) in [
+        ("Remind me today to pay the recurring bill at 5pm", "at 5pm"),
+        (
+            "Remind me today to pay the recurring bill at 5pm",
+            "today to pay the recurring bill at 5pm",
+        ),
+        (
+            "Remind me at 5pm to pay the recurring bill tomorrow",
+            "at 5pm",
+        ),
+        (
+            "Remind me at 5pm to pay the recurring bill tomorrow",
+            "at 5pm to pay the recurring bill tomorrow",
+        ),
+    ] {
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-08T17:00:00-04:00", "pay");
+        assert_ne!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert!(
+            fixture
+                .reminder_effects()
+                .is_none_or(|(_, _, operations, _)| operations.is_empty()),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_split_shape_part_the_resolver_cannot_read_is_not_covered() {
+    for (text, quoted) in [
+        ("Remind me today to call the dentist at 1:00", "at 1:00"),
+        ("Remind me at 1:00 to call the dentist tomorrow", "at 1:00"),
+        ("Remind me tonight to call the dentist at 10pm", "at 10pm"),
+        ("Remind me at 10pm to call the dentist tonight", "at 10pm"),
+    ] {
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-08T22:00:00-04:00", "call");
+        assert_ne!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert!(
+            fixture
+                .reminder_effects()
+                .is_none_or(|(_, _, operations, _)| operations.is_empty()),
+            "{text}"
+        );
+    }
+}

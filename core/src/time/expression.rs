@@ -37,7 +37,7 @@
 // 3 p.m.") or clock, task, day ("Remind me at 10am to call the dentist tomorrow"). The first
 // part directly follows the request prefix and the last part ends the sentence, apart from
 // closing punctuation or a filler. Each part is complete on its own: a single day word (`today`,
-// `tonight`, `tomorrow`, a weekday or an ISO date) and a clock that names no day (`10am`,
+// `tomorrow`, a weekday or an ISO date) and a clock that names no day (`10am`,
 // `3 p.m.`, `10:30 am`, `noon`, `midnight`), each optionally behind `on` or `at`. The task
 // between them opens with `to` or a filler, holds a word besides those, no clause mark and no
 // temporal token, and does not modify the last part ("by", "around", "before"). The whole-capture
@@ -609,7 +609,6 @@ fn day_word(word: &Word) -> Option<&str> {
     (matches!(
         text,
         "today"
-            | "tonight"
             | "tomorrow"
             | "monday"
             | "tuesday"
@@ -665,7 +664,7 @@ fn clock_length(words: &[Word]) -> Option<usize> {
 /// A 24-hour clock with two-digit minutes: `15:00`, `00:00`.
 fn is_twenty_four_hour_clock(text: &str) -> bool {
     text.split_once(':').is_some_and(|(hour, minutes)| {
-        hour.len() <= 2
+        hour.len() == 2
             && hour.parse::<u32>().is_ok_and(|hour| hour < 24)
             && minutes.len() == 2
             && minutes.parse::<u32>().is_ok_and(|minutes| minutes < 60)
