@@ -311,7 +311,9 @@ final class WalkthroughUITests: XCTestCase {
     private func goBack(to destination: XCUIElement, _ destinationName: String) {
         let glassBack = app.buttons["Back"].firstMatch
         let barBack = app.navigationBars.buttons.element(boundBy: 0)
-        let deadline = Date().addingTimeInterval(10)
+        // screenTimeout, not 10 s: the back button appears when the pushed screen finishes its transition, which a loaded
+        // simulator can stretch for a long time.
+        let deadline = Date().addingTimeInterval(screenTimeout)
         var tapped = false
         repeat {
             if isShowing(glassBack) {
@@ -324,7 +326,7 @@ final class WalkthroughUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 0.5)
             }
         } while !tapped && Date() < deadline
-        XCTAssertTrue(tapped, "no back button")
+        XCTAssertTrue(tapped, "going back to \(destinationName): no back button was hittable within \(Int(screenTimeout)) s")
         XCTAssertTrue(destination.waitForExistence(timeout: screenTimeout), "going back did not return to \(destinationName)")
     }
 

@@ -369,6 +369,7 @@ final class AppRealServicesTests: XCTestCase {
         center.deliver(identifier: request.identifier, at: Date())
         services.lifecycle.foregroundActivated()
         wait("the delivered history event is recorded") { self.scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'") == "1" }
+        wait("the first return to the foreground read the delivered list") { center.deliveredReads >= readsAfterLaunch + 1 }
         settleBackgroundWork(services)
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1")
         XCTAssertNotEqual(scalar("SELECT delivery_state FROM reminders"), "unknown")
@@ -377,6 +378,9 @@ final class AppRealServicesTests: XCTestCase {
             "one return to the foreground reads the delivered list once, though two steps reconcile reminders")
 
         services.lifecycle.foregroundActivated()
+        wait("the second return to the foreground read the delivered list") {
+            center.deliveredReads >= readsAfterLaunch + 2
+        }
         settleBackgroundWork(services)
         XCTAssertEqual(
             scalar("SELECT COUNT(*) FROM reminder_history_events WHERE event_kind = 'delivered'"), "1",
