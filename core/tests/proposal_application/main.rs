@@ -2922,7 +2922,7 @@ fn an_unhedged_clock_request_still_schedules() {
 
 /// The split shape (F46): the day and the clock sit on either side of the task. The capture is
 /// 2026-10-08T14:00:00Z, 10:00 EDT, so these instants are in America/New_York.
-const SPLIT_SHAPE_CAPTURES: [(&str, &str, &str, &str); 3] = [
+const SPLIT_SHAPE_CAPTURES: [(&str, &str, &str, &str); 7] = [
     (
         "Remind me today to call the dentist at 5 p.m.",
         "today to call the dentist at 5 p.m.",
@@ -2941,6 +2941,30 @@ const SPLIT_SHAPE_CAPTURES: [(&str, &str, &str, &str); 3] = [
         "at 10am",
         "2026-10-09T10:00:00-04:00",
     ),
+    (
+        "Remind me today to call the dentist at 15:00",
+        "today to call the dentist at 15:00",
+        "at 15:00",
+        "2026-10-08T15:00:00-04:00",
+    ),
+    (
+        "Remind me at 00:00 to call the dentist tomorrow",
+        "at 00:00 to call the dentist tomorrow",
+        "at 00:00",
+        "2026-10-09T00:00:00-04:00",
+    ),
+    (
+        "Remind me next Monday to call Sam at 8 a.m.",
+        "next Monday to call Sam at 8 a.m.",
+        "at 8 a.m.",
+        "2026-10-12T08:00:00-04:00",
+    ),
+    (
+        "Remind me at 3 p.m. to call Sam next Monday",
+        "at 3 p.m. to call Sam next Monday",
+        "at 3 p.m.",
+        "2026-10-12T15:00:00-04:00",
+    ),
 ];
 
 #[test]
@@ -2957,9 +2981,14 @@ fn a_split_shape_reminder_schedules_with_either_span_form() {
 fn a_split_shape_reminder_whose_instant_differs_from_the_combined_resolution_is_rejected() {
     for (text, whole, clock, instant) in SPLIT_SHAPE_CAPTURES {
         // The clock on the right hour but another day, and the day at another hour.
-        let other_day = instant.replace("-08T", "-20T").replace("-09T", "-21T");
+        let other_day = instant
+            .replace("-08T", "-20T")
+            .replace("-09T", "-21T")
+            .replace("-12T", "-26T");
         let other_hour = instant
             .replace("T17:", "T18:")
+            .replace("T00:", "T01:")
+            .replace("T08:", "T09:")
             .replace("T15:", "T16:")
             .replace("T10:", "T11:");
         for wrong in [other_day.as_str(), other_hour.as_str()] {

@@ -492,7 +492,7 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
         .count();
     let prefix = &sentence[..prefix_length];
     let rest = &sentence[prefix_length..];
-    let first = rest.first()?;
+    rest.first()?;
     let lead_start = |preposition: &[&str]| {
         prefix
             .last()
@@ -523,26 +523,30 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
     }
     let body = &rest[..tail_end];
 
-    if day_word(first).is_some() {
+    let leading_day_length = day_length(rest);
+    if leading_day_length > 0 {
         // Day, task, clock.
-        if has_clause_mark(&first.raw) || first.ends_sentence {
+        let day = &rest[..leading_day_length];
+        if day.iter().any(|word| has_clause_mark(&word.raw)) || day.iter().any(|w| w.ends_sentence)
+        {
             return None;
         }
         if made_inexact_by_modifier(prefix) {
             return None;
         }
         let clock_length = [2, 1].into_iter().find(|&length| {
-            body.len() > length && clock_length(&body[body.len() - length..]) == Some(length)
+            body.len() > leading_day_length + length
+                && clock_length(&body[body.len() - length..]) == Some(length)
         })?;
         let clock_start = body.len() - clock_length;
         let at_length = usize::from(body[clock_start - 1].text == "at");
         let task_end = clock_start - at_length;
-        let task = body.get(1..task_end)?;
-        if !is_split_task(task) || made_inexact_by_modifier(&body[..task_end]) {
+        let task = body.get(leading_day_length..task_end)?;
+        if !is_split_task(task) || made_inexact_by_modifier(task) {
             return None;
         }
         let clock = &body[clock_start..];
-        let combined = format!("{} at {}", first.text, words_phrase(clock));
+        let combined = format!("{} at {}", day_phrase(day), words_phrase(clock));
         let whole_starts = std::iter::once(prefix_length)
             .chain(lead_start(&["on", "at"]))
             .collect();
@@ -562,17 +566,17 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
     if clock.iter().any(|word| has_clause_mark(&word.raw)) {
         return None;
     }
-    let day_index = body.len() - 1;
-    let day = &body[day_index];
-    if day_index <= clock_length || day_word(day).is_none() {
-        return None;
-    }
+    let trailing_day_length = (1..=2).rev().find(|&length| {
+        body.len() > clock_length + length && day_length(&body[body.len() - length..]) == length
+    })?;
+    let day_index = body.len() - trailing_day_length;
+    let day = &body[day_index..];
     let on_length = usize::from(body[day_index - 1].text == "on");
     let task = &body[clock_length..day_index - on_length];
     if !is_split_task(task) || made_inexact_by_modifier(task) {
         return None;
     }
-    let combined = format!("{} at {}", day.text, words_phrase(clock));
+    let combined = format!("{} at {}", day_phrase(day), words_phrase(clock));
     let starts: Vec<usize> = std::iter::once(prefix_length)
         .chain(lead_start(&["at"]))
         .collect();
@@ -618,6 +622,21 @@ fn day_word(word: &Word) -> Option<&str> {
     .then_some(text)
 }
 
+/// How many of the leading words form a complete day: one day word, or `next` and a weekday.
+/// 0 when they do not.
+fn day_length(words: &[Word]) -> usize {
+    let Some(first) = words.first() else {
+        return 0;
+    };
+    if first.text == "next" {
+        let weekday = words.get(1).and_then(day_word).is_some_and(|day| {
+            !matches!(day, "today" | "tonight" | "tomorrow") && !is_iso_date(day)
+        });
+        return if weekday { 2 } else { 0 };
+    }
+    usize::from(day_word(first).is_some())
+}
+
 /// How many of the leading words form a complete clock that names no day: `noon`, `midnight`,
 /// `10am`, `10:30 p.m.`. A bare number ("10") is not complete.
 fn clock_length(words: &[Word]) -> Option<usize> {
@@ -633,11 +652,24 @@ fn clock_length(words: &[Word]) -> Option<usize> {
     {
         return Some(2);
     }
+    if is_twenty_four_hour_clock(first) {
+        return Some(1);
+    }
     meridiems
         .iter()
         .find_map(|meridiem| first.strip_suffix(meridiem))
         .filter(|number| is_clock_number(number))
         .map(|_| 1)
+}
+
+/// A 24-hour clock with two-digit minutes: `15:00`, `00:00`.
+fn is_twenty_four_hour_clock(text: &str) -> bool {
+    text.split_once(':').is_some_and(|(hour, minutes)| {
+        hour.len() <= 2
+            && hour.parse::<u32>().is_ok_and(|hour| hour < 24)
+            && minutes.len() == 2
+            && minutes.parse::<u32>().is_ok_and(|minutes| minutes < 60)
+    })
 }
 
 /// An hour from 1 to 12, optionally with two-digit minutes: `10`, `10:30`.
@@ -653,6 +685,15 @@ fn is_clock_number(text: &str) -> bool {
         && minutes.is_none_or(|minutes| {
             minutes.len() == 2 && minutes.parse::<u32>().is_ok_and(|minutes| minutes < 60)
         })
+}
+
+/// The words of a day, lowercased.
+fn day_phrase(words: &[Word]) -> String {
+    words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The words as written, without quotes and punctuation around them, but with a meridiem's dot.
@@ -2094,6 +2135,26 @@ mod tests {
                 "5pm",
                 "today at 5pm",
             ),
+            (
+                "Remind me today to call the dentist at 15:00",
+                "at 15:00",
+                "today at 15:00",
+            ),
+            (
+                "Remind me at 00:00 to call the dentist tomorrow",
+                "at 00:00",
+                "tomorrow at 00:00",
+            ),
+            (
+                "Remind me next Monday to call Sam at 8 a.m.",
+                "at 8 a.m.",
+                "next monday at 8 a.m.",
+            ),
+            (
+                "Remind me at 3 p.m. to call Sam next Monday",
+                "at 3 p.m.",
+                "next monday at 3 p.m.",
+            ),
         ] {
             assert!(covers(text, clock), "{text:?} / {clock:?}");
             let byte_start = text.find(clock).unwrap();
@@ -2132,6 +2193,26 @@ mod tests {
                 "Remind me on Friday to call Sam at 3 p.m.",
                 "on Friday to call Sam at 3 p.m.",
                 "friday at 3 p.m.",
+            ),
+            (
+                "Remind me today to call the dentist at 15:00",
+                "today to call the dentist at 15:00",
+                "today at 15:00",
+            ),
+            (
+                "Remind me at 15:00 to call the dentist tomorrow",
+                "at 15:00 to call the dentist tomorrow",
+                "tomorrow at 15:00",
+            ),
+            (
+                "Remind me next Monday to call Sam at 8 a.m.",
+                "next Monday to call Sam at 8 a.m.",
+                "next monday at 8 a.m.",
+            ),
+            (
+                "Remind me at 3 p.m. to call Sam next Monday",
+                "at 3 p.m. to call Sam next Monday",
+                "next monday at 3 p.m.",
             ),
         ] {
             assert!(covers(text, whole), "{text:?} / {whole:?}");
@@ -2213,10 +2294,11 @@ mod tests {
                 "Remind me today to call the dentist at 10:5 am",
                 "at 10:5 am",
             ),
-            ("Remind me next Friday to call Sam at 3 p.m.", "at 3 p.m."),
+            ("Remind me next to call Sam at 3 p.m.", "at 3 p.m."),
+            ("Remind me next today to call Sam at 3 p.m.", "at 3 p.m."),
             ("Remind me at 10 to call the dentist tomorrow", "at 10"),
             (
-                "Remind me at 10am to call the dentist next Friday",
+                "Remind me at 10am to call the dentist next today",
                 "at 10am",
             ),
             // The task does not open with `to` or a filler, or is empty.
