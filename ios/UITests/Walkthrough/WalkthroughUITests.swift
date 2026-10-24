@@ -68,7 +68,7 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     private func walk(prefix: String) throws {
-        XCTAssertTrue(app.buttons[homeSearch].waitForExistence(timeout: screenTimeout), "home screen did not appear")
+        XCTAssertTrue(appears(app.buttons[homeSearch], timeout: screenTimeout), "home screen did not appear")
         waitForLaunchAuthentication()
         saveCaptures()
         dismissKeyboard()
@@ -82,12 +82,12 @@ final class WalkthroughUITests: XCTestCase {
         queryField.typeText(searchQuery)
         // The keyboard's Search key is the one way a person submits; it also puts the keyboard away.
         let searchKey = app.keyboards.buttons["Search"]
-        XCTAssertTrue(searchKey.waitForExistence(timeout: screenTimeout), "keyboard Search key did not appear")
+        XCTAssertTrue(appears(searchKey, timeout: screenTimeout), "keyboard Search key did not appear")
         tapWhenHittable(searchKey, step: "Search", elementName: "the keyboard Search key")
         // The saved captures must be found: "garage" matches at least one (the second appearance's run adds a second copy).
         // The count ("1 result", "2 results") is shown only when there are results; no match shows "No matches".
         let resultCount = app.staticTexts["retrieval.search.count"]
-        XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
+        XCTAssertTrue(appears(resultCount, timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
 
         // Source detail for the first result: pushed above Search at compact width, beside the results at regular width.
@@ -95,10 +95,10 @@ final class WalkthroughUITests: XCTestCase {
         let isRegularWidth = UIDevice.current.userInterfaceIdiom == .pad
         let firstResult = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "retrieval.search.row.")).firstMatch
-        XCTAssertTrue(firstResult.waitForExistence(timeout: screenTimeout), "no search result to open")
+        XCTAssertTrue(appears(firstResult, timeout: screenTimeout), "no search result to open")
         tapWhenHittable(firstResult, step: "source detail", elementName: "the first search result")
         let detailText = app.descendants(matching: .any)["source-detail.current-text"]
-        XCTAssertTrue(detailText.waitForExistence(timeout: screenTimeout), "source detail did not open")
+        XCTAssertTrue(appears(detailText, timeout: screenTimeout), "source detail did not open")
         capture(prefix, "source detail")
         if !isRegularWidth {
             goBack(to: resultCount, "Search")
@@ -115,7 +115,7 @@ final class WalkthroughUITests: XCTestCase {
             let row = app.buttons.matching(
                 NSPredicate(format: "label == %@ OR label BEGINSWITH %@", screen.label, "\(screen.label), ")
             ).firstMatch
-            XCTAssertTrue(row.waitForExistence(timeout: screenTimeout), "settings row \(screen.label) not found")
+            XCTAssertTrue(appears(row, timeout: screenTimeout), "settings row \(screen.label) not found")
             tapWhenHittable(row, step: "settings row \(screen.label)", elementName: "the \(screen.label) row")
             // The row query is re-resolved on every check and can match a control on the opened screen (Export's own
             // "Export" button), so the screen counts as open once the Settings header has gone.
@@ -129,7 +129,7 @@ final class WalkthroughUITests: XCTestCase {
                     ("provider-settings.advanced", "Advanced", "processing-advanced"),
                 ] {
                     let link = app.buttons[identifier]
-                    XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not found on Processing")
+                    XCTAssertTrue(appears(link, timeout: screenTimeout), "\(identifier) not found on Processing")
                     tapWhenHittable(link, step: title, elementName: "the \(identifier) link")
                     XCTAssertTrue(
                         waitForScreen(title, leaving: link, timeout: screenTimeout), "\(title) did not open from Processing")
@@ -141,11 +141,11 @@ final class WalkthroughUITests: XCTestCase {
         }
         // The "Erase everything" card on the Settings root must open the reset screen, which is captured. Nothing is confirmed.
         let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
-        XCTAssertTrue(eraseCard.waitForExistence(timeout: screenTimeout), "Erase everything card not found on Settings")
+        XCTAssertTrue(appears(eraseCard, timeout: screenTimeout), "Erase everything card not found on Settings")
         if !isShowing(eraseCard) { app.swipeUp() }
         tapWhenHittable(eraseCard, step: "erase everything", elementName: "the Erase everything card")
         let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
-        XCTAssertTrue(resetExplanation.waitForExistence(timeout: screenTimeout), "Erase everything did not open the reset screen")
+        XCTAssertTrue(appears(resetExplanation, timeout: screenTimeout), "Erase everything did not open the reset screen")
         capture(prefix, "erase everything")
         goBack(to: settingsHeader, "Settings")
         goBack(to: homeLink(homeSearch), "home")
@@ -190,6 +190,14 @@ final class WalkthroughUITests: XCTestCase {
         return XCTWaiter().wait(for: [showing], timeout: seconds) == .completed
     }
 
+    /// True once `element` exists, within `timeout`. It polls through XCTest's predicate expectation rather than
+    /// `waitForExistence`, because a query that times out while the app is busy fails the test outright when asked
+    /// directly ("Timed out while evaluating UI query") but is simply asked again by the predicate polling.
+    private func appears(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let exists = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"), object: element)
+        return XCTWaiter().wait(for: [exists], timeout: timeout) == .completed
+    }
+
     /// Waits until `element` exists and is hittable, then taps it. A step that cannot act fails naming the step and the
     /// element. The timeout is `screenTimeout` like every other wait here: a hosted macOS simulator can take a minute to
     /// finish a transition under load.
@@ -228,7 +236,7 @@ final class WalkthroughUITests: XCTestCase {
 
     private func saveCaptures() {
         let field = composerField
-        if !field.waitForExistence(timeout: screenTimeout) {
+        if !appears(field, timeout: screenTimeout) {
             // What the home exposed instead, so a wrong identifier or element kind can be read off the evidence.
             try? app.debugDescription.write(
                 to: outputDirectory.appendingPathComponent("failure-home-hierarchy.txt"), atomically: true, encoding: .utf8)
@@ -244,7 +252,7 @@ final class WalkthroughUITests: XCTestCase {
             for attempt in 1...3 where !typed {
                 tapWhenHittable(field, step: "type capture", elementName: "the composer field")
                 // Typing before the keyboard is up makes the UI-test runner fail while it looks for interrupting alerts.
-                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: screenTimeout), "keyboard did not appear")
+                XCTAssertTrue(appears(app.keyboards.firstMatch, timeout: screenTimeout), "keyboard did not appear")
                 field.typeText(text)
                 let enabled = XCTNSPredicateExpectation(predicate: saveIsReady, object: save)
                 typed = XCTWaiter().wait(for: [enabled], timeout: 8) == .completed
@@ -276,12 +284,12 @@ final class WalkthroughUITests: XCTestCase {
     /// the keyboard cannot be dismissed, rather than saving a covered home screen.
     private func dismissKeyboard() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where button.waitForExistence(timeout: 2) {
+        for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where appears(button, timeout: 2) {
             button.tap()
         }
-        if app.keyboards.firstMatch.waitForExistence(timeout: 5) {
+        if appears(app.keyboards.firstMatch, timeout: 5) {
             let done = app.buttons[homeDone]
-            XCTAssertTrue(done.waitForExistence(timeout: screenTimeout), "Done did not replace Settings while the keyboard is up")
+            XCTAssertTrue(appears(done, timeout: screenTimeout), "Done did not replace Settings while the keyboard is up")
             tapWhenHittable(done, step: "put the keyboard away", elementName: "the Done button")
         }
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: app.keyboards)
@@ -297,7 +305,7 @@ final class WalkthroughUITests: XCTestCase {
         // A failed or cancelled Face ID attempt leaves the user on home with a notice; asking again is what a person does.
         for attempt in 1...3 {
             let link = app.buttons[identifier]
-            XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not on home")
+            XCTAssertTrue(appears(link, timeout: screenTimeout), "\(identifier) not on home")
             if link.isEnabled { link.tap() }
             if waitForScreen(shownBy: [marker], leaving: link, timeout: 40) { return }
             let evidence = XCUIScreen.main.screenshot()
@@ -328,7 +336,7 @@ final class WalkthroughUITests: XCTestCase {
             }
         } while !tapped && Date() < deadline
         XCTAssertTrue(tapped, "going back to \(destinationName): no back button was hittable within \(Int(screenTimeout)) s")
-        XCTAssertTrue(destination.waitForExistence(timeout: screenTimeout), "going back did not return to \(destinationName)")
+        XCTAssertTrue(appears(destination, timeout: screenTimeout), "going back did not return to \(destinationName)")
     }
 
     private func capture(_ prefix: String, _ screen: String) {
