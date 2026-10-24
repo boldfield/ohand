@@ -62,6 +62,24 @@ jobs:
       - name: Generate Xcode project
         run: cd ios && ./scripts/generate.sh
 
+      # Compile before any simulator is booted: a freshly booted device keeps the 3-core runner saturated, and a compile on
+      # top of that starves the tests that follow.
+      - name: Build OhAndTests (no simulator booted yet)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme OhAndTests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests-build.log
+
       # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
       # that the NotificationProbe suites clone again, so none of them pays for a first boot.
       - name: Settle simulator (single cold boot) and keep an empty template
@@ -77,6 +95,8 @@ jobs:
           echo "Cloned settled simulator ${SIMULATOR_UDID} into template ${template_udid}"
           echo "${template_udid}" > .evidence/template-udid.txt
           echo "TEMPLATE_UDID=${template_udid}" >> "$GITHUB_ENV"
+          # Bring the device back up and wait until it is responsive, so OhAndTests does not start on a booting host.
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --label ohandtests-device 2>&1 | tee -a .evidence/prepare-settle.log
 
       # Ad-hoc signed so the hosted test bundle carries the app's Keychain entitlement (V04 real-Keychain tests).
       - name: Run OhAndTests on simulator
