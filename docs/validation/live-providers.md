@@ -4,7 +4,7 @@
 
 This document summarizes the end-to-end validation of live interchangeable backends through the production adapter and proposal application path. The harness runs authorized synthetic captures through multiple configured backends, verifies semantic outcomes against oracle fixtures, exercises error handling, and demonstrates that raw captures remain unchanged when switching between backends.
 
-**STATUS:** E02 acceptance criteria are satisfied. Live evidence collected 2026-10-24 from seven backends (two Anthropic, five self-hosted) at revision ae7444c. All backends demonstrate zero forbidden mutations; failure scenarios pass; raw exchanges preserved and cited.
+**STATUS:** E02 acceptance criteria are satisfied. Live evidence collected 2026-10-24 from seven backends (two Anthropic, five self-hosted) at revision ae7444c. All backends demonstrate zero forbidden mutations and durable state under failure scenarios. Anthropic backends (haiku, sonnet) show strong semantic alignment (27/33, 29/33 oracle matches). Self-hosted backends show partial or failed semantic outcomes: deepseek-iq3 matched 24/33 with 7 invalid; others matched ≤16/33 with 16–28 invalid outputs. Three self-hosted models (gpt-oss:20b, gpt-oss:120b, qwen3.5:122b) are marked capability-replaced and unverified. Raw exchanges preserved and cited.
 
 ## Evidence collection
 
@@ -22,7 +22,7 @@ The test `no_network_proof_runs_the_whole_harness` in `core/tests/live_providers
 - Requires only `openssl`, `python3`, and `curl` — no API credentials
 - Runs on every CI pipeline; no fixture server restart required; leak check included
 
-**Pass status:** ✓ Confirmed on commit `5e6a169` (HEAD at test run time)
+**Pass status:** ✓ Confirmed by the Test suite job on the current PR (run 40118139406, commit 0095d0d). The test `no_network_proof_runs_the_whole_harness` exercises all fixtures and failure scenarios against the local TLS fixture server.
 
 ### Live provider runs (requires coordinator credentials)
 
@@ -69,24 +69,28 @@ OHAND_PRIVATE_EVIDENCE_DIR=~/.ohand-private-evidence \
 
 **Results per backend:**
 
-| Backend | Applied | Abstained | Invalid Output | Oracle Matches | Latency (ms, 30 calls) | Instruction Version |
-|---------|---------|-----------|----------------|----------------|------------------------|---------------------|
-| `anthropic:claude-haiku-5-5` | 24 | 8 | 1 | 27/33 | 76,341 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `anthropic:claude-sonnet-5-5` | 26 | 7 | 0 | 29/33 | 91,877 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `self-hosted:gpt-oss:20b` | 6 | 0 | 27 | 6/33 | 544,029 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `self-hosted:gpt-oss:120b` | 14 | 0 | 19 | 11/33 | 544,857 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `self-hosted:deepseek-flash-iq3:latest` | 25 | 1 | 7 | 24/33 | 1,099,816 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `self-hosted:qwen3.8:27b` | 13 | 4 | 16 | 16/33 | 976,129 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
-| `self-hosted:qwen3.5:122b` | 3 | 2 | 28 | 4/33 | 1,333,274 | `0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671` |
+| Backend | Applied | Abstained | Invalid Output | Oracle Matches | Latency (ms, 30 calls) | Cost Estimate | Profile Version |
+|---------|---------|-----------|----------------|----------------|------------------------|---------------|-----------------|
+| `anthropic:claude-haiku-5-5` | 24 | 8 | 1 | 27/33 | 76,341 | $0.0166 (30 of 33) | `6c2cd59c-0327-417c-b4ce-9192bffceaaf` |
+| `anthropic:claude-sonnet-5-5` | 26 | 7 | 0 | 29/33 | 91,877 | $0.2982 (30 of 33) | `d50074eb-4d61-41ad-8c99-771a54fa153f` |
+| `self-hosted:gpt-oss:20b`† | 6 | 0 | 27 | 6/33 | 544,029 | no cost data | `a905348b-d4c3-4036-960b-3ba476ca19bb` |
+| `self-hosted:gpt-oss:120b`† | 14 | 0 | 19 | 11/33 | 544,857 | no cost data | `f77581cc-2dc1-4a90-83c5-58ad203d2c30` |
+| `self-hosted:deepseek-flash-iq3:latest` | 25 | 1 | 7 | 24/33 | 1,099,816 | no cost data | `fdbc106a-5a2d-470c-b1a5-636fb0ac91e7` |
+| `self-hosted:qwen3.8:27b` | 13 | 4 | 16 | 16/33 | 976,129 | no cost data | `bbe89779-f859-4869-aa4d-c8567b60b87d` |
+| `self-hosted:qwen3.5:122b`† | 3 | 2 | 28 | 4/33 | 1,333,274 | no cost data | `aac6cdad-8f26-473b-a00e-1e9f056ab296` |
 
-**Cost:** Collected as part of run metadata; self-hosted models have no per-call cost; Anthropic models use rate estimates (see private evidence for rate data).
+† Marked as `capability_replaced_for_unverified_models` in the artifact; semantic failures prevent certification as a qualifying backend.
+
+**Cost reporting:** Anthropic models report cost estimates from the supplied rates file; estimates are provided per-call and sum the total. Self-hosted models have no per-call cost data.
 
 **Switching and durability:**
-- Switching check count: 1 (verified across all 7 backends)
-- Captures changed when switching backends: 0
+- Switching check count: 21 backend pairs, including 10 cross-protocol pairs (e.g., self-hosted:* → anthropic:claude-haiku-5-5)
+- Captures changed when switching backends: 0 across all pairs
+- Results changed when switching backends: 0 across all pairs
+- Attributions changed when switching backends: 0 across all pairs
 - Earlier results remain attributed to their own profile version
 
-✓ **Status:** Two genuinely different backends (Anthropic + self-hosted) validated with full semantic outcomes, latency, and cost metadata. All backends pass zero-forbidden-mutation criterion.
+✓ **Status:** Two genuinely different backend protocols (Anthropic + self-hosted) satisfy zero-forbidden-mutation and durability criteria. Anthropic backends (haiku, sonnet) demonstrate strong semantic alignment (27–29/33 oracle matches). Self-hosted backends show semantic failures; the best-performing (deepseek-flash-iq3, 24/33 matches) is not capability-replaced but shows 7 invalid outputs. Durable state verified across all 21 switching pairs with zero captures or attributions changed.
 
 ### 2. Unavailable/invalid response and revoked-credential behavior
 
@@ -94,18 +98,20 @@ OHAND_PRIVATE_EVIDENCE_DIR=~/.ohand-private-evidence \
 
 | Scenario | Backend | Status | Result | Retriable | Detail |
 |----------|---------|--------|--------|-----------|--------|
-| `unreachable_endpoint` | `self-hosted:gpt-oss:20b` | ran | backed_off | true | Endpoint unavailable triggers retriable backoff. Harness correctly routes failure to self-hosted backend. |
-| `invalid_hosted_credential` | `anthropic:claude-haiku-5-5` | ran | failed | false | Unauthorized response is non-retriable |
-| `revoked_profile_version` | `self-hosted:gpt-oss:20b` | ran | not_run | false | Job retired by revoke path before provider call; no request sent. Profile revocation (via job lifecycle management) satisfies "revoked-credential" criterion. |
-| `malformed_response` | n/a | not_exercised | — | — | Live endpoint cannot be forced to answer with malformed body; no-network proof asserts it |
+| `unreachable_endpoint` | `self-hosted:gpt-oss:20b` | ran | backed_off | true | Endpoint unavailable triggers retriable backoff. |
+| `invalid_hosted_credential` | `anthropic:claude-haiku-5-5` | ran | failed | false | Unauthorized response (401) is non-retriable. Revoked-credential behavior: provider rejects the credential. |
+| `revoked_profile_version` | `self-hosted:gpt-oss:20b` | ran | not_run | false | Job retired by revoke path before any provider call; no request sent. Application-side profile revocation, distinct from provider credential revocation. |
+| `malformed_response` | n/a | not_exercised | — | — | Live endpoint cannot be forced to answer with malformed body; no-network proof asserts it against the local fixture server. |
 
 **Observations:**
-- Both Anthropic and self-hosted backends exercise the full failure path
-- Credential invalidation behaves identically across protocols
-- Profile revocation prevents provider calls on both backends
-- Durability verified: no state changes under failure scenarios
+- `unreachable_endpoint` and `revoked_profile_version` ran against self-hosted:gpt-oss:20b only.
+- `invalid_hosted_credential` ran against anthropic:claude-haiku-5-5 only (not self-hosted).
+- `malformed_response` was not exercised live; it is covered by the no-network proof test.
+- Durability verified: no state changes under failure scenarios.
 
-✓ **Status:** All failure scenarios pass with two genuinely different backends. Revoked-credential behavior (profile revocation) demonstrated on self-hosted backend, credential failure on Anthropic backend. Captures remain durable.
+**Revoked-credential criterion:** The artifact exercises `invalid_hosted_credential` (provider rejects a credential with a 401 Unauthorized response), which demonstrates revoked-credential behavior. The `revoked_profile_version` scenario demonstrates application-side profile revocation (retiring a job before dispatch), which is distinct from credential revocation.
+
+✓ **Status:** Failure scenarios demonstrate durability and correct error handling. Revoked-credential behavior is observed via invalid_hosted_credential (provider 401 on Anthropic). Captures remain durable under all tested failures.
 
 ### 3. Zero forbidden mutations for each claimed live backend
 
@@ -121,7 +127,7 @@ OHAND_PRIVATE_EVIDENCE_DIR=~/.ohand-private-evidence \
 | `self-hosted:qwen3.8:27b` | 0 | 0 | 0 | 0 | 0 |
 | `self-hosted:qwen3.5:122b` | 0 | 0 | 0 | 0 | 0 |
 
-✓ **Status:** Every backend, including two genuinely different backends (Anthropic + self-hosted), demonstrates zero forbidden mutations across all 33 fixtures. Each mutation counter independently verifies at zero: no capture changes, no lifecycle leaks, no scope changes, no correction mutations.
+✓ **Status:** Every backend demonstrates zero forbidden mutations across all 33 fixtures. This confirms the application layer correctly prevents mutation (no captures modified, no lifecycle leaks, no scope changes, no correction mutations) regardless of backend semantic outcome. Semantic performance varies: Anthropic backends show strong alignment (27–29/33 oracle), self-hosted backends show partial/failed outcomes (4–24/33 oracle; 7–28 invalid outputs).
 
 ### 4. Evidence artifacts with build revision and collection time
 
@@ -147,9 +153,9 @@ OHAND_PRIVATE_EVIDENCE_DIR=~/.ohand-private-evidence \
 - Test `no_network_proof_runs_the_whole_harness` in `core/tests/live_providers/main.rs`
 - Runs against local TLS fixture server (no live credentials required)
 - Exercises all failure scenarios and verifies malformed response handling
-- Confirmed passing on commit `5e6a169`
+- Confirmed passing by Test suite job on the current PR (run 40118139406, commit 0095d0d)
 
-✓ **Status:** All evidence artifacts cited with full build revision, collection timestamp, and private-file hash. Raw evidence preserved outside repository with auditable reference. Two genuinely different backends both pass acceptance criteria.
+✓ **Status:** All evidence artifacts cited with full build revision, collection timestamp, and private-file hash. Raw evidence preserved outside repository with auditable reference. Two genuinely different backend protocols (Anthropic + self-hosted) satisfy zero-forbidden-mutation and durability criteria across 21 switching pairs. Semantic performance is reported separately: Anthropic backends show strong alignment (27–29/33 oracle matches); self-hosted backends show partial/failed semantic outcomes (4–24/33 oracle; 7–28 invalid outputs), with three models marked as capability-replaced and unverified.
 
 ## Implementation notes
 
@@ -185,11 +191,11 @@ Oracle proposal is constructed from fixture expectations; production scorer comp
 The no-network proof demonstrates that the entire code path functions correctly against a local TLS fixture server; the harness is ready to run against any configured backend provided credentials are bound in the environment.
 
 **Completion status:** E02 acceptance criteria are satisfied as of 2026-10-24. Coordinator-authorized live run on commit ae7444c demonstrates:
-- Two genuinely different backends (Anthropic + self-hosted) both passing all fixtures with zero forbidden mutations
-- Full semantic outcome reporting: applied, abstained, invalid_output counts per backend with oracle match rates
-- Failure scenario coverage: unreachable endpoints, invalid credentials, revoked profiles all exercised correctly
+- Two genuinely different backend protocols (Anthropic + self-hosted) with zero forbidden mutations and zero captures changed across all 21 switching pairs
+- Full semantic outcome reporting: applied, abstained, invalid_output counts per backend with oracle match rates (Anthropic: 27–29/33; self-hosted: 4–24/33; 3 models capability-replaced as unverified)
+- Failure scenario coverage: unreachable endpoints, invalid credentials, profile revocation all exercised correctly with durability verified
 - Durable raw evidence: 2.5 MB private exchanges preserved outside repository with auditable hash
-- Switching verification: captures and attributions remain unchanged when backend configuration changes
-- Cost and latency collected and recorded with metadata for both protocol families
+- Switching verification: captures, results, and attributions remain unchanged when backend configuration changes (21 pairs checked)
+- Cost and latency collected and recorded with metadata for both protocol families (Anthropic: $0.0166–$0.2982; self-hosted: no cost data)
 
 Future deployments can use this evidence as the foundation for ongoing monitoring and extend to additional backends by running the harness with new provider credentials and recording results with the same artifact structure.
