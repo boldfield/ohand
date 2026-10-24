@@ -69,7 +69,10 @@ Native iOS checks run on the standard GitHub-hosted `macos-26` runner via `.gith
 - generates the project with pinned XcodeGen (`ios/scripts/generate.sh`) and runs `xcodebuild test -scheme OhAndTests` on that UDID, keeping the exit status (`pipefail`), so a failure to find a device or run tests fails the job;
 - builds `BridgeProbe` unsigned (`ios/scripts/build-simulator.sh BridgeProbe`);
 - runs the launch smoke test `ios/scripts/smoke-simulator.sh`: boot with `simctl bootstatus -b`, install `BridgeProbe.app`, launch `com.boldfield.ohand.probes.bridge`, verify it is still running, capture a screenshot;
-- uploads `ios-evidence` (logs, `OhAndTests.xcresult`, screenshot) with `retention-days: 7`.
+- cold-boots the selected device once (`prepare-simulator.sh --erase --shutdown-after`), clones the settled, empty device into a template, and runs each NotificationProbe suite on its own clone of that template (booted, waited until responsive, then deleted), so no suite pays for a first boot;
+- uploads `ios-evidence` (logs, `OhAndTests.xcresult`, screenshot, `host-pressure.txt`) with `retention-days: 7`.
+
+The `walkthrough` job is a matrix of two jobs, compact (iPhone) and regular (iPad), each with one cold boot; each uploads `ios-walkthrough-<width>` including `host-pressure.txt` (diagnostic only, not a gate): label, kind (cold-boot, warm-boot or clone), time to responsive, highest 1-minute load and lowest free memory per preparation.
 
 Linux checks cover the native tooling that runs on any host: `make check` runs `ios-check` (`ios/scripts/check_project_config.py` plus the unit tests for it and for `select_simulator.py`). They do not prove that Swift compiles.
 
