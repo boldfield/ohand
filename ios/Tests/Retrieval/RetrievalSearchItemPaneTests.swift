@@ -184,7 +184,9 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
 
         searchModel.select(shown)
-        settle { rendered[RetrievalSearchView.itemPaneIdentifier] != nil && detailModels.first?.content != nil }
+        settle("the item pane is shown with the detail loaded") {
+            rendered[RetrievalSearchView.itemPaneIdentifier] != nil && detailModels.first?.content != nil
+        }
 
         XCTAssertEqual(
             navigation.path.map { ManagementRoute(pathComponent: $0) }, [.entry(ManagementCatalog.searchEntryID)],
@@ -212,7 +214,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             detail.content?.sections.map(\.text), ["synthetic capture in the pane", "synthetic corrected words"])
 
         session.relock(.explicit)
-        settle { detail.content == nil }
+        settle("a relock drops the pane's text") { detail.content == nil && detail.failure == .locked }
         XCTAssertNil(detail.content, "a relock drops the pane's text")
         XCTAssertEqual(detail.failure, .locked)
     }
@@ -221,7 +223,9 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle { detailModels.first?.content != nil && detailModels.first?.itemControls?.snapshot != nil }
+        settle("the pane's detail and controls loaded") {
+            detailModels.first?.content != nil && detailModels.first?.itemControls?.snapshot != nil
+        }
         XCTAssertEqual(detailModels.first?.content?.sections.map(\.text), ["synthetic capture in the pane"])
         let controls = try XCTUnwrap(detailModels.first?.itemControls)
         let corrected = RetrievalResultRow(
@@ -238,7 +242,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             finished = true
         }
 
-        settle {
+        settle("the pane's correction finished and the pane and the results show it") {
             finished && searchModel.rows == [corrected]
                 && detailModels.first?.content?.sections.last?.text == "synthetic words after the correction"
         }
@@ -255,7 +259,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle {
+        settle("the pane's detail and delete control loaded") {
             detailModels.first?.content != nil
                 && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
         }
@@ -269,7 +273,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             finished = true
         }
 
-        settle {
+        settle("the deletion finished and the pane and the results dropped the item") {
             finished && MainActor.assumeIsolated { deletion.isRecorded } && searchModel.rows.isEmpty
                 && detailModels.first?.content == nil
         }
@@ -286,7 +290,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let itemID = try saveCapture()
         let shown = try showResult(itemID: itemID, size: CGSize(width: 1024, height: 768), sizeClass: .regular)
         searchModel.select(shown)
-        settle {
+        settle("the pane's detail, controls and delete control loaded") {
             detailModels.first?.content != nil && detailModels.first?.itemControls?.snapshot != nil
                 && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
         }
@@ -306,7 +310,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let startRevision = try revision(of: itemID)
         try correctText(itemID: itemID, to: "synthetic words corrected elsewhere")
         let correctedRevision = try revision(of: itemID)
-        settle {
+        settle("the pane and the results show the text corrected elsewhere") {
             detail.content?.currentText == "synthetic words corrected elsewhere"
                 && MainActor.assumeIsolated { deletion.revision == correctedRevision }
                 && searchModel.rows == [corrected]
@@ -328,11 +332,11 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             completed = true
         }
-        settle { completed && detail.content?.lifecycleLabel == "Completed" }
+        settle("the completion was stored and the pane shows it") { completed && detail.content?.lifecycleLabel == "Completed" }
         XCTAssertNil(failure)
         XCTAssertEqual(detail.content?.lifecycleLabel, "Completed", "the pane shows the stored state")
         let completedRevision = try revision(of: itemID)
-        settle { MainActor.assumeIsolated { deletion.revision == completedRevision } }
+        settle("the delete control reads the completed revision") { MainActor.assumeIsolated { deletion.revision == completedRevision } }
         XCTAssertEqual(MainActor.assumeIsolated { deletion.revision }, completedRevision)
 
         // A deletion stored elsewhere: no deleted text stays in the pane, which says the item is not here.
@@ -343,7 +347,9 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             deleted = true
         }
-        settle { deleted && detail.failure == .notFound && searchModel.rows.isEmpty }
+        settle("the deletion was stored and the pane says the item is not here") {
+            deleted && detail.failure == .notFound && searchModel.rows.isEmpty && detail.content == nil
+        }
         XCTAssertNil(failure)
         XCTAssertNil(detail.content, "no deleted text stays in the pane")
         XCTAssertEqual(detail.failure, .notFound)
@@ -368,7 +374,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
                 return built
             })
         searchModel.select(shown)
-        settle { heldReader.firstReadIsHeld }
+        settle("the pane's first read is held") { heldReader.firstReadIsHeld }
         XCTAssertTrue(heldReader.firstReadIsHeld, "the pane's first read is in flight")
         let detail = try XCTUnwrap(detailModels.first)
         XCTAssertNil(detail.content)
@@ -380,10 +386,12 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             scopeName: "Personal", capturedAt: shown.capturedAt, itemType: .note)
         searcher.page = RetrievalPage(totalAccessible: 1, rows: [corrected], offset: 0)
         try correctText(itemID: itemID, to: "synthetic words corrected during the first read")
-        settle { detail.content?.currentText == "synthetic words corrected during the first read" }
+        settle("the pane shows the text corrected during the first read") {
+            detail.content?.currentText == "synthetic words corrected during the first read"
+        }
 
         heldReader.releaseFirstRead()
-        settle { !detail.isLoading && searchModel.rows == [corrected] }
+        settle("the released read ended and the results show the correction") { !detail.isLoading && searchModel.rows == [corrected] }
         // Give the released read time to land, were it allowed to.
         runMainLoop(for: 1)
         XCTAssertEqual(
@@ -409,7 +417,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
                 return built
             })
         searchModel.select(shown)
-        settle {
+        settle("the pane's detail and reminder editor loaded") {
             detailModels.first?.content != nil && detailModels.first?.reminderEditor?.hasRead == true
                 && detailModels.first?.reminderEditor?.isLoading == false
                 && MainActor.assumeIsolated { detailModels.first?.deletion?.revision != nil }
@@ -425,7 +433,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             await reminderEditor.save()
             saved = true
         }
-        settle { heldEditor.saveIsHeld && reminderEditor.isWorking }
+        settle("the reminder save is held and in flight") { heldEditor.saveIsHeld && reminderEditor.isWorking }
         XCTAssertTrue(reminderEditor.isWorking, "the pane's reminder save is in flight")
 
         var completed = false
@@ -437,19 +445,23 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             completed = true
         }
-        settle { completed }
+        settle("the completion was stored") { completed }
         XCTAssertNil(failure)
         // Longer than the screen's watch interval, so a read that did not wait would have landed.
         runMainLoop(for: 1)
         XCTAssertEqual(detail.content?.lifecycleLabel, "Active", "the read waits while the pane's own save works")
 
         heldEditor.releaseSave()
-        settle { saved && detail.content?.lifecycleLabel == "Completed" }
+        settle("the reminder save settled and the pane shows the item completed") {
+            saved && !reminderEditor.isWorking && detail.content?.lifecycleLabel == "Completed"
+        }
         XCTAssertTrue(saved)
         XCTAssertEqual(detail.content?.lifecycleLabel, "Completed", "the pane reads the item once its save settles")
         XCTAssertEqual(reminderEditor.message, .itemClosed, "the save's own answer stays shown")
         let completedRevision = try revision(of: itemID)
-        settle { MainActor.assumeIsolated { detail.deletion?.revision == completedRevision } }
+        settle("the delete control reads the completed revision") {
+            MainActor.assumeIsolated { detail.deletion?.revision == completedRevision }
+        }
         XCTAssertEqual(MainActor.assumeIsolated { detail.deletion?.revision }, completedRevision)
         XCTAssertEqual(searchModel.selectedReference, shown.reference)
         XCTAssertEqual(detailModels.count, 1, "the pane is not rebuilt")
@@ -460,7 +472,9 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         let shown = try showResult(itemID: itemID, size: CGSize(width: 390, height: 844), sizeClass: .compact)
 
         searchModel.select(shown)
-        settle { events.contains(.appeared(.item(itemID), isPlaceholder: false)) && detailModels.first?.content != nil }
+        settle("the item is pushed with its detail loaded") {
+            events.contains(.appeared(.item(itemID), isPlaceholder: false)) && detailModels.first?.content != nil
+        }
 
         XCTAssertEqual(
             navigation.path.map { ManagementRoute(pathComponent: $0) },
@@ -509,24 +523,34 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         window.rootViewController = controller
         window.makeKeyAndVisible()
         retainedWindow = window
-        settle { true }
+        pauseRunLoop()
 
         navigation.open(entryID: ManagementCatalog.searchEntryID)
-        settle { events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false)) }
+        settle("the search entry appeared") {
+            events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false))
+        }
         searchModel.query = "pane"
         searchModel.search()
-        settle { rendered[RetrievalSearchView.rowIdentifier(shown)] != nil }
+        settle("the result row is shown") { rendered[RetrievalSearchView.rowIdentifier(shown)] != nil }
         XCTAssertEqual(searchModel.rows, [shown])
         return shown
     }
 
-    /// Runs the main loop until the condition holds or ten seconds pass.
-    private func settle(until condition: () -> Bool) {
-        let deadline = Date(timeIntervalSinceNow: 10)
-        repeat {
-            retainedWindow?.rootViewController?.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        } while !condition() && Date() < deadline
+    /// Lays the hosted view out and runs the main loop briefly.
+    private func pauseRunLoop() {
+        retainedWindow?.rootViewController?.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    /// Runs the main loop until the condition holds; fails the test naming it if ten seconds pass first.
+    private func settle(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        pauseRunLoop()
+        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
     }
 
     /// Runs the main loop for a fixed time, for checks that something does not happen.
@@ -543,7 +567,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
         root.saveText(
             captureID: UUID().uuidString.lowercased(), text: "synthetic capture in the pane", capturedAt: Date()
         ) { outcome = $0 }
-        settle { outcome != nil }
+        settle("the save completes") { outcome != nil }
         guard case .saved(_, let itemID, _)? = outcome else {
             XCTFail("expected a confirmed save, got \(String(describing: outcome))")
             throw CoreFailure.handleClosed
@@ -561,7 +585,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             finished = true
         }
-        settle { finished }
+        settle("the call finished") { finished }
         XCTAssertNil(failure)
     }
 
@@ -576,7 +600,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
             catch { failure = error }
             finished = true
         }
-        settle { finished }
+        settle("the call finished") { finished }
         XCTAssertNil(failure)
     }
 

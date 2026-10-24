@@ -55,7 +55,11 @@ final class HomeBodyViewTests: XCTestCase {
     /// Builds the model over the session as the test left it and shows the body. Poll pauses never end, so no real time
     /// passes and no read is started behind the test's back.
     @discardableResult
-    private func show(size: CGSize = HomeBodyViewTests.phone, sizeClass: UserInterfaceSizeClass = .compact) async -> HomeRecentsModel {
+    private func show(
+        size: CGSize = HomeBodyViewTests.phone, sizeClass: UserInterfaceSizeClass = .compact,
+        waitingFor identifiers: [String] = [], thenSettling: Bool = false,
+        file: StaticString = #filePath, line: UInt = #line
+    ) async -> HomeRecentsModel {
         let pauses = PollPauses()
         let shownModel = HomeRecentsModel(
             source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
@@ -66,10 +70,53 @@ final class HomeBodyViewTests: XCTestCase {
         shown.rootViewController = UIHostingController(rootView: root)
         shown.makeKeyAndVisible()
         window = shown
-        await settle()
+        await waitForRendered(identifiers, model: shownModel, file: file, line: line)
+        if thenSettling { await settle() }
         return shownModel
     }
 
+    /// Lays the hosted view out once, so what the body reports is current.
+    private func layOut() {
+        window?.rootViewController?.view.setNeedsLayout()
+        window?.rootViewController?.view.layoutIfNeeded()
+    }
+
+    /// Waits, laying the view out between checks, until the model has no read in flight and the body has reported every
+    /// one of the elements the test goes on to read.
+    private func waitForRendered(
+        _ identifiers: [String], model waitedModel: HomeRecentsModel, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        await waitUntil(
+            "the body has reported \(identifiers.isEmpty ? "its first render" : identifiers.joined(separator: ", "))",
+            file: file, line: line
+        ) {
+            layOut()
+            return !rendered.isEmpty && !waitedModel.isLoadingFirstPage && !waitedModel.isLoadingMore
+                && waitedModel.readsInFlight == 0 && identifiers.allSatisfy { rendered[$0] != nil }
+        }
+        layOut()
+    }
+
+    /// Waits, laying the view out between checks, until the condition on what the body reported holds.
+    private func waitForRendered(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) async {
+        await waitUntil(condition, file: file, line: line) {
+            layOut()
+            return holds()
+        }
+        layOut()
+    }
+
+    private static var placeholderIdentifiers: [String] {
+        [HomeBodyView.placeholderIdentifier]
+            + (0..<HomeBodyView.placeholderCount).map { HomeBodyView.placeholderCardIdentifierPrefix + String($0) }
+    }
+
+    private static func cardIdentifier(_ itemID: String) -> String { HomeBodyView.cardIdentifierPrefix + itemID }
+
+    /// A fixed run of layout passes and sleeps. Only for proving that nothing appears (or after a positive wait for what
+    /// should have appeared): a fixed wait cannot tell whether the body has finished rendering.
     private func settle() async {
         for _ in 0..<3 {
             for _ in 0..<200 { await Task.yield() }
@@ -119,7 +166,8 @@ final class HomeBodyViewTests: XCTestCase {
 
     func testCaptureOnlyShowsTheLockedCardAndItsUnlockButtonRunsTheExplicitAuthentication() async {
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem, earlierItem], nextCursor: nil)
-        await show()
+        await show(
+            waitingFor: [HomeBodyView.lockedCardIdentifier, HomeBodyView.unlockButtonIdentifier], thenSettling: true)
 
         XCTAssertEqual(
             rendered[HomeBodyView.lockedCardIdentifier]?.text, HomeBodyView.lockedTitle + "\n" + HomeBodyView.lockedDetail)
@@ -142,7 +190,7 @@ final class HomeBodyViewTests: XCTestCase {
     func testAQuietAttemptShowsPlaceholderCardsWithNothingFromHistory() async {
         source.isQuietAttemptInFlight = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
-        await show()
+        await show(waitingFor: Self.placeholderIdentifiers, thenSettling: true)
 
         XCTAssertNotNil(rendered[HomeBodyView.placeholderIdentifier])
         for index in 0..<HomeBodyView.placeholderCount {
@@ -157,17 +205,24 @@ final class HomeBodyViewTests: XCTestCase {
         XCTAssertTrue(source.readCursors.isEmpty, "no read while the quiet attempt is in flight")
 
         source.setAccess(authenticated: true)
-        await settle()
+        await waitForRendered("the list replaces the placeholders") {
+            rendered[HomeBodyView.placeholderIdentifier] == nil && rendered[Self.cardIdentifier("today-1")] != nil
+                && model?.isLoadingFirstPage == false
+        }
         XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier], "the placeholders give way to the list")
         XCTAssertEqual(rendered[HomeBodyView.cardIdentifierPrefix + "today-1"]?.text, Self.todayText)
     }
 
     func testAFailedQuietAttemptReplacesThePlaceholdersWithTheLockedCard() async {
         source.isQuietAttemptInFlight = true
-        await show()
+        await show(waitingFor: [HomeBodyView.placeholderIdentifier])
         XCTAssertNotNil(rendered[HomeBodyView.placeholderIdentifier])
 
         source.setAccess(authenticated: false)
+        await waitForRendered("the locked card replaces the placeholders") {
+            rendered[HomeBodyView.placeholderIdentifier] == nil && rendered[HomeBodyView.lockedCardIdentifier] != nil
+                && rendered[HomeBodyView.unlockButtonIdentifier] != nil
+        }
         await settle()
         XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier])
         XCTAssertNotNil(rendered[HomeBodyView.lockedCardIdentifier])
@@ -181,7 +236,13 @@ final class HomeBodyViewTests: XCTestCase {
     func testAuthenticatedShowsTodayAndEarlierCardsWithTypeDotTypeAndRelativeDate() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem, earlierItem], nextCursor: nil)
-        await show()
+        await show(
+            waitingFor: [
+                HomeBodyView.todayHeadingIdentifier, HomeBodyView.earlierHeadingIdentifier,
+                Self.cardIdentifier("today-1"), Self.cardIdentifier("earlier-1"),
+                HomeBodyView.cardDotIdentifierPrefix + "today-1", HomeBodyView.cardDotIdentifierPrefix + "earlier-1",
+                HomeBodyView.cardCaptionIdentifierPrefix + "today-1", HomeBodyView.cardCaptionIdentifierPrefix + "earlier-1",
+            ])
 
         XCTAssertNil(rendered[HomeBodyView.lockedCardIdentifier])
         XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier])
@@ -219,7 +280,12 @@ final class HomeBodyViewTests: XCTestCase {
                 earlierItem,
             ],
             nextCursor: nil)
-        await show(size: Self.tablet, sizeClass: .regular)
+        await show(
+            size: Self.tablet, sizeClass: .regular,
+            waitingFor: [
+                HomeBodyView.todayHeadingIdentifier, HomeBodyView.earlierHeadingIdentifier,
+                Self.cardIdentifier("today-1"), Self.cardIdentifier("today-2"), Self.cardIdentifier("earlier-1"),
+            ])
 
         let first = frame(HomeBodyView.cardIdentifierPrefix + "today-1")
         let second = frame(HomeBodyView.cardIdentifierPrefix + "today-2")
@@ -238,7 +304,7 @@ final class HomeBodyViewTests: XCTestCase {
                 item("today-2", type: "action", text: "Synthetic action from this morning", hoursBefore: 2),
             ],
             nextCursor: nil)
-        await show()
+        await show(waitingFor: [Self.cardIdentifier("today-1"), Self.cardIdentifier("today-2")])
 
         let first = frame(HomeBodyView.cardIdentifierPrefix + "today-1")
         let second = frame(HomeBodyView.cardIdentifierPrefix + "today-2")
@@ -249,7 +315,7 @@ final class HomeBodyViewTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: "page-2")
         source.pages["page-2"] = CoreRecentItemsPage(items: [earlierItem], nextCursor: nil)
-        await show()
+        await show(waitingFor: [Self.cardIdentifier("today-1"), Self.cardIdentifier("earlier-1")])
 
         XCTAssertEqual(source.readCursors, [nil, "page-2"], "drawing the last card asks for the next page")
         XCTAssertEqual(rendered[HomeBodyView.cardIdentifierPrefix + "earlier-1"]?.text, Self.earlierText)
@@ -258,14 +324,17 @@ final class HomeBodyViewTests: XCTestCase {
     func testAFailedReadOffersTryAgainWhichReadsAgain() async {
         source.isAuthenticated = true
         source.failure = SyntheticReadFailure()
-        await show()
+        await show(waitingFor: [HomeBodyView.retryIdentifier])
         XCTAssertNotNil(rendered[HomeBodyView.retryIdentifier])
         let readsBeforeRetry = source.readCursors.count
 
         source.failure = nil
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
         tap(HomeBodyView.retryIdentifier)
-        await settle()
+        await waitForRendered("the retry has read the list") {
+            rendered[HomeBodyView.retryIdentifier] == nil && rendered[Self.cardIdentifier("today-1")] != nil
+                && model?.isLoadingFirstPage == false
+        }
         XCTAssertEqual(source.readCursors.count, readsBeforeRetry + 1)
         XCTAssertNil(rendered[HomeBodyView.retryIdentifier])
         XCTAssertEqual(rendered[HomeBodyView.cardIdentifierPrefix + "today-1"]?.text, Self.todayText)
@@ -276,10 +345,14 @@ final class HomeBodyViewTests: XCTestCase {
     func testANewSaveIsDrawnFirstAsJustNowSorting() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
-        let shownModel = await show()
+        let shownModel = await show(waitingFor: [Self.cardIdentifier("today-1")])
 
         shownModel.captureDidSave(itemID: "new-1", interpretationIsResolved: false)
-        await settle()
+        await waitForRendered("the new save is drawn as sorting") {
+            rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"] != nil
+                && rendered[Self.cardIdentifier("new-1")] != nil && rendered[Self.cardIdentifier("today-1")] != nil
+                && !shownModel.isLoadingFirstPage
+        }
         XCTAssertEqual(rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"]?.text, HomeBodyView.sortingLabel)
         XCTAssertLessThan(
             frame(HomeBodyView.cardIdentifierPrefix + "new-1").maxY,
@@ -289,11 +362,15 @@ final class HomeBodyViewTests: XCTestCase {
     func testARelockClearsTheDrawnListAtOnceAndReadsNothingMore() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem, earlierItem], nextCursor: nil)
-        await show()
+        await show(waitingFor: [Self.cardIdentifier("today-1"), Self.cardIdentifier("earlier-1")])
         XCTAssertNotNil(rendered[HomeBodyView.cardIdentifierPrefix + "today-1"])
         let readsAtRelock = source.readCursors.count
 
         source.setAccess(authenticated: false)
+        await waitForRendered("the locked card replaces the list") {
+            rendered[HomeBodyView.lockedCardIdentifier] != nil && rendered[HomeBodyView.unlockButtonIdentifier] != nil
+                && rendered[Self.cardIdentifier("today-1")] == nil
+        }
         await settle()
         assertNoHistoryIsShown()
         XCTAssertNotNil(rendered[HomeBodyView.lockedCardIdentifier], "the locked card replaces the list")
@@ -306,13 +383,16 @@ final class HomeBodyViewTests: XCTestCase {
     func testTappingACardOpensThatItemAndASortingCardOpensTheSameWay() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem, earlierItem], nextCursor: nil)
-        let shownModel = await show()
+        let shownModel = await show(waitingFor: [Self.cardIdentifier("today-1"), Self.cardIdentifier("earlier-1")])
 
         tap(HomeBodyView.cardIdentifierPrefix + "earlier-1")
         XCTAssertEqual(openedItems, ["earlier-1"])
 
         shownModel.captureDidSave(itemID: "new-1", interpretationIsResolved: false)
-        await settle()
+        await waitForRendered("the new save is drawn as sorting") {
+            rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"] != nil
+                && rendered[Self.cardIdentifier("new-1")] != nil && !shownModel.isLoadingFirstPage
+        }
         XCTAssertEqual(rendered[HomeBodyView.cardCaptionIdentifierPrefix + "new-1"]?.text, HomeBodyView.sortingLabel)
         tap(HomeBodyView.cardIdentifierPrefix + "new-1")
         XCTAssertEqual(openedItems, ["earlier-1", "new-1"])
@@ -321,7 +401,7 @@ final class HomeBodyViewTests: XCTestCase {
     func testPlaceholderStateExposesNoTappableCard() async {
         source.isQuietAttemptInFlight = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
-        await show()
+        await show(waitingFor: Self.placeholderIdentifiers, thenSettling: true)
         XCTAssertNotNil(rendered[HomeBodyView.placeholderIdentifier])
         XCTAssertNil(rendered[HomeBodyView.placeholderIdentifier]?.tap)
         for index in 0..<HomeBodyView.placeholderCount {
@@ -335,7 +415,8 @@ final class HomeBodyViewTests: XCTestCase {
 
     func testLockedStateExposesNoTappableCard() async {
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
-        await show()
+        await show(
+            waitingFor: [HomeBodyView.lockedCardIdentifier, HomeBodyView.unlockButtonIdentifier], thenSettling: true)
         XCTAssertTrue(rendered.keys.filter { $0.hasPrefix(HomeBodyView.cardIdentifierPrefix) }.isEmpty)
         for (identifier, element) in rendered where identifier != HomeBodyView.unlockButtonIdentifier {
             XCTAssertNil(element.tap, "\(identifier) is not tappable")
@@ -346,12 +427,14 @@ final class HomeBodyViewTests: XCTestCase {
     func testACardDoesNotOpenAfterARelockClearedTheList() async {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
-        await show()
+        await show(waitingFor: [Self.cardIdentifier("today-1")])
         let staleOpen = rendered[HomeBodyView.cardIdentifierPrefix + "today-1"]?.tap
         XCTAssertNotNil(staleOpen)
 
         source.setAccess(authenticated: false)
-        await settle()
+        await waitForRendered("the locked card replaces the list") {
+            rendered[HomeBodyView.lockedCardIdentifier] != nil && rendered[Self.cardIdentifier("today-1")] == nil
+        }
         staleOpen?()
         XCTAssertTrue(openedItems.isEmpty, "a relock wins over a stale card action")
     }

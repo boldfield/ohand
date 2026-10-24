@@ -161,7 +161,18 @@ final class SimulatorHappyPathTests: XCTestCase {
         // Explicit reminder scheduling reaches the (fake) OS center.
         // The app reconciles reminders when it becomes active; run that same production pass once the item is
         // classified rather than racing the launch-time pass against interpretation.
-        runAsync { _ = try? await self.services.root.reconcileReminders(trigger: .foreground) }
+        // Reminder passes are single-flight: a call made while one runs joins it and returns its report. A pass that
+        // began before interpretation wrote the reminder (the launch pass, or the one after a drain) would therefore
+        // answer this call without installing anything, and nothing runs it again. So wait for the resolved request,
+        // then run two passes in sequence: the first returns only once any earlier pass has ended, so the second
+        // starts after the request exists and installs it.
+        XCTAssertTrue(
+            pump { self.scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'") == "resolved" },
+            "the explicit reminder request was resolved before the pass")
+        runAsync {
+            _ = try? await self.services.root.reconcileReminders(trigger: .foreground)
+            _ = try? await self.services.root.reconcileReminders(trigger: .foreground)
+        }
         XCTAssertTrue(pump { self.reminderRequest() != nil }, "the explicit reminder was handed to the OS: reminders=\(scalar("SELECT group_concat(request_state || '/' || schedule_state || '/' || IFNULL(unschedulable_reason, '-'), ';') FROM reminders")) words=\(words)")
         let request = try XCTUnwrap(reminderRequest())
         let notification = try XCTUnwrap(NotificationIdentifier(rawValue: request.identifier))
@@ -309,7 +320,7 @@ final class SimulatorHappyPathTests: XCTestCase {
     }
 
     private func settleBackgroundWork() {
-        _ = pump(timeout: 30) { !self.services.root.jobRunner.isDraining }
+        XCTAssertTrue(pump(timeout: 30) { !self.services.root.jobRunner.isDraining }, "no drain is running at teardown")
         let settled = Date().addingTimeInterval(1.5)
         _ = pump(timeout: 2) { Date() >= settled }
     }

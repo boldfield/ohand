@@ -38,6 +38,11 @@ final class SettingsRootViewTests: XCTestCase {
         window = nil
         services.shutDown()
         services = nil
+        // A core read issued before the shutdown completes on its own queue; wait for its buffer to be freed.
+        let bufferDeadline = Date().addingTimeInterval(5)
+        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < bufferDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)

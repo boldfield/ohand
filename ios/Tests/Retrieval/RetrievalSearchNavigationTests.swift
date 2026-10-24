@@ -105,16 +105,24 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         window.rootViewController = UIHostingController(rootView: rootView)
         window.makeKeyAndVisible()
         retainedWindow = window
-        settle { true }
+        pauseRunLoop()
     }
 
-    /// Runs the main loop until the condition holds or ten seconds pass.
-    private func settle(until condition: () -> Bool) {
-        let deadline = Date(timeIntervalSinceNow: 10)
-        repeat {
-            retainedWindow?.rootViewController?.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        } while !condition() && Date() < deadline
+    /// Lays the hosted view out and runs the main loop briefly.
+    private func pauseRunLoop() {
+        retainedWindow?.rootViewController?.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    /// Runs the main loop until the condition holds; fails the test naming it if ten seconds pass first.
+    private func settle(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        pauseRunLoop()
+        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
     }
 
     func testSelectingAResultShowsDetailAboveSearchAndBackReturnsToTheKeptResults() throws {
@@ -129,15 +137,20 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         host()
 
         navigation.open(entryID: ManagementCatalog.searchEntryID)
-        settle { events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false)) }
+        settle("the search entry appeared") {
+            events.contains(.appeared(.entry(ManagementCatalog.searchEntryID), isPlaceholder: false))
+        }
         searchModel.query = "roofer"
         searchModel.search()
         let rowTextIdentifier = RetrievalSearchView.rowTextIdentifier(shown)
-        settle { rendered[rowTextIdentifier] != nil }
+        settle("the result is on screen") { rendered[rowTextIdentifier] != nil }
         XCTAssertEqual(rendered[rowTextIdentifier]?.text, "synthetic roofer words", "the result is on screen")
 
         searchModel.select(shown)
-        settle { events.contains(.appeared(.item(Self.itemID), isPlaceholder: false)) }
+        settle("the detail appeared above the search") {
+            events.contains(.appeared(.item(Self.itemID), isPlaceholder: false))
+                && navigation.path.count == 2 && navigation.requestedItemID == Self.itemID
+        }
 
         XCTAssertEqual(
             navigation.path.map { ManagementRoute(pathComponent: $0) },
@@ -148,7 +161,8 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         func lastIndex(of event: ManagementPresentationEvent) -> Int? { events.lastIndex(of: event) }
         let itemAppeared = try XCTUnwrap(lastIndex(of: .appeared(.item(Self.itemID), isPlaceholder: false)))
         navigation.path.removeLast()
-        settle {
+        settle("the search appeared again after the detail and the detail left the screen") {
+            guard events.contains(.disappeared(.item(Self.itemID))) else { return false }
             guard let searchAppeared = lastIndex(of: .appeared(searchRoute, isPlaceholder: false)) else { return false }
             return searchAppeared > itemAppeared
         }
