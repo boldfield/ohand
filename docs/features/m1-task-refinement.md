@@ -3920,3 +3920,40 @@ Acceptance:
 3. Every observed result cites the named record. Raw screenshots and personal content stay with the maintainer, and the repository holds an auditable reference to them. T06 distributes this candidate. A rebuilt binary needs the affected device checks repeated.
 
 Contributes to original T10 criteria: 1 (device), 3, 4.
+
+### F48
+
+Show reminders that have no time, on Home and in Status, so they are not silently lost
+
+Found by the coordinator on 2026-10-24. "Remind me later to call Joe" is stored correctly: the model's reminder proposal for "later" is ambiguous, or its claimed instant is ignored because the core cannot resolve "later". The reminder is kept with request state `not_scheduled_yet`, no instant and no notification. This was checked through `core/tests/proposal_application/` with "later", "later today", "this afternoon", and an invented `explicit` or `inferred` instant; every case was stored this way with zero schedule operations.
+
+Nothing points the person to it. The note's detail screen shows "No time set" (`app/reminders/ReminderEditText.swift:44`), but:
+- `NotificationReadiness.outlook` (`ios/Services/NotificationPermission/NotificationReadiness.swift:90`) maps every request state other than `resolved` and `unschedulable` to `.notApplicable`, so Status never counts a reminder without a time, although the reconcile facts already include it (`core/src/ffi/notification_reconciliation.rs:591`);
+- Home rows carry no reminder state (`RecentItem`, `core/src/retrieval/recent/mod.rs:36`).
+
+The person asked to be reminded and will not be, and nothing says so.
+
+Not in scope: giving "later", "this afternoon" or "this evening" a fixed hour. Times are never guessed (DESIGN.md). This task only makes the missing time visible and one tap from being set.
+
+Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths:
+- `ios/Services/NotificationPermission/NotificationReadiness.swift` and `ios/Tests/NotificationPermission/`;
+- `app/status/` and `ios/Tests/Status/`;
+- `app/home/` and `ios/Tests/HomeRecents/`;
+- additive changes in `core/src/retrieval/recent/`, `core/src/ffi/recent_items.rs`, `ios/OhAndCoreBridge/CoreHandle+RecentItems.swift`, `ios/Services/RecentItems/` and `ios/Tests/RecentItems/`.
+
+Dependencies: F44, which edits `app/status/` first (and, through F47, the Status and HomeRecents tests).
+
+Acceptance:
+
+1. **Status counts them.** A reminder whose request state is `not_scheduled_yet`, on an active item, gets its own outlook (for example `.needsTime`). It is not `.notApplicable`, and it is not counted as unscheduled for a permission or capacity reason. Status shows it in the attention section with its own headline and one plain line, for example "1 reminder needs a time. You asked to be reminded but didn't say when." Locked, Status shows only the count. Unlocked, it lists up to 5 such notes, newest first, in the same row form F44 uses for failed notes: first line of text through the existing private read, and capture time. Tapping a row opens that note's detail, where the existing reminder editor sets the time.
+2. **Home marks them.** `RecentItem` gains a content-free flag that is true only when the item is active and its reminder's request state is `not_scheduled_yet`. The Home row for such a note shows a short "Needs a time" marker with an accessibility label that says the same. Tapping the row opens the note's detail as today. The flag is false for every other reminder state, including `unsupported_recurrence`, `unschedulable` and `cancelled`, and for items with no reminder.
+3. **The marker and the Status entry go away** once a time is set and the request is resolved, or the reminder is cancelled, or the note is deleted. Tests cover each.
+4. **No intent or scheduling change.** Nothing in `core/src/interpretation/`, `core/src/time/` or `core/src/reminders/` changes. No reminder is ever given a time by this task.
+5. **Tests:**
+   - Core tests for the recent-item flag in each reminder state, with a deleted item and with no reminder.
+   - Swift tests for the outlook mapping.
+   - Hosted view tests for Status (locked, unlocked with 1 and with more than 5) and for a Home row with and without the marker. Run them in both appearances.
+   - `make check` and `make test` pass.
+   - The exact-head macOS CI evidence that AGENTS.md requires.

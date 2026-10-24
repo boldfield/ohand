@@ -3802,6 +3802,7 @@
         "DS09",
         "F44",
         "F45",
+        "F48",
         "T10a",
         "U03b",
         "U04b",
@@ -4068,6 +4069,38 @@
       ],
       "source_pointers": [
         "docs/testing/m1-upgrade-evidence.md"
+      ]
+    },
+    {
+      "key": "F48",
+      "parent": null,
+      "title": "Show reminders that have no time, on Home and in Status, so they are not silently lost",
+      "file_scope": [
+        "ios/Services/NotificationPermission/NotificationReadiness.swift",
+        "ios/Tests/NotificationPermission/",
+        "app/status/",
+        "ios/Tests/Status/",
+        "app/home/",
+        "ios/Tests/HomeRecents/",
+        "core/src/retrieval/recent/",
+        "core/src/ffi/recent_items.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RecentItems.swift",
+        "ios/Services/RecentItems/",
+        "ios/Tests/RecentItems/"
+      ],
+      "intent": "\"Remind me later to call Joe\" keeps a reminder with no time and nothing tells the person; show such reminders in Status and mark their Home rows.",
+      "acceptance": [
+        "See the F48 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F44"
+      ],
+      "source_pointers": [
+        "ios/Services/NotificationPermission/NotificationReadiness.swift:90",
+        "core/src/retrieval/recent/mod.rs:36",
+        "core/src/ffi/notification_reconciliation.rs:591",
+        "app/reminders/ReminderEditText.swift:44"
       ]
     }
   ],
@@ -4843,6 +4876,7 @@
       "DS09",
       "F44",
       "F45",
+      "F48",
       "T10a",
       "U03b",
       "U04b",
@@ -4879,6 +4913,9 @@
     "T10b": [
       "T10a",
       "U10a"
+    ],
+    "F48": [
+      "F44"
     ]
   },
   "retained_dependency_overrides": {
@@ -5097,6 +5134,10 @@
     {
       "date": "2026-10-23",
       "change": "Split T10 into T10a (build identity, metrics build field, signing wrapper, simulator upgrade check) and T10b (maintainer's signed candidate and device upgrade). T05 depends on T10b; U10a also depends on T10a (shared ios/project.yml)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "Added F48: reminders stored with no time (\"remind me later to call Joe\") are shown in Status and marked on Home rows. Depends on F44; U10a now also waits for F48 (both edit app/)."
     }
   ]
 }
