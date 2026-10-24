@@ -369,6 +369,25 @@ jobs:
         if: steps.simulator.outputs.udid != ''
         run: cd ios && ./scripts/generate.sh
 
+      # Compile before the simulator is booted: a freshly booted device keeps the 3-core runner saturated, and the
+      # walkthrough's own xcodebuild would otherwise compile on top of that and starve its UI queries.
+      - name: Build walkthrough UI tests (no simulator booted yet)
+        if: steps.simulator.outputs.udid != ''
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme OhAndWalkthroughUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived/Walkthrough \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/walkthrough-build.log
+
       - name: Walkthrough at ${{ matrix.width }} width
         if: steps.simulator.outputs.udid != ''
         shell: bash
