@@ -16,6 +16,8 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `design-undated-action` | design | I need to call the roofer | `action` | any reminder | yes |
 | `design-dated-information` | design | The roof quote expires Friday | `note` | any reminder | yes |
 | `design-explicit-reminder` | design | Remind me Friday at 3 p.m. to call the roofer | `action`; reminder explicit 2026-10-09T15:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
+| `split-day-task-clock` | dates | Remind me today to call the dentist at 10am | `action`; reminder explicit 2026-10-08T10:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
+| `split-clock-task-day` | dates | Remind me at 10am to call the dentist tomorrow | `action`; reminder explicit 2026-10-09T10:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
 | `design-session-topic` | design | Bring this up in therapy | topic "therapy" | type action; any reminder | yes |
 | `design-unsupported-spoken-update` | design | Done with the roofer call | abstain `UnsupportedOperation` | any facet; op update/create | no |
 | `design-exploratory-thought` | broad-intention | Maybe I should quit this project | `idea` | type action; any reminder | yes |

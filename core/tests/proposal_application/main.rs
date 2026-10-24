@@ -1534,11 +1534,7 @@ fn a_dayless_span_after_a_day_in_an_earlier_sentence_or_past_a_pause_is_held_for
 #[test]
 fn a_dayless_span_with_a_day_in_the_task_text_is_held_for_correction_not_anchored_to_today() {
     for (text, quoted, instant) in [
-        (
-            "Remind me at 5 p.m. to call the roofer tomorrow",
-            "at 5 p.m.",
-            "2026-10-08T17:00:00-04:00",
-        ),
+        // "... at 5 p.m. to call the roofer tomorrow" is the split shape (F46), which schedules.
         (
             "Remind me at 5 p.m. to call the roofer tmrw",
             "at 5 p.m.",
@@ -2922,4 +2918,162 @@ fn an_unhedged_clock_request_still_schedules() {
         "call Sam",
     );
     assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
+}
+
+/// The split shape (F46): the day and the clock sit on either side of the task. The capture is
+/// 2026-10-08T14:00:00Z, 10:00 EDT, so these instants are in America/New_York.
+const SPLIT_SHAPE_CAPTURES: [(&str, &str, &str, &str); 3] = [
+    (
+        "Remind me today to call the dentist at 5 p.m.",
+        "today to call the dentist at 5 p.m.",
+        "at 5 p.m.",
+        "2026-10-08T17:00:00-04:00",
+    ),
+    (
+        "Remind me Friday to call Sam at 3 p.m.",
+        "Friday to call Sam at 3 p.m.",
+        "at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+    ),
+    (
+        "Remind me at 10am to call the dentist tomorrow",
+        "at 10am to call the dentist tomorrow",
+        "at 10am",
+        "2026-10-09T10:00:00-04:00",
+    ),
+];
+
+#[test]
+fn a_split_shape_reminder_schedules_with_either_span_form() {
+    for (text, whole, clock, instant) in SPLIT_SHAPE_CAPTURES {
+        for quoted in [whole, clock] {
+            let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call");
+            assert_scheduled_at(&fixture, disposition, instant);
+        }
+    }
+}
+
+#[test]
+fn a_split_shape_reminder_whose_instant_differs_from_the_combined_resolution_is_rejected() {
+    for (text, whole, clock, instant) in SPLIT_SHAPE_CAPTURES {
+        // The clock on the right hour but another day, and the day at another hour.
+        let other_day = instant.replace("-08T", "-20T").replace("-09T", "-21T");
+        let other_hour = instant
+            .replace("T17:", "T18:")
+            .replace("T15:", "T16:")
+            .replace("T10:", "T11:");
+        for wrong in [other_day.as_str(), other_hour.as_str()] {
+            for quoted in [whole, clock] {
+                let (fixture, disposition) = apply_clock_proposal(text, quoted, wrong, "call");
+                assert_rejected_and_unscheduled(&fixture, disposition);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_reminder_that_is_not_exactly_the_split_shape_is_held_for_correction() {
+    for text in [
+        "Remind me today to call Sam tomorrow at 5 p.m.",
+        "Remind me today to call Sam at 5 p.m. or 6 p.m.",
+        "Remind me today to call the dentist, then Sam, at 5 p.m.",
+        "Remind me today to call the dentist for 2 fillings at 5 p.m.",
+        "Talked to Jim on Monday. Remind me today to call the dentist at 5 p.m.",
+        "Remind me today to call the dentist at 5 p.m. Actually, make it Saturday",
+        "Remind me today to call the dentist by 5 p.m.",
+    ] {
+        let quoted = if text.contains("by 5") {
+            "5 p.m."
+        } else {
+            "at 5 p.m."
+        };
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-08T17:00:00-04:00", "call");
+        assert_held_for_correction(&fixture, disposition);
+    }
+    for text in [
+        "Remind me at 5pm to call Sam tomorrow at 6pm",
+        "Remind me at 5pm to call Sam on Friday tomorrow",
+        "Remind me at 5pm to call the dentist (urgent) tomorrow",
+        "Remind me at 5pm to call the dentist before tomorrow",
+        "Remind me at 5pm to call the dentist tomorrow morning",
+    ] {
+        let span = span_of(text, "at 5pm");
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) =
+            apply_clock_proposal(text, "at 5pm", "2026-10-08T17:00:00-04:00", "call");
+        assert_held_for_correction(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_split_shape_part_that_is_not_complete_on_its_own_is_held_or_rejected() {
+    for (text, quoted) in [
+        ("Remind me today to call the dentist at 5", "at 5"),
+        ("Remind me at 10 to call the dentist tomorrow", "at 10"),
+    ] {
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-08T17:00:00-04:00", "call");
+        assert_ne!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert!(
+            fixture
+                .reminder_effects()
+                .is_none_or(|(_, _, operations, _)| operations.is_empty()),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_hedged_split_shape_reminder_is_never_scheduled() {
+    for (text, quoted) in [
+        (
+            "Maybe remind me today to call the dentist at 5 p.m.",
+            "at 5 p.m.",
+        ),
+        (
+            "Remind me maybe today to call the dentist at 5 p.m.",
+            "at 5 p.m.",
+        ),
+        (
+            "Maybe remind me at 5pm to call the dentist tomorrow",
+            "at 5pm",
+        ),
+    ] {
+        let span = span_of(text, quoted);
+        assert!(
+            !span_covers_time_expression(text, span.start, span.end),
+            "{text}"
+        );
+        let (fixture, disposition) =
+            apply_clock_proposal(text, quoted, "2026-10-08T17:00:00-04:00", "call");
+        assert_ne!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert!(
+            fixture
+                .reminder_effects()
+                .is_none_or(|(_, _, operations, _)| operations.is_empty()),
+            "{text}"
+        );
+    }
 }

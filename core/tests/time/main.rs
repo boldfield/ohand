@@ -750,3 +750,24 @@ fn repeats_with_a_clock_are_still_unsupported() {
         Err(ResolutionError::UnsupportedRepeat(_))
     ));
 }
+
+#[test]
+fn a_day_and_clock_on_either_side_of_the_task_resolve_together() {
+    // Thursday 2026-10-08, 10:00 EDT.
+    for (phrase, expected) in [
+        (
+            "today to call the dentist at 5 p.m.",
+            "2026-10-08T21:00:00+00:00",
+        ),
+        ("Friday to call Sam at 3 p.m.", "2026-10-09T19:00:00+00:00"),
+        (
+            "at 10am to call the dentist tomorrow",
+            "2026-10-09T14:00:00+00:00",
+        ),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+    // Not the split shape: two days stay unresolved.
+    let context = make_context(NY, NY_THURSDAY);
+    assert!(TimeResolver::resolve("today to call Sam tomorrow at 10am", &context).is_err());
+}

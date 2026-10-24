@@ -145,6 +145,108 @@
       "notes": "Explicit reminder command with clear date/time. 'Friday at 3 p.m.' with reference date 2026-10-08 (Thursday) resolves to 2026-10-09 at 15:00. Quality is 'explicit' and instant is RFC 3339 with timezone."
     },
     {
+      "id": "split-day-task-clock",
+      "category": "dates",
+      "input": "Remind me today to call the dentist at 10am",
+      "provenance": "synthetic, split day/task/clock shape (F46)",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "text",
+        "capture_instant": "2026-10-08T11:00:00Z",
+        "device_timezone": "America/New_York",
+        "notes": "Explicit reminder whose day and clock sit on either side of the task. Captured at 07:00 America/New_York on 2026-10-08, 'today ... at 10am' is 2026-10-08T10:00:00-04:00. The span may cover day, task and clock, or the clock alone."
+      },
+      "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 19,
+            "end": 35,
+            "text": "call the dentist"
+          }
+        ],
+        "reminder_proposal": {
+          "source_span": {
+            "start": 36,
+            "end": 43,
+            "text": "at 10am"
+          },
+          "quality": "explicit",
+          "instant": "2026-10-08T10:00:00-04:00",
+          "timezone_id": "America/New_York"
+        }
+      },
+      "forbidden": {
+        "reminder_qualities": [
+          "inferred",
+          "ambiguous"
+        ],
+        "reminder_timezones": [
+          "UTC"
+        ],
+        "item_types": [
+          "note"
+        ]
+      },
+      "recoverable": true,
+      "notes": "Explicit reminder whose day and clock sit on either side of the task. Captured at 07:00 America/New_York on 2026-10-08, 'today ... at 10am' is 2026-10-08T10:00:00-04:00. The span may be the clock alone or the whole stretch from day to clock."
+    },
+    {
+      "id": "split-clock-task-day",
+      "category": "dates",
+      "input": "Remind me at 10am to call the dentist tomorrow",
+      "provenance": "synthetic, split day/task/clock shape (F46)",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "text",
+        "capture_instant": "2026-10-08T11:00:00Z",
+        "device_timezone": "America/New_York",
+        "notes": "Explicit reminder with the clock first and the day last. Captured at 07:00 America/New_York on 2026-10-08, 'at 10am ... tomorrow' is 2026-10-09T10:00:00-04:00. The span may cover clock, task and day, or the clock alone."
+      },
+      "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 21,
+            "end": 37,
+            "text": "call the dentist"
+          }
+        ],
+        "reminder_proposal": {
+          "source_span": {
+            "start": 10,
+            "end": 17,
+            "text": "at 10am"
+          },
+          "quality": "explicit",
+          "instant": "2026-10-09T10:00:00-04:00",
+          "timezone_id": "America/New_York"
+        }
+      },
+      "forbidden": {
+        "reminder_qualities": [
+          "inferred",
+          "ambiguous"
+        ],
+        "reminder_timezones": [
+          "UTC"
+        ],
+        "item_types": [
+          "note"
+        ]
+      },
+      "recoverable": true,
+      "notes": "Explicit reminder with the clock first and the day last. Captured at 07:00 America/New_York on 2026-10-08, 'at 10am ... tomorrow' is 2026-10-09T10:00:00-04:00. The span may be the clock alone or the whole stretch from clock to day."
+    },
+    {
       "id": "design-session-topic",
       "category": "design",
       "input": "Bring this up in therapy",
