@@ -8,6 +8,8 @@ Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable ac
 
 Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity, metrics build field, the signing wrapper and an automated simulator upgrade check) and T10b (the maintainer's signed candidate and device upgrade). The original task `ddc1fc6c` blocked on the device criteria after three rejected rounds and is retired. T05 now depends on T10b. U10a now also depends on T10a, because both edit `ios/project.yml`.
 
+Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
+
 Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
 
 ## Execution authority
@@ -3778,6 +3780,8 @@ Acceptance:
 
 **Ownership amendment (coordinator, 2026-10-24, after the first claim blocked).** The worker was right. `record_reminder` and `candidate_agreement` (`core/src/interpretation/apply/mod.rs`) resolve only the quoted span. With the clock-only span form, the resolver sees "at 3 p.m." with no day, so it never sees Friday, and the model's correct instant is rejected. F46 now also owns `core/src/interpretation/apply/mod.rs`, only for this seam. When the span sits inside a covered split-shape sentence, resolve the combined day-and-clock phrase from `core/src/time/` instead of the span text. Use that same phrase for the agreement check and for `apply_derived_request`. Every other path through `record_reminder` is unchanged. F29, the last task that owned `apply/`, has landed.
 
+**Second ownership amendment (coordinator, 2026-10-24).** F46 also owns `docs/validation/intent-fixtures.md`, only to add the rows for `split-day-task-clock` and `split-clock-task-day`. `core/tests/fixture_validation/main.rs` fails when a contrastive fixture is missing from that document. The round-3 review's only blocking finding was this gap.
+
 ### F47
 
 Make the iOS test suite deterministic: fix the intermittent failures
@@ -3844,6 +3848,8 @@ Amendment (2026-10-24): F47 blocked with its test fixes done. Its three-run evid
 - `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased` failed its 30 s condition wait on an unloaded host. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` is still undiagnosed. F50 owns both.
 
 F47 now depends on F37, F49 and F50. After both land, rebase onto main and collect acceptance 5 as written. Its criteria are unchanged.
+
+Amendment 2 (2026-10-24, later): F50 is retired. Neither named failure reproduced in 250 iterations each (run 40074375705), and a read-through found no product interleaving that leaves the reset gate held. The only reproduced failure was test-side, at `CompositionRootTests.swift:240`: `tearDownWithError` checks the process-wide `CoreHandle.liveResultBufferCount` against its baseline without waiting for quiescence. The resumed reset in the two reset tests finishes on a background task after the assertion, so the next test's baseline can start at 1. It failed in 2 and 8 of 250 iterations. F47 owns that file and fixes it under acceptance 2 (state shared between tests): poll the live buffer and handle counts back to the baseline with a deadline in tearDown, as `AppServicesTests.swift:77` and `:530` already do, and settle setUp's baseline the same way. The assertion stays. If a named reset or JobRunner test fails during the acceptance-5 runs, report it with its log, as acceptance 5 already requires. F47 now depends on F37 and F49 only.
 
 ### T10a
 
@@ -4026,6 +4032,8 @@ Acceptance:
 6. `make check` passes, including `ios-check`.
 
 ### F50
+
+**Retired 2026-10-24.** The diagnosis found no product race; see F47 amendment 2. This section is kept as an audit record.
 
 Find and fix the product races behind two intermittent test failures
 
