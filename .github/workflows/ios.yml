@@ -17,6 +17,8 @@ jobs:
     name: Simulator build, unit tests and launch smoke test
     runs-on: macos-26
     timeout-minutes: 60
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +62,22 @@ jobs:
       - name: Generate Xcode project
         run: cd ios && ./scripts/generate.sh
 
+      # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
+      # that the NotificationProbe suites clone again, so none of them pays for a first boot.
+      - name: Settle simulator (single cold boot) and keep an empty template
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase --shutdown-after --label settle-device 2>&1 | tee .evidence/prepare-settle.log
+          template_name="ohand-template-$$"
+          template_udid="$(xcrun simctl clone "${SIMULATOR_UDID}" "${template_name}")"
+          echo "Cloned settled simulator ${SIMULATOR_UDID} into template ${template_udid}"
+          echo "${template_udid}" > .evidence/template-udid.txt
+          echo "TEMPLATE_UDID=${template_udid}" >> "$GITHUB_ENV"
+
       # Ad-hoc signed so the hosted test bundle carries the app's Keychain entitlement (V04 real-Keychain tests).
       - name: Run OhAndTests on simulator
         shell: bash
@@ -89,18 +107,18 @@ jobs:
 
       - name: Run NotificationProbe UI tests (allow and deny permission decisions)
         shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -euo pipefail
-          # Each suite starts from an erased, fully booted and responsive simulator: uninstalling the app does not clear a
-          # recorded notification decision, and the permission prompt only appears while the decision is undetermined.
+          # Each suite runs on its own clone of the empty template, which never ran NotificationProbe: uninstalling the app
+          # does not clear a recorded notification decision, and the permission prompt only appears while the decision is
+          # undetermined. The clone is fully booted and responsive before the suite starts and deleted after it.
           evidence_dir="$(pwd)/ios/.evidence/notification-probe"
           mkdir -p "${evidence_dir}"
           cd ios
           overall_status=0
           for suite in NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests; do
-            ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase
+            ./scripts/prepare-simulator.sh --clone "${TEMPLATE_UDID}" --udid-file .evidence/suite-udid.txt --label "${suite}"
+            suite_udid="$(cat .evidence/suite-udid.txt)"
             rm -rf "${evidence_dir}/${suite}.xcresult"
             suite_status=0
             xcodebuild test \
@@ -108,7 +126,7 @@ jobs:
               -scheme NotificationProbeUITests \
               -configuration Debug \
               -sdk iphonesimulator \
-              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              -destination "platform=iOS Simulator,id=${suite_udid}" \
               -derivedDataPath .derived \
               -resultBundlePath "${evidence_dir}/${suite}.xcresult" \
               -only-testing:"NotificationProbeUITests/${suite}" \
@@ -116,6 +134,9 @@ jobs:
             if [ "${suite_status}" -ne 0 ]; then
               overall_status="${suite_status}"
             fi
+            echo "Shutting down and deleting ${suite_udid}"
+            xcrun simctl shutdown "${suite_udid}" || true
+            xcrun simctl delete "${suite_udid}" || true
           done
           exit "${overall_status}"
 
@@ -278,6 +299,14 @@ jobs:
             com.boldfield.ohand.probes.capture \
             .evidence 2>&1 | tee .evidence/capture-smoke.log
 
+      - name: Delete simulator template
+        if: always()
+        shell: bash
+        run: |
+          xcrun simctl shutdown all || true
+          if [ -n "${TEMPLATE_UDID:-}" ]; then xcrun simctl delete "${TEMPLATE_UDID}" || true; fi
+          echo "=== host-pressure.txt ===" && cat ios/.evidence/host-pressure.txt || true
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -288,10 +317,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # One job per width: each erased device's first boot saturates the 3-core runner for minutes, and a second one in the
+  # same job is the one that fails. Two jobs cost one more concurrent macOS job; cloning cannot help because an iPhone
+  # and an iPad are different device types.
   walkthrough:
-    name: Screenshot walkthrough
+    name: Screenshot walkthrough (${{ matrix.width }} width)
     runs-on: macos-26
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - width: compact
+            family: iPhone
+          - width: regular
+            family: iPad
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
       - uses: actions/checkout@v4
 
@@ -306,50 +348,48 @@ jobs:
         shell: bash
         run: brew install mint
 
-      - name: Select simulators
-        id: simulators
+      # A regular-width run needs an iPad; without one that leg selects nothing and its later steps are skipped.
+      - name: Select simulator
+        id: simulator
         shell: bash
+        env:
+          DEVICE_FAMILY: ${{ matrix.family }}
         run: |
           set -euo pipefail
           mkdir -p ios/.evidence
           sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
           xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
-          python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
-            --max-runtime "${sdk_version}" | sed 's/^/phone_/' | tee ios/.evidence/simulators.txt >> "$GITHUB_OUTPUT"
-          # A regular-width run needs an iPad; without one only the compact run is made.
           if python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
-              --max-runtime "${sdk_version}" --family iPad | sed 's/^/pad_/' >> ios/.evidence/simulators.txt; then
-            grep '^pad_' ios/.evidence/simulators.txt >> "$GITHUB_OUTPUT"
+              --max-runtime "${sdk_version}" --family "${DEVICE_FAMILY}" > ios/.evidence/simulator.txt; then
+            cat ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
           fi
-          cat ios/.evidence/simulators.txt
+          cat ios/.evidence/simulator.txt
 
       - name: Generate Xcode project
+        if: steps.simulator.outputs.udid != ''
         run: cd ios && ./scripts/generate.sh
 
-      - name: Walkthrough at compact width
+      - name: Walkthrough at ${{ matrix.width }} width
+        if: steps.simulator.outputs.udid != ''
         shell: bash
         env:
-          SIMULATOR_UDID: ${{ steps.simulators.outputs.phone_udid }}
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          WIDTH: ${{ matrix.width }}
         run: |
           set -euo pipefail
           cd ios
-          ./scripts/walkthrough-simulator.sh "${SIMULATOR_UDID}" .evidence compact
+          ./scripts/walkthrough-simulator.sh "${SIMULATOR_UDID}" .evidence "${WIDTH}"
 
-      - name: Walkthrough at regular width
-        if: steps.simulators.outputs.pad_udid != ''
+      - name: Show host pressure
+        if: always()
         shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulators.outputs.pad_udid }}
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/walkthrough-simulator.sh "${SIMULATOR_UDID}" .evidence regular
+        run: cat ios/.evidence/host-pressure.txt || true
 
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-walkthrough
+          name: ios-walkthrough-${{ matrix.width }}
           path: ios/.evidence
           include-hidden-files: true
           if-no-files-found: error
