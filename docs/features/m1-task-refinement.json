@@ -3958,7 +3958,8 @@
         "core/tests/proposal_application/",
         "fixtures/intent/contrastive-fixtures.json",
         "core/tests/fixture_validation/",
-        "core/tests/live_providers/"
+        "core/tests/live_providers/",
+        "core/src/interpretation/apply/mod.rs"
       ],
       "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
       "acceptance": [
@@ -5138,6 +5139,10 @@
     {
       "date": "2026-10-24",
       "change": "Added F48: reminders stored with no time (\"remind me later to call Joe\") are shown in Status and marked on Home rows. Depends on F44; U10a now also waits for F48 (both edit app/)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 now also owns core/src/interpretation/apply/mod.rs for the split-shape seam: resolve the combined day+clock phrase when the proposal quotes only the clock."
     }
   ]
 }

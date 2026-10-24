@@ -3774,6 +3774,8 @@ Acceptance:
    - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
 5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
 
+**Ownership amendment (coordinator, 2026-10-24, after the first claim blocked).** The worker was right. `record_reminder` and `candidate_agreement` (`core/src/interpretation/apply/mod.rs`) resolve only the quoted span. With the clock-only span form, the resolver sees "at 3 p.m." with no day, so it never sees Friday, and the model's correct instant is rejected. F46 now also owns `core/src/interpretation/apply/mod.rs`, only for this seam. When the span sits inside a covered split-shape sentence, resolve the combined day-and-clock phrase from `core/src/time/` instead of the span text. Use that same phrase for the agreement check and for `apply_derived_request`. Every other path through `record_reminder` is unchanged. F29, the last task that owned `apply/`, has landed.
+
 ### F47
 
 Make the iOS test suite deterministic: fix the intermittent failures
