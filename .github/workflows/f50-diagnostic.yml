@@ -1,0 +1,52 @@
+name: F50 diagnostic (temporary)
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  iterate:
+    runs-on: macos-26
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - "OhAndTests/CompositionRootTests/testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased"
+          - "OhAndTests/CompositionRootTests/testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration"
+          - "OhAndTests/JobRunnerBoundaryTests/testADeferredJobTypeIsCountedAsCapabilityUnavailable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.6'
+      - run: brew install mint
+      - name: Select simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios/.evidence
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
+          python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json --max-runtime "${sdk_version}" >> "$GITHUB_OUTPUT"
+      - run: cd ios && ./scripts/generate.sh
+      - name: Iterate
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -uo pipefail
+          cd ios
+          xcodebuild test \
+            -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived -only-testing:"${{ matrix.target }}" \
+            -test-iterations 250 \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/iter.log
+          echo "=== failures ==="
+          grep -E "error:|failed \(|Test Case .* (passed|failed)" .evidence/iter.log | sed 's/([0-9.]* seconds)//' | sort | uniq -c | sort -rn | head -20
