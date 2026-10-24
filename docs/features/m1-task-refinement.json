@@ -224,6 +224,15 @@
       ],
       "old_task_id": "f5423770-230e-46e0-9451-80a56f6a7b3a",
       "old_pr": null
+    },
+    "T10": {
+      "reason": "Build identity, the signing wrapper and a simulator upgrade check are fleet work; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling lands while the device evidence stays an honest block.",
+      "children": [
+        "T10a",
+        "T10b"
+      ],
+      "old_task_id": "ddc1fc6c-a3d9-41a1-ba79-e33855644a3f",
+      "old_pr": 356
     }
   },
   "tasks": [
@@ -3793,6 +3802,7 @@
         "DS09",
         "F44",
         "F45",
+        "T10a",
         "U03b",
         "U04b",
         "U07c",
@@ -3993,6 +4003,71 @@
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
         ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "T10a",
+      "parent": "T10",
+      "title": "Version trial builds, carry the build identity into metrics, and check upgrades in the simulator",
+      "file_scope": [
+        "tools/release/",
+        "ios/UITests/Upgrade/",
+        "ios/scripts/generate_build_info.sh",
+        "ios/project.yml",
+        ".github/workflows/upgrade.yml",
+        "ios/AppAssembly/UpgradeCheck/",
+        "core/src/metrics/",
+        "ios/Services/Metrics/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/releases/m1-trial/README.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Make each trial build name its revision, give the maintainer a tested signing wrapper, and prove automatically that a newer build installed over an older one keeps the data.",
+      "acceptance": [
+        "See the T10a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "depends_on": [
+        "F45",
+        "P08b",
+        "P11b",
+        "T09"
+      ],
+      "source_pointers": [
+        "core/src/metrics/mod.rs:458",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift:185",
+        "ios/scripts/smoke-simulator.sh"
+      ]
+    },
+    {
+      "key": "T10b",
+      "parent": "T10",
+      "title": "Record the signed trial candidate and the maintainer's device upgrade",
+      "file_scope": [
+        "docs/releases/m1-trial/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Fold the maintainer's signed candidate and device upgrade result into the release and upgrade documents as cited evidence.",
+      "acceptance": [
+        "See the T10b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        3,
+        4
+      ],
+      "depends_on": [
+        "T10a",
+        "U10a"
+      ],
+      "source_pointers": [
+        "docs/testing/m1-upgrade-evidence.md"
       ]
     }
   ],
@@ -4505,11 +4580,6 @@
       "B03",
       "N07"
     ],
-    "T10": [
-      "P08b",
-      "T09",
-      "P11b"
-    ],
     "T02a": [
       "C05b",
       "J02b",
@@ -4544,7 +4614,7 @@
       "T03",
       "T04b",
       "T09",
-      "T10",
+      "T10b",
       "T12b",
       "U10b"
     ],
@@ -4773,6 +4843,7 @@
       "DS09",
       "F44",
       "F45",
+      "T10a",
       "U03b",
       "U04b",
       "U07c",
@@ -4798,6 +4869,16 @@
     "F47": [
       "F37",
       "F42"
+    ],
+    "T10a": [
+      "F45",
+      "P08b",
+      "P11b",
+      "T09"
+    ],
+    "T10b": [
+      "T10a",
+      "U10a"
     ]
   },
   "retained_dependency_overrides": {
@@ -5008,6 +5089,14 @@
     {
       "date": "2026-10-23",
       "change": "Added F47 (deterministic iOS tests: shared bounded wait, diagnose each intermittent test, stabilize the walkthrough; test code only). Depends on F37 and F42; F44 and F45 now wait for F47."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "F47 no longer depends on F42 (the two were deadlocked); F47 owns the HomeRecents retry test."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Split T10 into T10a (build identity, metrics build field, signing wrapper, simulator upgrade check) and T10b (maintainer's signed candidate and device upgrade). T05 depends on T10b; U10a also depends on T10a (shared ios/project.yml)."
     }
   ]
 }
