@@ -1018,6 +1018,22 @@ fn apply_clock_proposal(
     instant: &str,
     item_span: &str,
 ) -> (Fixture, ReminderDisposition) {
+    apply_clock_proposal_with(
+        text,
+        quoted,
+        Some(instant),
+        TimeResolutionQuality::Explicit,
+        item_span,
+    )
+}
+
+fn apply_clock_proposal_with(
+    text: &str,
+    quoted: &str,
+    instant: Option<&str>,
+    quality: TimeResolutionQuality,
+    item_span: &str,
+) -> (Fixture, ReminderDisposition) {
     let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
     let lease = fixture.claim_job(0, capture_instant());
     let proposal = fixture
@@ -1025,9 +1041,9 @@ fn apply_clock_proposal(
         .with_item_type(Some(ItemType::Action))
         .with_source_spans(Some(vec![span_of(text, item_span)]))
         .with_reminder_proposal(Some(ReminderProposal {
-            instant: Some(instant.to_string()),
+            instant: instant.map(str::to_string),
             timezone_id: Some("America/New_York".to_string()),
-            quality: TimeResolutionQuality::Explicit,
+            quality,
             source_span: Some(span_of(text, quoted)),
         }));
     let outcome = fixture.apply(&lease, &proposal).unwrap();
@@ -2658,4 +2674,252 @@ fn a_reminder_request_on_a_corrected_text_resolves_against_the_correction() {
         fixture.reminder_effects().unwrap().2,
         vec![OperationType::Schedule]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Hedged reminder requests (F29)
+// ---------------------------------------------------------------------------------------------
+
+fn assert_hedged_and_unscheduled(fixture: &Fixture, disposition: ReminderDisposition) {
+    let text = source_text_of(fixture);
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet),
+        "{text}"
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "not_scheduled_yet", "{text}");
+    assert_eq!(reminder.schedule_state, "not_scheduled", "{text}");
+    assert_eq!(reminder.resolved_instant, None, "{text}");
+    assert_eq!(
+        reminder.ambiguity_reason.as_deref(),
+        Some("the request is hedged"),
+        "{text}"
+    );
+    let (_, _, operations, _) = fixture.reminder_effects().expect("a reminder row");
+    assert_eq!(operations, vec![], "{text}");
+}
+
+#[test]
+fn the_maybe_friday_fixture_oracle_is_stored_as_an_ambiguous_reminder_needing_correction() {
+    let (fixture, disposition) = {
+        let text = "Maybe remind me Friday to water the plants?";
+        let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
+        let lease = fixture.claim_job(0, capture_instant());
+        let proposal = fixture
+            .proposal_for(&lease, 0)
+            .with_item_type(Some(ItemType::Action))
+            .with_source_spans(Some(vec![span_of(text, text)]))
+            .with_reminder_proposal(Some(ReminderProposal {
+                instant: None,
+                timezone_id: None,
+                quality: TimeResolutionQuality::Ambiguous,
+                source_span: Some(span_of(text, "Friday")),
+            }));
+        let outcome = fixture.apply(&lease, &proposal).unwrap();
+        (fixture, applied_reminder(outcome))
+    };
+    assert_hedged_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn a_hedged_request_with_a_clock_time_is_never_scheduled() {
+    for text in [
+        "Maybe remind me Friday at 3 p.m. to call Sam",
+        "perhaps remind me Friday at 3 p.m. to call Sam",
+        "Maybe please remind me Friday at 3 p.m. to call Sam",
+        "possibly remind me Friday at 3 p.m. to call Sam",
+        "Maybe can you remind me Friday at 3 p.m. to call Sam",
+        "Perhaps can you remind me Friday at 3 p.m. to call Sam",
+        "Possibly you can remind me Friday at 3 p.m. to call Sam",
+        "Maybe could you please remind me Friday at 3 p.m. to call Sam",
+        "Maybe I need you to remind me Friday at 3 p.m. to call Sam",
+        "Maybe I'd like you to remind me Friday at 3 p.m. to call Sam",
+        "Maybe, remind me Friday at 3 p.m. to call Sam",
+        "Perhaps, remind me Friday at 3 p.m. to call Sam",
+        "Okay, maybe, remind me Friday at 3 p.m. to call Sam",
+        "Maybe. Remind me Friday at 3 p.m. to call Sam",
+        "Maybe, can you remind me Friday at 3 p.m. to call Sam",
+        // A hedge after an earlier sentence still reaches the request.
+        "Busy week. Maybe remind me Friday at 3 p.m. to call Sam",
+        "Sam called. Maybe. Remind me Friday at 3 p.m. to call Sam",
+        "Water the plants. Maybe, remind me Friday at 3 p.m. to call Sam",
+        "Water the plants. Okay, maybe. Remind me Friday at 3 p.m. to call Sam",
+        "Okay so maybe, remind me Friday at 3 p.m. to call Sam",
+        // Transcript punctuation is inferred, so a clause ending in a hedge counts as hedging.
+        "Sam called maybe. Remind me Friday at 3 p.m. to call Sam",
+    ] {
+        // A proposal that quotes the time but claims no instant is stored as needing correction.
+        let (fixture, disposition) = apply_clock_proposal_with(
+            text,
+            "Friday at 3 p.m.",
+            None,
+            TimeResolutionQuality::Ambiguous,
+            "call Sam",
+        );
+        assert_hedged_and_unscheduled(&fixture, disposition);
+        // One claiming an explicit instant, right or wrong, is rejected as a contradiction.
+        for instant in ["2026-10-09T15:00:00-04:00", "2026-10-09T16:00:00-04:00"] {
+            let (fixture, disposition) =
+                apply_clock_proposal(text, "Friday at 3 p.m.", instant, "call Sam");
+            assert_rejected_and_unscheduled_for(text, &fixture, disposition);
+        }
+    }
+}
+
+#[test]
+fn a_hedged_recurring_request_is_kept_as_needing_correction_not_as_an_unsupported_recurrence() {
+    // The hedge is decided before the phrase is read, so a recurrence does not move a hedged
+    // request to the unsupported-recurrence state: it needs correction, with the hedge reason.
+    for (text, quoted) in [
+        (
+            "Maybe remind me every Friday to water the plants",
+            "every Friday",
+        ),
+        (
+            "perhaps remind me every day to water the plants",
+            "every day",
+        ),
+        (
+            "Possibly can you remind me every Friday to water the plants",
+            "every Friday",
+        ),
+        (
+            "Maybe, remind me every Friday to water the plants",
+            "every Friday",
+        ),
+    ] {
+        let (fixture, disposition) = apply_clock_proposal_with(
+            text,
+            quoted,
+            None,
+            TimeResolutionQuality::Ambiguous,
+            "water the plants",
+        );
+        assert_hedged_and_unscheduled(&fixture, disposition);
+        assert_eq!(fixture.reminder_row().unsupported_reason, None, "{text}");
+        // An explicit instant claimed for the recurrence is still rejected as a contradiction.
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            quoted,
+            "2026-10-09T09:00:00-04:00",
+            "water the plants",
+        );
+        assert_rejected_and_unscheduled_for(text, &fixture, disposition);
+    }
+}
+
+#[test]
+fn a_hedged_request_leaves_a_committed_recurrence_unchanged() {
+    // A recurrence already recorded as unsupported is protected: when a correction hedges the
+    // request, the hedged request neither reduces it to a one-shot nor rewrites its state.
+    let text = "remind me to call the roofer every Monday";
+    let mut fixture = Fixture::new(text);
+    let first = fixture.claim_job(0, capture_instant());
+    let recurring = fixture
+        .action_proposal(&first, text, "call the roofer")
+        .with_reminder_proposal(Some(reminder_candidate(
+            text,
+            "every Monday",
+            None,
+            TimeResolutionQuality::Ambiguous,
+        )));
+    assert_eq!(
+        applied_reminder(fixture.apply(&first, &recurring).unwrap()),
+        ReminderDisposition::Recorded(ReminderRequestState::UnsupportedRecurrence)
+    );
+    let stored = fixture.reminder_effects().unwrap();
+
+    let corrected = "maybe remind me to call the roofer every Monday";
+    let correction_id = fixture.correct(CorrectionKind::Text, Some(text), corrected, 0);
+    let second = fixture.claim_job(1, capture_instant());
+    let mut hedged = fixture.proposal_for(&second, 1);
+    hedged.text_basis = TextBasis::Correction {
+        correction_record_id: correction_id,
+        item_revision: 1,
+    };
+    let hedged = hedged
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(corrected, "call the roofer")]))
+        .with_reminder_proposal(Some(reminder_candidate(
+            corrected,
+            "every Monday",
+            None,
+            TimeResolutionQuality::Ambiguous,
+        )));
+    assert_eq!(
+        applied_reminder(fixture.apply(&second, &hedged).unwrap()),
+        ReminderDisposition::ExistingKept
+    );
+
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "unsupported_recurrence");
+    assert_eq!(reminder.schedule_state, "not_scheduled");
+    assert_eq!(reminder.resolved_instant, None);
+    assert_eq!(reminder.ambiguity_reason, None);
+    assert_eq!(fixture.reminder_effects().unwrap(), stored);
+    assert!(stored.2.is_empty());
+}
+
+#[test]
+fn a_hedge_does_not_turn_a_non_request_into_one() {
+    for text in [
+        "maybe Bob will remind me Friday at 3 p.m. to call Sam",
+        "maybe I reminded him Friday at 3 p.m. to call Sam",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            "call Sam",
+        );
+        assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+        assert_eq!(fixture.durable().reminders, 0, "{text}");
+    }
+}
+
+#[test]
+fn a_hedge_before_an_earlier_content_clause_does_not_reach_the_request() {
+    // The walk back stops at the first clause with other words, so a hedge before it is that
+    // clause's own and the request stays plain.
+    let text = "Maybe Sam called. Remind me Friday at 3 p.m. to call Sam";
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Sam",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
+}
+
+#[test]
+fn a_quoted_hedge_in_an_earlier_clause_does_not_hedge_the_request() {
+    // A quoted hedge is reported speech, not the speaker's own, so the request stays plain.
+    for text in [
+        "Sam said \"Maybe.\" Remind me Friday at 3 p.m. to call him",
+        "\"Maybe.\" Remind me Friday at 3 p.m. to call Sam",
+    ] {
+        let (fixture, disposition) = apply_clock_proposal(
+            text,
+            "Friday at 3 p.m.",
+            "2026-10-09T15:00:00-04:00",
+            if text.ends_with("him") {
+                "call him"
+            } else {
+                "call Sam"
+            },
+        );
+        assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
+    }
+}
+
+#[test]
+fn an_unhedged_clock_request_still_schedules() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me Friday at 3 p.m. to call Sam",
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Sam",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-10-09T19:00:00Z");
 }

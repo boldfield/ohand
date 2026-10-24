@@ -39,7 +39,8 @@ use crate::jobs::queue::{complete_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{authorize_job, DenialReason, JOB_TYPE_INTERPRET};
 use crate::providers::contracts::{ErrorClass, ProviderFailure};
 use crate::reminders::state::{
-    apply_derived_request, DerivedReminderRequest, ReminderStateError, RequestState,
+    apply_derived_request, apply_hedged_request, DerivedReminderRequest, ReminderStateError,
+    RequestState,
 };
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
@@ -791,7 +792,7 @@ pub fn record_interpretation_failure_in_tx(
 /// Derive the reminder request of an applied proposal.
 ///
 /// A candidate is only a claim. It is dropped unless the item can carry an obligation and the
-/// source text itself explicitly asks to be reminded ([`states_reminder_intent`]). The model's
+/// source text itself explicitly asks to be reminded ([`reminder_intent`]). The model's
 /// instant and timezone must equal what the deterministic resolver produces from the quoted
 /// phrase; a contradiction creates nothing. Once it agrees, the write goes through the reminder
 /// desired-state API (N01), which re-resolves the phrase against the capture context, refuses to
@@ -832,11 +833,29 @@ fn record_reminder(
         Agreement::SpanTruncated => IntentReading::TimingHeld,
         Agreement::Agrees | Agreement::Contradicts(_) => IntentReading::Exact,
     };
-    if !states_reminder_intent(basis_text, candidate.source_span, reading) {
+    let Some(hedged) = reminder_intent(basis_text, candidate.source_span, reading) else {
         return Ok(ReminderDisposition::NoExplicitIntent);
+    };
+
+    // A hedged request is never scheduled, so a claim of an explicit instant for it contradicts
+    // the source and is rejected through the same guard path as any other contradiction.
+    if hedged && candidate.quality == TimeResolutionQuality::Explicit && candidate.instant.is_some()
+    {
+        return Ok(ReminderDisposition::CandidateRejected(
+            "the request is hedged, so the time cannot be explicit",
+        ));
     }
 
     let phrase = match agreement {
+        // A hedged request that claims no instant and calls the time ambiguous agrees with the
+        // hedge: it is kept as needing correction even where the resolver could read the phrase.
+        Agreement::Contradicts(_)
+            if hedged
+                && candidate.instant.is_none()
+                && candidate.quality == TimeResolutionQuality::Ambiguous =>
+        {
+            phrase
+        }
         Agreement::Contradicts(contradiction) => {
             return Ok(ReminderDisposition::CandidateRejected(contradiction));
         }
@@ -849,7 +868,14 @@ fn record_reminder(
         source_revision: item.revision,
         phrase,
     };
-    match apply_derived_request(tx, &FixedClock(now), &request) {
+    // A hedged request is kept but never scheduled: whatever the phrase resolves to, it is stored
+    // as needing correction.
+    let applied = if hedged {
+        apply_hedged_request(tx, &FixedClock(now), &request)
+    } else {
+        apply_derived_request(tx, &FixedClock(now), &request)
+    };
+    match applied {
         Ok(record) => Ok(ReminderDisposition::Recorded(match record.request_state {
             RequestState::NotRequested => ReminderRequestState::NotRequested,
             RequestState::Resolved => ReminderRequestState::Resolved,
@@ -1487,6 +1513,9 @@ const FIRST_PERSON_REQUESTERS: &[&str] = &["i'll", "i'd", "we'll", "we'd", "you'
 const SUBJECT_PRONOUNS: &[&str] = &["i", "you", "we"];
 const FIRST_PERSON_SUBJECTS: &[&str] = &["i", "we", "i'll", "i'd", "we'll", "we'd"];
 const FIRST_PERSON_PROGRESSIVE: &[&str] = &["i'm", "im", "we're"];
+/// Closed list of hedge words that, directly before an otherwise valid first-person request,
+/// leave it a real request whose timing is unconfirmed ("Maybe remind me Friday").
+const HEDGE_WORDS: &[&str] = &["maybe", "perhaps", "possibly"];
 const POLITENESS_WORDS: &[&str] = &[
     "please", "pls", "kindly", "and", "then", "also", "hey", "ok", "okay", "now", "just",
 ];
@@ -1583,36 +1612,46 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 /// span then no longer detaches the time (a sentence end, a semicolon and every detaching word
 /// still do), and a retracting negation that
 /// closes its clause is a correction, not a withdrawal, when the next clause names a time.
-fn states_reminder_intent(
+/// Whether the capture states a reminder intent (see above) and, if so, whether every stating
+/// request is hedged: `Some(false)` when any request is plain.
+fn reminder_intent(
     text: &str,
     time_span: Option<SourceSpan>,
     reading: IntentReading,
-) -> bool {
+) -> Option<bool> {
     let tokens = tokenize_intent_text(text);
-    (0..tokens.len()).any(|start| {
-        REMINDER_CUES.iter().any(|cue| {
+    let mut intent: Option<bool> = None;
+    for start in 0..tokens.len() {
+        for cue in REMINDER_CUES {
             let Some(window) = tokens.get(start..start + cue.len()) else {
-                return false;
+                continue;
             };
             let matches_cue = window.iter().zip(cue.iter()).all(|(token, expected)| {
                 !token.quoted && !token.clause_break && token.text == *expected
             });
-            if !matches_cue || !is_present_first_person_request(&tokens, start, cue[0]) {
-                return false;
+            if !matches_cue {
+                continue;
             }
+            let Some(hedged) = request_hedge(&tokens, start, cue[0]) else {
+                continue;
+            };
             let recalls = tokens.get(start + cue.len()).is_some_and(|next| {
                 !next.clause_break && RECALL_WORDS.contains(&next.text.as_str())
             });
             if recalls {
-                return false;
+                continue;
             }
             let cue_end = window[cue.len() - 1].end;
             let governs =
                 time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span, reading));
-            governs
+            if governs
                 && !retracted_after(&tokens, time_span.map_or(cue_end, |span| span.end), reading)
-        })
-    })
+            {
+                intent = Some(intent.unwrap_or(true) && hedged);
+            }
+        }
+    }
+    intent
 }
 
 /// Whether the capture withdraws the request after character offset `after` (the end of the
@@ -2416,7 +2455,7 @@ fn request_governs_span(
         })
 }
 
-/// How [`states_reminder_intent`] reads a capture.
+/// How [`reminder_intent`] reads a capture.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IntentReading {
     /// The quoted time may become the reminder's instant, so the request must govern it exactly.
@@ -2453,7 +2492,10 @@ fn detaches_time(token: &IntentToken) -> bool {
         || PAST_EVENT_WORDS.contains(&word)
 }
 
-fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, verb: &str) -> bool {
+/// Whether the words before a reminder cue make it a present first-person request: `None` when
+/// they do not, otherwise whether a hedge word ([`HEDGE_WORDS`]) sits directly before the request
+/// (among its politeness words), which leaves the timing unconfirmed.
+fn request_hedge(tokens: &[IntentToken], cue_start: usize, verb: &str) -> Option<bool> {
     let clause_words: Vec<&str> = tokens[..cue_start]
         .iter()
         .rev()
@@ -2464,9 +2506,81 @@ fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, ver
         .iter()
         .any(|word| is_negating_word(word) || COMPLETED_WORDS.contains(word))
     {
-        return false;
+        return None;
     }
-    match skip_politeness(&clause_words) {
+    let (clause_words, hedged_near_cue) = skip_hedges(&clause_words);
+    let (clause_words, hedged_at_start) = trim_leading_hedges(clause_words);
+    is_first_person_request(clause_words, verb).then(|| {
+        hedged_near_cue || hedged_at_start || hedged_by_earlier_clauses(&tokens[..cue_start])
+    })
+}
+
+/// Whether the clauses just before the request's own clause hedge it, so a punctuated hedge
+/// leaves the timing unconfirmed like an unpunctuated one. Walking back clause by clause, a clause
+/// of only politeness and hedge words ("Maybe, remind me", "Sam called. Maybe. Remind me") passes
+/// its hedge on, since the hedge word has no other function there. The first clause holding any
+/// other word ends the walk, and still hedges the request when it ends in a hedge ("Okay so
+/// maybe, remind me"). Punctuation in a transcript is inferred, so a trailing hedge counts even
+/// across a sentence end ("Sam called maybe. Remind me"): reading too much as hedged only keeps a
+/// reminder unscheduled, never schedules one the speaker did not confirm.
+fn hedged_by_earlier_clauses(tokens_before_cue: &[IntentToken]) -> bool {
+    // A quoted word is reported speech ('Sam said "Maybe."'), not the speaker's own hedge, so it
+    // counts as content and stops the walk.
+    let is_hedge_or_politeness = |token: &&IntentToken| {
+        !token.quoted
+            && (HEDGE_WORDS.contains(&token.text.as_str())
+                || POLITENESS_WORDS.contains(&token.text.as_str()))
+    };
+    let is_hedge = |token: &IntentToken| HEDGE_WORDS.contains(&token.text.as_str());
+    let Some(mut clause_end) = tokens_before_cue
+        .iter()
+        .rposition(|token| token.clause_break)
+    else {
+        return false;
+    };
+    let mut hedged = false;
+    loop {
+        let clause_start = tokens_before_cue[..clause_end]
+            .iter()
+            .rposition(|token| token.clause_break)
+            .map_or(0, |index| index + 1);
+        let clause = &tokens_before_cue[clause_start..clause_end];
+        let run = clause
+            .iter()
+            .rev()
+            .take_while(is_hedge_or_politeness)
+            .count();
+        let run_hedged = clause[clause.len() - run..].iter().any(is_hedge);
+        if run < clause.len() {
+            return hedged || run_hedged;
+        }
+        hedged |= run_hedged;
+        if clause_start == 0 {
+            return hedged;
+        }
+        clause_end = clause_start - 1;
+    }
+}
+
+/// Trims politeness and hedge words from the start of the clause (the end of the nearest-first
+/// slice) when the run holds a hedge, so a hedge before a requester phrase ("Maybe can you remind
+/// me", "Maybe I need you to remind me") counts like one next to the cue. Reports whether it did.
+fn trim_leading_hedges<'slice, 'word>(words: &'slice [&'word str]) -> (&'slice [&'word str], bool) {
+    let run = words
+        .iter()
+        .rev()
+        .take_while(|word| POLITENESS_WORDS.contains(word) || HEDGE_WORDS.contains(word))
+        .count();
+    let kept = words.len() - run;
+    if words[kept..].iter().any(|word| HEDGE_WORDS.contains(word)) {
+        (&words[..kept], true)
+    } else {
+        (words, false)
+    }
+}
+
+fn is_first_person_request(clause_words: &[&str], verb: &str) -> bool {
+    match skip_politeness(clause_words) {
         [] => true,
         ["to", governing @ ..] => is_first_person_intention(governing),
         ["wanna", subject @ ..] => is_first_person_subject(subject),
@@ -2522,6 +2636,19 @@ fn is_first_person_progressive(words: &[&str]) -> bool {
         ["am", "i", ..] | ["are", "we", ..] => true,
         _ => false,
     }
+}
+
+/// Skips the leading politeness and hedge words (nearest the cue first), reporting whether a hedge
+/// word was among them.
+fn skip_hedges<'slice, 'word>(words: &'slice [&'word str]) -> (&'slice [&'word str], bool) {
+    let skipped = words
+        .iter()
+        .take_while(|word| POLITENESS_WORDS.contains(word) || HEDGE_WORDS.contains(word))
+        .count();
+    let hedged = words[..skipped]
+        .iter()
+        .any(|word| HEDGE_WORDS.contains(word));
+    (&words[skipped..], hedged)
 }
 
 fn skip_politeness<'slice, 'word>(words: &'slice [&'word str]) -> &'slice [&'word str] {
