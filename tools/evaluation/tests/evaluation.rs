@@ -1,11 +1,15 @@
 //! Evaluation reports: separation of defect classes, the safety gate, execution-kind
 //! classification and reproducibility.
 
+use chrono::{DateTime, Utc};
 use evaluation::corpus::Corpus;
 use evaluation::report::{ExecutionKind, Report, RunStatus};
 use evaluation::responses::Responses;
 use evaluation::run::evaluate;
-use evaluation::score::{DefectKind, MutationClass};
+use evaluation::score::{
+    defects_against, DefectKind, FacetView, MutationClass, ReminderView, Stage,
+};
+use ohand_core::store::events::ItemType;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -877,36 +881,27 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
 
 #[test]
 fn a_stored_reminder_without_an_instant_makes_no_timezone_claim_at_the_authoritative_stage() {
-    // No repository oracle names a zone other than its capture's, so the zone-claim contrast
-    // runs on an in-memory corpus whose `design-explicit-reminder` oracle names Asia/Tokyo.
-    let fixture_id = "design-explicit-reminder";
-    let bytes = std::fs::read(repository_path("fixtures/intent/contrastive-fixtures.json"))
-        .expect("the corpus is readable");
-    let mut document: Value = serde_json::from_slice(&bytes).expect("the corpus parses");
-    let fixture = document["fixtures"]
-        .as_array_mut()
-        .expect("fixtures")
-        .iter_mut()
-        .find(|fixture| fixture["id"] == fixture_id)
-        .expect("fixture");
-    fixture["expected"]["reminder_proposal"]["timezone_id"] = json!("Asia/Tokyo");
-    let corpus = Corpus::from_bytes(&serde_json::to_vec(&document).expect("serializes"))
-        .expect("the adjusted corpus loads");
+    // `timezone-implicit-local`'s oracle names the device zone (America/New_York). A candidate
+    // claiming Asia/Tokyo is a zone mismatch. Its span quotes only
+    // "9 a.m." of "tomorrow at 9 a.m.", so the guard stores the reminder as not scheduled, and a
+    // stored reminder without an instant makes no zone claim.
+    let fixture_id = "timezone-implicit-local";
+    let corpus = corpus();
     let responses = responses_from(
         &corpus,
         vec![scenario(
-            "device-zone-claim-no-instant",
+            "foreign-zone-claim",
             fixture_id,
             synthetic(),
             json!({
                 "operation": { "kind": "annotate" },
                 "item_type": "action",
-                "source_spans": [span_of(&corpus, fixture_id, "Remind me Friday at 3 p.m. to call the roofer")],
+                "source_spans": [span_of(&corpus, fixture_id, "Remind me tomorrow at 9 a.m. to submit the form")],
                 "reminder_proposal": {
-                    "source_span": span_of(&corpus, fixture_id, "Friday"),
+                    "source_span": span_of(&corpus, fixture_id, "9 a.m."),
                     "quality": "explicit",
-                    "instant": "2026-10-09T15:00:00-04:00",
-                    "timezone_id": "America/New_York"
+                    "instant": "2026-10-09T09:00:00+09:00",
+                    "timezone_id": "Asia/Tokyo"
                 }
             }),
         )],
@@ -934,6 +929,39 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim_at_the_authorita
             .filter(is_zone_defect)
             .count(),
         0
+    );
+
+    // The store keeps the capture's zone, which every repository oracle shares, so the stage
+    // contrast is also checked directly against this oracle with a stored zone that differs.
+    let expected = &corpus.fixture(fixture_id).expect("fixture").expected;
+    let view = |instant: Option<&str>| FacetView {
+        item_type: Some(ItemType::Action),
+        reminder: Some(ReminderView {
+            quality: None,
+            instant: instant.map(|text| {
+                DateTime::parse_from_rfc3339(text)
+                    .expect("instant")
+                    .with_timezone(&Utc)
+            }),
+            timezone_id: Some("Asia/Tokyo".to_string()),
+            evidence: None,
+        }),
+        ..FacetView::default()
+    };
+    let zone_defects = |view: &FacetView, stage: Stage| {
+        defects_against(expected, view, stage, Some(view), false)
+            .iter()
+            .filter(is_zone_defect)
+            .count()
+    };
+    assert_eq!(zone_defects(&view(None), Stage::Candidate), 1);
+    assert_eq!(zone_defects(&view(None), Stage::Authoritative), 0);
+    assert_eq!(
+        zone_defects(
+            &view(Some("2026-10-09T09:00:00-04:00")),
+            Stage::Authoritative
+        ),
+        1
     );
 }
 
