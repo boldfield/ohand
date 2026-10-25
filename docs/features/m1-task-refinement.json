@@ -4148,6 +4148,25 @@
         "core/tests/live_providers/harness.rs:866",
         "core/tests/live_providers/harness.rs:977"
       ]
+    },
+    {
+      "key": "F51",
+      "parent": null,
+      "title": "Stop the OpenAI adapter from pinning temperature on interpretation requests",
+      "file_scope": [
+        "core/src/providers/openai/mod.rs",
+        "core/tests/"
+      ],
+      "intent": "The production OpenAI request pins temperature 0.0, which current reasoning models reject with HTTP 400; omit it so the provider default applies, as the Anthropic path already does.",
+      "acceptance": [
+        "See the F51 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/providers/openai/mod.rs:196",
+        "docs/features/model-comparison.md:246"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4385,6 +4404,7 @@
       "E02a",
       "E02b",
       "F21",
+      "F51",
       "I06",
       "V06",
       "V07"
@@ -4966,7 +4986,8 @@
       "F44"
     ],
     "F49": [],
-    "E02b": []
+    "E02b": [],
+    "F51": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5204,6 +5225,10 @@
     {
       "date": "2026-10-25",
       "change": "Added E02b: a two-phase revoked-hosted-key scenario in the live harness (E02 criterion 2). E02 now depends on E02b."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added F51: the production OpenAI request omits temperature (gpt-5.5 rejected temperature 0.0 in the E02 live run). E02 now depends on F51."
     }
   ]
 }

@@ -4146,3 +4146,30 @@ Acceptance:
 5. **Networkless twin.** A test using the existing fake server accepts the key once, then returns the provider's 401 authentication error for it. The test checks the `before` and `after` assertions, and the leak check over both artifacts.
 6. `make check` and `make test` pass.
 
+
+### F51
+
+Stop the OpenAI adapter from pinning temperature on interpretation requests
+
+Found by the coordinator's E02 live run on 2026-10-25 (`docs/validation/evidence/live-providers/live-providers-live-20261025T054428997Z-71e0091….json`, main 71e0091). `openai:gpt-5.5` failed 32 of 35 fixtures with outcome `rejected`. Only the three fast-path captures, which never call the provider, passed. In every case the provider returned HTTP 400 `unsupported_value` on `temperature`: "does not support 0.0 with this model. Only the default (1) value is supported." `openai:gpt-5.4-mini` accepted the same requests and matched 28 of 35.
+
+The cause is that the production path sets `temperature: Some(0.0)` (`core/src/providers/openai/mod.rs:196`). That excludes every current OpenAI model that accepts only the default temperature, which is the reasoning family, OpenAI's flagship line. The Anthropic production path already sends no temperature. The benchmark settled the same question in `docs/features/model-comparison.md` §"Temperature": request temperature only when the operator asks for it. The diagnostic path (`invoke_diagnostic_observed`) already does this and is unchanged.
+
+Change: the production OpenAI interpretation request omits `temperature`, so the provider's default applies. `seed` and `max_completion_tokens` stay as they are (absent). Nothing else in the request changes: `response_format`, the messages, and the rendered instructions are all unchanged.
+
+Out of scope:
+- **The self-hosted adapter's `temperature: 0`** (`core/src/providers/self_hosted/mod.rs:281`). Ollama and llama.cpp accept it, and the E02 Spark evidence was collected with it.
+- **Retrying a rejected request without temperature.** Omitting it is the fix.
+
+Owned paths: `core/src/providers/openai/mod.rs`; its tests wherever they live today; and new or changed tests under `core/tests/` that exercise the OpenAI production request against the existing fake server.
+
+Dependencies: none.
+
+Acceptance:
+1. The production OpenAI request body has no `temperature` key, which a test shows from the serialized body sent to the fake server, not from a struct field.
+2. A fake-server test reproduces the live failure. The server rejects any request carrying a non-default `temperature` with the provider's 400 `unsupported_value` error body. The production path's interpretation against it then ends applied or abstained, not `rejected`. Run the test against the old line 196: it must fail there, and the PR states that it did.
+3. The diagnostic path still sends exactly the requested settings. Existing tests in `core/tests/provider_contract/diagnostic.rs` pass unchanged.
+4. If a profile or request version identifies what the request carries, follow the existing versioning rule and say which rule applied. If none does, say so.
+5. `make check` and `make test` pass.
+
+After F51 lands, the coordinator reruns the E02 OpenAI leg (gpt-5.5, gpt-5.4-mini) and commits that evidence. E02 depends on F51.
