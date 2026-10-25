@@ -4142,6 +4142,31 @@
         "core/src/providers/openai/mod.rs:196",
         "docs/features/model-comparison.md:246"
       ]
+    },
+    {
+      "key": "F52",
+      "parent": null,
+      "title": "Reconcile four fixtures that every strong model misses with the M1 instructions",
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/tests/interpretation_instructions/",
+        "fixtures/intent/contrastive-fixtures.json",
+        "core/tests/fixture_validation/",
+        "docs/validation/intent-fixtures.md",
+        "tools/evaluation/fixtures/recorded-responses.json",
+        "tools/evaluation/tests/evaluation.rs"
+      ],
+      "intent": "Four fixtures (timezone-conflicting, very-long-transcript, abstract-broad-thought, prompt-injection-attempt-1) are missed identically by every strong model because the oracle and the instructions disagree or an item-type definition is unclear; reconcile each against DESIGN.md, the instructions and the core guards, never weakening a forbidden rule.",
+      "acceptance": [
+        "See the F52 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/instructions/text.rs",
+        "core/src/interpretation/apply/mod.rs:972",
+        "fixtures/intent/contrastive-fixtures.json"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4960,7 +4985,8 @@
       "F44"
     ],
     "E02b": [],
-    "F51": []
+    "F51": [],
+    "F52": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5206,6 +5232,14 @@
     {
       "date": "2026-10-25",
       "change": "F49 retired and absorbed into F47 (amendment 3): one PR carries F49's Intel runner layout and F47's test fixes, judged on the shared three-run criterion. F47 depends on F37 only; U10a depends on F47 in place of F49."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added F52: reconcile four fixtures missed identically by every strong model (instruction/oracle conflicts). Off E02's path."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "F52 owns tools/evaluation/tests/evaluation.rs for re-pointing the zone-claim test only. F47 amendment 4: Intel hosts are CPU-bound (0 swapouts); measure host-service shutdown, diagnosticd reduction and an arm64 comparison per job."
     }
   ]
 }
