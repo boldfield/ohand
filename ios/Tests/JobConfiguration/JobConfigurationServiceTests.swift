@@ -408,3 +408,205 @@ final class CoreJobConfigurationClientGateTests: XCTestCase {
         XCTAssertEqual(refusal.code, "read_relocked")
     }
 }
+
+/// Failed interpretation work: the read and the explicit rerun (F43).
+final class FailedInterpretationControlsTests: XCTestCase {
+    private let boundary = FakeReadAuthenticationBoundary()
+
+    private func makeSession(authenticated: Bool) -> ReadAuthenticationSession {
+        let session = ReadAuthenticationSession(boundary: boundary)
+        if authenticated {
+            session.authenticate(reason: "test") { _ in }
+            XCTAssertEqual(session.scope, .authenticated)
+        }
+        return session
+    }
+
+    private let failedEntry = JobConfigurationFailedInterpretation(
+        itemID: "item-1", capturedAt: "2026-10-22T09:00:00Z", failureReason: "rejected", pinned: true,
+        profileVersion: "profile-a", recovery: .runAgain)
+
+    func testTheServiceReadsFailedWorkAndRerunsItWithTypedAnswers() async throws {
+        let page = JobConfigurationFailedInterpretations(failed: [failedEntry], nextCursor: "cursor-1")
+        let result = JobConfigurationRerunResult(
+            moved: 1, skipped: 1, skippedItems: [JobConfigurationSkippedItem(itemID: "item-2", reason: .notFailed)])
+        let core = ScriptedJobConfigurationCore([
+            .success(.failedInterpretations(page)), .success(.rerun(result)), .success(.rerun(result)),
+        ])
+        let service = JobConfigurationService(core: core, session: makeSession(authenticated: true))
+
+        let listed = try await service.failedInterpretations(limit: 10, cursor: "cursor-0")
+        let someRerun = try await service.rerunFailedInterpretations(itemIDs: ["item-1", "item-2"])
+        let allRerun = try await service.rerunAllFailedInterpretations()
+
+        XCTAssertEqual(listed, page)
+        XCTAssertEqual(someRerun, result)
+        XCTAssertEqual(allRerun, result)
+        XCTAssertEqual(
+            core.commands,
+            [
+                .failedInterpretations(readScopes: [], limit: 10, cursor: "cursor-0"),
+                .rerunFailedInterpretations(readScopes: [], selection: .items(["item-1", "item-2"])),
+                .rerunFailedInterpretations(readScopes: [], selection: .allListed),
+            ])
+    }
+
+    func testMalformedFailedWorkRequestsNeverReachTheCore() async {
+        let core = ScriptedJobConfigurationCore([])
+        let service = JobConfigurationService(core: core, session: makeSession(authenticated: true))
+        let tooMany = (0...100).map { "item-\($0)" }
+        let attempts: [() async throws -> Void] = [
+            { _ = try await service.failedInterpretations(limit: 0) },
+            { _ = try await service.failedInterpretations(cursor: "") },
+            { _ = try await service.rerunFailedInterpretations(itemIDs: []) },
+            { _ = try await service.rerunFailedInterpretations(itemIDs: [""]) },
+            { _ = try await service.rerunFailedInterpretations(itemIDs: tooMany) },
+        ]
+        for attempt in attempts {
+            do {
+                try await attempt()
+                XCTFail("expected invalidRequest")
+            } catch {
+                XCTAssertEqual(error as? JobConfigurationError, .invalidRequest)
+            }
+        }
+        XCTAssertTrue(core.commands.isEmpty)
+    }
+
+    func testACaptureOnlySessionIsRefusedAndTheCoreIsNotAsked() async {
+        let core = ScriptedJobConfigurationCore([])
+        let service = JobConfigurationService(core: core, session: makeSession(authenticated: false))
+        do {
+            _ = try await service.failedInterpretations()
+            XCTFail("expected notAuthenticated")
+        } catch {
+            XCTAssertEqual(error as? JobConfigurationError, .notAuthenticated)
+        }
+        do {
+            _ = try await service.rerunAllFailedInterpretations()
+            XCTFail("expected notAuthenticated")
+        } catch {
+            XCTAssertEqual(error as? JobConfigurationError, .notAuthenticated)
+        }
+        XCTAssertTrue(core.commands.isEmpty)
+    }
+
+    func testTheAnswersDecodeFromTheCoresJSON() throws {
+        let listed = try JobConfigurationAnswer.decode(
+            Data(
+                #"{"operation_id":1,"failed":[{"item_id":"item-1","captured_at":"2026-10-22T09:00:00Z","failure_reason":"rejected","pinned":true,"profile_version":"profile-a","recovery":"run_again"},{"item_id":"item-2","captured_at":"2026-10-21T09:00:00Z","failure_reason":"unsupported","pinned":false,"profile_version":null,"recovery":"change_settings"}],"next_cursor":null}"#
+                    .utf8),
+            for: .failedInterpretations(readScopes: [.personal], limit: nil, cursor: nil))
+        XCTAssertEqual(
+            listed,
+            .failedInterpretations(
+                JobConfigurationFailedInterpretations(
+                    failed: [
+                        failedEntry,
+                        JobConfigurationFailedInterpretation(
+                            itemID: "item-2", capturedAt: "2026-10-21T09:00:00Z", failureReason: "unsupported",
+                            pinned: false, profileVersion: nil, recovery: .changeSettings),
+                    ], nextCursor: nil)))
+        let rerun = try JobConfigurationAnswer.decode(
+            Data(
+                #"{"operation_id":2,"moved":1,"skipped":1,"skipped_items":[{"item_id":"item-3","reason":"no_provider_allowed"}]}"#
+                    .utf8),
+            for: .rerunFailedInterpretations(readScopes: [.personal], selection: .allListed))
+        XCTAssertEqual(
+            rerun,
+            .rerun(
+                JobConfigurationRerunResult(
+                    moved: 1, skipped: 1,
+                    skippedItems: [JobConfigurationSkippedItem(itemID: "item-3", reason: .noProviderAllowed)])))
+        XCTAssertThrowsError(
+            try JobConfigurationAnswer.decode(
+                Data(#"{"operation_id":3,"failed":[{"item_id":"i","captured_at":"t","failure_reason":"x","pinned":false,"profile_version":null,"recovery":"surprise"}],"next_cursor":null}"#.utf8),
+                for: .failedInterpretations(readScopes: [.personal], limit: nil, cursor: nil)))
+    }
+
+    func testTheCommandsAreEncodedForTheCoreAndScopesAreReplaceable() {
+        XCTAssertEqual(
+            JobConfigurationCommand.rerunFailedInterpretations(readScopes: [], selection: .allListed)
+                .withReadScopes([.personal, .work]),
+            .rerunFailedInterpretations(readScopes: [.personal, .work], selection: .allListed))
+        XCTAssertEqual(
+            JobConfigurationCommand.repinWaitingWork(routeID: "r").withReadScopes([.work]),
+            .repinWaitingWork(routeID: "r"))
+    }
+}
+
+/// The failed-work read reaches the core only through the private read gate, which supplies the session's scopes.
+final class FailedInterpretationGateTests: XCTestCase {
+    private var directory: URL!
+    private var core: CoreHandle!
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        core = try CoreHandle(path: directory.appendingPathComponent("store.sqlite").path)
+    }
+
+    override func tearDown() {
+        core?.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func makeClient(
+        authenticated: Bool, source: RecordingJobConfigurationReadSource
+    ) -> (CoreJobConfigurationClient, ReadAuthenticationSession) {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        if authenticated {
+            session.authenticate(reason: "test") { _ in }
+            XCTAssertEqual(session.scope, .authenticated)
+        }
+        let gate = PrivateReadGate(session: session, source: source)
+        return (CoreJobConfigurationClient(core: core, gate: gate), session)
+    }
+
+    func testALockedSessionNeverReachesTheCoreForTheFailedWorkRead() {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, _) = makeClient(authenticated: false, source: source)
+        let results = ClientResults()
+
+        client.submit(.failedInterpretations(readScopes: [.personal, .work], limit: nil, cursor: nil)) {
+            results.append($0)
+        }
+
+        XCTAssertTrue(source.reads.isEmpty)
+        guard case .failure(let refusal) = results.values.first else { return XCTFail("expected a refusal") }
+        XCTAssertEqual(refusal.code, "read_not_authenticated")
+    }
+
+    func testTheGateStatesTheScopesAndAnAnswerAfterARelockIsDropped() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, session) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+
+        client.submit(.failedInterpretations(readScopes: [], limit: 5, cursor: "c")) { results.append($0) }
+
+        XCTAssertEqual(
+            source.reads.map(\.command),
+            [.failedInterpretations(readScopes: [.personal, .work], limit: 5, cursor: "c")])
+        let operationID = try XCTUnwrap(source.reads.first?.operationID)
+        session.relock(.explicit)
+        let payload = Data(#"{"operation_id":1,"failed":[],"next_cursor":null}"#.utf8)
+        XCTAssertTrue(client.handle(CoreEvent(operationID: operationID, outcome: .success(payload))))
+
+        guard case .failure(let refusal) = try XCTUnwrap(results.values.first) else { return XCTFail("must be dropped") }
+        XCTAssertEqual(refusal.code, "read_relocked")
+    }
+
+    func testAnAuthenticatedFailedWorkAnswerIsDelivered() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, _) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+        client.submit(.failedInterpretations(readScopes: [], limit: nil, cursor: nil)) { results.append($0) }
+        let operationID = try XCTUnwrap(source.reads.first?.operationID)
+
+        let payload = Data(#"{"operation_id":1,"failed":[],"next_cursor":null}"#.utf8)
+        XCTAssertTrue(client.handle(CoreEvent(operationID: operationID, outcome: .success(payload))))
+
+        guard case .success(let answer) = try XCTUnwrap(results.values.first) else { return XCTFail("expected the answer") }
+        XCTAssertEqual(answer, .failedInterpretations(JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)))
+    }
+}

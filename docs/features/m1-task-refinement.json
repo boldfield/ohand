@@ -224,6 +224,15 @@
       ],
       "old_task_id": "f5423770-230e-46e0-9451-80a56f6a7b3a",
       "old_pr": null
+    },
+    "T10": {
+      "reason": "Build identity, the signing wrapper and a simulator upgrade check are fleet work; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling lands while the device evidence stays an honest block.",
+      "children": [
+        "T10a",
+        "T10b"
+      ],
+      "old_task_id": "ddc1fc6c-a3d9-41a1-ba79-e33855644a3f",
+      "old_pr": 356
     }
   },
   "tasks": [
@@ -3793,6 +3802,9 @@
         "DS09",
         "F44",
         "F45",
+        "F47",
+        "F48",
+        "T10a",
         "U03b",
         "U04b",
         "U07c",
@@ -3947,7 +3959,9 @@
         "core/tests/proposal_application/",
         "fixtures/intent/contrastive-fixtures.json",
         "core/tests/fixture_validation/",
-        "core/tests/live_providers/"
+        "core/tests/live_providers/",
+        "core/src/interpretation/apply/mod.rs",
+        "docs/validation/intent-fixtures.md"
       ],
       "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
       "acceptance": [
@@ -3993,6 +4007,140 @@
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
         ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "T10a",
+      "parent": "T10",
+      "title": "Version trial builds, carry the build identity into metrics, and check upgrades in the simulator",
+      "file_scope": [
+        "tools/release/",
+        "ios/UITests/Upgrade/",
+        "ios/scripts/generate_build_info.sh",
+        "ios/project.yml",
+        ".github/workflows/upgrade.yml",
+        "ios/AppAssembly/UpgradeCheck/",
+        "core/src/metrics/",
+        "ios/Services/Metrics/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/releases/m1-trial/README.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Make each trial build name its revision, give the maintainer a tested signing wrapper, and prove automatically that a newer build installed over an older one keeps the data.",
+      "acceptance": [
+        "See the T10a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "depends_on": [
+        "F45",
+        "P08b",
+        "P11b",
+        "T09"
+      ],
+      "source_pointers": [
+        "core/src/metrics/mod.rs:458",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift:185",
+        "ios/scripts/smoke-simulator.sh"
+      ]
+    },
+    {
+      "key": "T10b",
+      "parent": "T10",
+      "title": "Record the signed trial candidate and the maintainer's device upgrade",
+      "file_scope": [
+        "docs/releases/m1-trial/",
+        "docs/testing/m1-upgrade-evidence.md",
+        "docs/validation/evidence/upgrade/"
+      ],
+      "intent": "Fold the maintainer's signed candidate and device upgrade result into the release and upgrade documents as cited evidence.",
+      "acceptance": [
+        "See the T10b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        3,
+        4
+      ],
+      "depends_on": [
+        "T10a",
+        "U10a"
+      ],
+      "source_pointers": [
+        "docs/testing/m1-upgrade-evidence.md"
+      ]
+    },
+    {
+      "key": "F48",
+      "parent": null,
+      "title": "Show reminders that have no time, on Home and in Status, so they are not silently lost",
+      "file_scope": [
+        "ios/Services/NotificationPermission/NotificationReadiness.swift",
+        "ios/Tests/NotificationPermission/",
+        "app/status/",
+        "ios/Tests/Status/",
+        "app/home/",
+        "ios/Tests/HomeRecents/",
+        "core/src/retrieval/recent/",
+        "core/src/ffi/recent_items.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RecentItems.swift",
+        "ios/Services/RecentItems/",
+        "ios/Tests/RecentItems/"
+      ],
+      "intent": "\"Remind me later to call Joe\" keeps a reminder with no time and nothing tells the person; show such reminders in Status and mark their Home rows.",
+      "acceptance": [
+        "See the F48 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F44"
+      ],
+      "source_pointers": [
+        "ios/Services/NotificationPermission/NotificationReadiness.swift:90",
+        "core/src/retrieval/recent/mod.rs:36",
+        "core/src/ffi/notification_reconciliation.rs:591",
+        "app/reminders/ReminderEditText.swift:44"
+      ]
+    },
+    {
+      "key": "E02b",
+      "parent": null,
+      "title": "Exercise a genuinely revoked hosted key in the live harness",
+      "file_scope": [
+        "core/tests/live_providers/"
+      ],
+      "intent": "E02 criterion 2 needs a key that was valid and then revoked at the provider; add a two-phase before/after scenario run by the maintainer with a throwaway key.",
+      "acceptance": [
+        "See the E02b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/tests/live_providers/harness.rs:866",
+        "core/tests/live_providers/harness.rs:977"
+      ]
+    },
+    {
+      "key": "F51",
+      "parent": null,
+      "title": "Stop the OpenAI adapter from pinning temperature on interpretation requests",
+      "file_scope": [
+        "core/src/providers/openai/mod.rs",
+        "core/tests/"
+      ],
+      "intent": "The production OpenAI request pins temperature 0.0, which current reasoning models reject with HTTP 400; omit it so the provider default applies, as the Anthropic path already does.",
+      "acceptance": [
+        "See the F51 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/providers/openai/mod.rs:196",
+        "docs/features/model-comparison.md:246"
       ]
     }
   ],
@@ -4229,7 +4377,9 @@
     "E02": [
       "E01",
       "E02a",
+      "E02b",
       "F21",
+      "F51",
       "I06",
       "V06",
       "V07"
@@ -4505,11 +4655,6 @@
       "B03",
       "N07"
     ],
-    "T10": [
-      "P08b",
-      "T09",
-      "P11b"
-    ],
     "T02a": [
       "C05b",
       "J02b",
@@ -4544,7 +4689,7 @@
       "T03",
       "T04b",
       "T09",
-      "T10",
+      "T10b",
       "T12b",
       "U10b"
     ],
@@ -4773,6 +4918,9 @@
       "DS09",
       "F44",
       "F45",
+      "F47",
+      "F48",
+      "T10a",
       "U03b",
       "U04b",
       "U07c",
@@ -4796,9 +4944,23 @@
       "F29"
     ],
     "F47": [
-      "F37",
-      "F42"
-    ]
+      "F37"
+    ],
+    "T10a": [
+      "F45",
+      "P08b",
+      "P11b",
+      "T09"
+    ],
+    "T10b": [
+      "T10a",
+      "U10a"
+    ],
+    "F48": [
+      "F44"
+    ],
+    "E02b": [],
+    "F51": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5008,6 +5170,42 @@
     {
       "date": "2026-10-23",
       "change": "Added F47 (deterministic iOS tests: shared bounded wait, diagnose each intermittent test, stabilize the walkthrough; test code only). Depends on F37 and F42; F44 and F45 now wait for F47."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "F47 no longer depends on F42 (the two were deadlocked); F47 owns the HomeRecents retry test."
+    },
+    {
+      "date": "2026-10-23",
+      "change": "Split T10 into T10a (build identity, metrics build field, signing wrapper, simulator upgrade check) and T10b (maintainer's signed candidate and device upgrade). T05 depends on T10b; U10a also depends on T10a (shared ios/project.yml)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "Added F48: reminders stored with no time (\"remind me later to call Joe\") are shown in Status and marked on Home rows. Depends on F44; U10a now also waits for F48 (both edit app/)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 now also owns core/src/interpretation/apply/mod.rs for the split-shape seam: resolve the combined day+clock phrase when the proposal quotes only the clock."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "Added F49 (hosted-runner simulator starvation: at most one first boot per device type per job) and F50 (product races behind the CompositionRoot reset-boundary and JobRunner deferred-job test failures). F47 now depends on F37, F49 and F50 (its stale F42 edge removed); F45 also waits for F50 (CompositionRoot.swift); U10a also waits for F49 (ios.yml)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 also owns docs/validation/intent-fixtures.md for its two fixture rows. F50 retired: no product race reproduced in 250 iterations; the reproduced teardown liveResultBufferCount check in CompositionRootTests goes to F47 (amendment 2). F47 depends on F37 and F49; F45 on F37 and F47."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added E02b: a two-phase revoked-hosted-key scenario in the live harness (E02 criterion 2). E02 now depends on E02b."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added F51: the production OpenAI request omits temperature (gpt-5.5 rejected temperature 0.0 in the E02 live run). E02 now depends on F51."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "F49 retired and absorbed into F47 (amendment 3): one PR carries F49's Intel runner layout and F47's test fixes, judged on the shared three-run criterion. F47 depends on F37 only; U10a depends on F47 in place of F49."
     }
   ]
 }

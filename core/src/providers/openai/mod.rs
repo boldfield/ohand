@@ -193,7 +193,9 @@ impl<T: HttpTransport> ProviderAdapter for OpenAiAdapter<T> {
                     content: prompt.user,
                 },
             ],
-            temperature: Some(0.0),
+            // Omitted: reasoning-family models accept only the provider default, and a pinned
+            // value makes them answer 400 `unsupported_value`.
+            temperature: None,
             max_completion_tokens: None,
             seed: None,
             response_format: ResponseFormat::JsonObject,

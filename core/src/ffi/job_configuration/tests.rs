@@ -6,6 +6,10 @@ use crate::ffi::core_handle::failure::*;
 use crate::ffi::core_handle::tests::{
     consume, recorder, register, serial, Event as CoreEvent, Outcome, Recorder, WAIT,
 };
+use crate::ffi::job_runner::{
+    ohand_core_cancel_job_drain, ohand_core_set_job_host, ohand_core_start_job_drain,
+    OHAND_JOB_HOST_COMMAND_SEND,
+};
 use crate::ingress::import_foreground_ingress;
 use crate::jobs::queue::{claim_job_with_lease, get_jobs_for_item};
 use crate::privacy::routing::{grant_route_capability, ProcessingCapability};
@@ -13,6 +17,7 @@ use crate::providers::profiles::{create_profile_version, set_default_profile, Pr
 use crate::store::captures::Capture;
 use crate::store::schema::SystemClock;
 use chrono::Duration;
+use std::ffi::c_void;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -487,4 +492,328 @@ fn the_retired_listing_follows_the_revoke_pages_and_rejects_unknown_versions() {
                            "profile_version": profile_version, "limit": 0}));
     session.refuse(&json!({"command": "jobs_retired_by_revocation",
                            "profile_version": profile_version, "after": ""}));
+}
+
+// ---- failed interpretation work (F43) ----
+
+const BOTH_SCOPES: [&str; 2] = ["personal", "work"];
+
+impl Store {
+    /// Ends the queued job as `failed` with `reason`, as the dispatcher does, and leaves the item
+    /// `unprocessed`. Returns the failed job's id.
+    fn fail_next_job(&self, reason: &str) -> String {
+        let mut database = open_database(&self.path);
+        let job = claim_job_with_lease(&mut database, Duration::seconds(60), Utc::now())
+            .unwrap()
+            .expect("a job is queued");
+        database
+            .conn()
+            .execute(
+                "UPDATE jobs SET status = 'failed', failure_reason = ?, lease_expires_at = NULL \
+                 WHERE job_id = ?",
+                [reason, &job.job_id],
+            )
+            .unwrap();
+        database
+            .conn()
+            .execute(
+                "UPDATE items SET processing_state = 'unprocessed' WHERE item_id = ?",
+                [&job.item_id],
+            )
+            .unwrap();
+        job.job_id
+    }
+
+    fn set_lifecycle(&self, item_id: &str, state: &str) {
+        open_database(&self.path)
+            .conn()
+            .execute(
+                "UPDATE items SET lifecycle_state = ? WHERE item_id = ?",
+                [state, item_id],
+            )
+            .unwrap();
+    }
+}
+
+fn list_failed(session: &mut Session) -> Value {
+    session.succeed(&json!({"command": "failed_interpretations", "read_scopes": BOTH_SCOPES}))
+}
+
+fn rerun(session: &mut Session, selection: Value) -> Value {
+    let mut request = json!({"command": "rerun_failed_interpretations",
+                             "read_scopes": BOTH_SCOPES});
+    for (key, value) in selection.as_object().unwrap() {
+        request[key] = value.clone();
+    }
+    session.succeed(&request)
+}
+
+struct HostSide {
+    sender: std::sync::Mutex<std::sync::mpsc::Sender<(u32, Vec<u8>)>>,
+}
+
+unsafe extern "C" fn record_host_command(
+    context: *mut c_void,
+    _request_id: u64,
+    command: u32,
+    data: *const u8,
+    len: usize,
+) {
+    let host = &*(context as *const HostSide);
+    let data = if len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(data, len).to_vec()
+    };
+    let _ = host.sender.lock().unwrap().send((command, data));
+}
+
+#[test]
+fn a_rejected_pinned_failure_is_listed_and_runs_again_to_a_new_pinned_job_that_a_drain_sends() {
+    let _guard = serial();
+    let store = Store::new("rerun-pinned");
+    let profile_version = store.configure("primary");
+    let item_id = store.waiting_capture(1);
+    let failed_job_id = store.fail_next_job("rejected");
+    let mut session = Session::over(&store.path);
+
+    let listed = list_failed(&mut session);
+    let entries = listed["failed"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(listed["next_cursor"], Value::Null);
+    assert_eq!(entries[0]["item_id"], item_id);
+    assert_eq!(entries[0]["failure_reason"], "rejected");
+    assert_eq!(entries[0]["pinned"], true);
+    assert_eq!(entries[0]["profile_version"], profile_version);
+    assert_eq!(entries[0]["recovery"], "run_again");
+    assert_eq!(entries[0]["captured_at"], "2026-10-14T10:30:00Z");
+    assert!(
+        !listed.to_string().contains("roofer"),
+        "the read returns no text"
+    );
+
+    let moved = rerun(&mut session, json!({"item_ids": [item_id]}));
+    assert_eq!(moved["moved"], 1);
+    assert_eq!(moved["skipped"], 0);
+    let jobs = store.jobs(&item_id);
+    assert_eq!(jobs.len(), 2);
+    let failed = jobs.iter().find(|job| job.job_id == failed_job_id).unwrap();
+    assert_eq!(
+        failed.status.as_str(),
+        "failed",
+        "the failed job is untouched"
+    );
+    assert_eq!(failed.failure_reason.as_deref(), Some("rejected"));
+    let replacement = jobs.iter().find(|job| job.job_id != failed_job_id).unwrap();
+    assert_eq!(replacement.status.as_str(), "queued");
+    assert_eq!(
+        replacement.profile_version.as_deref(),
+        Some(profile_version.as_str())
+    );
+    let record = session.succeed(&json!({"command": "requeue_record", "job_id": failed_job_id}));
+    assert_eq!(record["record"]["new_job_id"], replacement.job_id);
+
+    assert_eq!(list_failed(&mut session)["failed"], json!([]));
+    let again = rerun(&mut session, json!({"item_ids": [item_id]}));
+    assert_eq!(again["moved"], 0);
+    assert_eq!(
+        again["skipped_items"],
+        json!([{"item_id": item_id, "reason": "not_failed"}])
+    );
+    let repeated_all = rerun(&mut session, json!({"all_listed": true}));
+    assert_eq!(repeated_all["moved"], 0);
+    assert_eq!(store.jobs(&item_id).len(), 2, "repeating creates nothing");
+
+    // A drain sends the new job to the pinned provider.
+    let (sender, commands) = std::sync::mpsc::channel();
+    let host = Box::new(HostSide {
+        sender: std::sync::Mutex::new(sender),
+    });
+    let context = &*host as *const HostSide as *mut c_void;
+    let list = b"[]";
+    assert_eq!(
+        consume(unsafe {
+            ohand_core_set_job_host(
+                session.handle,
+                Some(record_host_command),
+                context,
+                list.as_ptr(),
+                list.len(),
+            )
+        })
+        .status,
+        OHAND_CORE_STATUS_OK
+    );
+    let path = store.path.clone();
+    assert_eq!(
+        consume(unsafe {
+            ohand_core_start_job_drain(session.handle, 500, path.as_ptr(), path.len())
+        })
+        .status,
+        OHAND_CORE_STATUS_OK
+    );
+    let (command, data) = commands
+        .recv_timeout(WAIT)
+        .expect("the drain sends a request");
+    assert_eq!(command, OHAND_JOB_HOST_COMMAND_SEND);
+    assert!(String::from_utf8_lossy(&data).contains("roofer"));
+    assert_eq!(
+        store
+            .jobs(&item_id)
+            .iter()
+            .find(|job| job.job_id == replacement.job_id)
+            .unwrap()
+            .status
+            .as_str(),
+        "running"
+    );
+    consume(ohand_core_cancel_job_drain(session.handle));
+    let _ = session.events.recv_timeout(WAIT);
+    consume(unsafe {
+        ohand_core_set_job_host(
+            session.handle,
+            None,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+        )
+    });
+}
+
+#[test]
+fn an_unpinned_unsupported_failure_waits_for_settings_and_is_moved_once_a_provider_is_allowed() {
+    let _guard = serial();
+    let store = Store::new("rerun-unpinned");
+    let item_id = store.waiting_capture(1);
+    let failed_job_id = store.fail_next_job("unsupported");
+    let mut session = Session::over(&store.path);
+
+    let listed = list_failed(&mut session);
+    assert_eq!(listed["failed"][0]["pinned"], false);
+    assert_eq!(listed["failed"][0]["profile_version"], Value::Null);
+    assert_eq!(listed["failed"][0]["failure_reason"], "unsupported");
+    assert_eq!(listed["failed"][0]["recovery"], "change_settings");
+
+    let blocked = rerun(&mut session, json!({"all_listed": true}));
+    assert_eq!(blocked["moved"], 0);
+    assert_eq!(blocked["skipped"], 1);
+    assert_eq!(
+        blocked["skipped_items"],
+        json!([{"item_id": item_id, "reason": "no_provider_allowed"}])
+    );
+    assert_eq!(store.jobs(&item_id).len(), 1);
+
+    let profile_version = store.configure("primary");
+    assert_eq!(
+        list_failed(&mut session)["failed"][0]["recovery"],
+        "run_again"
+    );
+    let moved = rerun(&mut session, json!({"all_listed": true}));
+    assert_eq!(moved["moved"], 1);
+    let jobs = store.jobs(&item_id);
+    assert_eq!(jobs.len(), 2);
+    let replacement = jobs.iter().find(|job| job.job_id != failed_job_id).unwrap();
+    assert_eq!(
+        replacement.profile_version.as_deref(),
+        Some(profile_version.as_str())
+    );
+    let record = session.succeed(&json!({"command": "requeue_record", "job_id": failed_job_id}));
+    assert_eq!(record["record"]["from_profile_version"], Value::Null);
+    assert_eq!(rerun(&mut session, json!({"all_listed": true}))["moved"], 0);
+    assert_eq!(store.jobs(&item_id).len(), 2);
+}
+
+#[test]
+fn deleted_and_archived_items_are_never_listed_or_moved_and_the_list_pages_newest_first() {
+    let _guard = serial();
+    let store = Store::new("rerun-lifecycle");
+    store.configure("primary");
+    let mut item_ids = Vec::new();
+    for number in 1..=4 {
+        item_ids.push(store.waiting_capture(number));
+        store.fail_next_job("rejected");
+    }
+    store.set_lifecycle(&item_ids[0], "deleted");
+    store.set_lifecycle(&item_ids[1], "cancelled");
+    let mut session = Session::over(&store.path);
+
+    let listed = list_failed(&mut session);
+    let listed_ids: Vec<_> = listed["failed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["item_id"].as_str().unwrap().to_string())
+        .collect();
+    let mut expected = vec![item_ids[2].clone(), item_ids[3].clone()];
+    expected.sort();
+    assert_eq!(listed_ids, expected);
+
+    let attempted = rerun(
+        &mut session,
+        json!({"item_ids": [item_ids[0], item_ids[1]]}),
+    );
+    assert_eq!(attempted["moved"], 0);
+    assert_eq!(attempted["skipped"], 2);
+    assert_eq!(store.jobs(&item_ids[0]).len(), 1);
+    assert_eq!(store.jobs(&item_ids[1]).len(), 1);
+
+    let first = session.succeed(&json!({"command": "failed_interpretations",
+                                        "read_scopes": BOTH_SCOPES, "limit": 1}));
+    assert_eq!(first["failed"].as_array().unwrap().len(), 1);
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let second = session.succeed(&json!({"command": "failed_interpretations",
+                                         "read_scopes": BOTH_SCOPES, "limit": 1,
+                                         "cursor": cursor}));
+    assert_eq!(second["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(second["next_cursor"], Value::Null);
+    assert_ne!(
+        first["failed"][0]["item_id"],
+        second["failed"][0]["item_id"]
+    );
+}
+
+#[test]
+fn a_locked_read_is_refused_and_a_scope_outside_the_session_sees_nothing() {
+    let _guard = serial();
+    let store = Store::new("rerun-locked");
+    store.configure("primary");
+    let item_id = store.waiting_capture(1);
+    store.fail_next_job("rejected");
+    let mut session = Session::over(&store.path);
+
+    session.refuse(&json!({"command": "failed_interpretations"}));
+    session.refuse(&json!({"command": "failed_interpretations", "read_scopes": []}));
+    session.refuse(&json!({"command": "failed_interpretations", "read_scopes": ["secret"]}));
+    session.refuse(&json!({"command": "failed_interpretations",
+                           "read_scopes": BOTH_SCOPES, "cursor": "not-a-cursor"}));
+    session.refuse(&json!({"command": "rerun_failed_interpretations", "all_listed": true}));
+    session.refuse(&json!({"command": "rerun_failed_interpretations",
+                           "read_scopes": BOTH_SCOPES}));
+    session.refuse(&json!({"command": "rerun_failed_interpretations",
+                           "read_scopes": BOTH_SCOPES, "all_listed": true,
+                           "item_ids": [item_id]}));
+
+    let work_only = session.succeed(&json!({"command": "failed_interpretations",
+                                            "read_scopes": ["work"]}));
+    assert_eq!(work_only["failed"], json!([]));
+    let work_rerun = session.succeed(&json!({"command": "rerun_failed_interpretations",
+                                             "read_scopes": ["work"], "all_listed": true}));
+    assert_eq!(work_rerun["moved"], 0);
+    assert_eq!(store.jobs(&item_id).len(), 1);
+}
+
+#[test]
+fn label_shaped_stored_text_is_reported_as_other_never_echoed() {
+    let _guard = serial();
+    let store = Store::new("rerun-label-shaped");
+    store.configure("primary");
+    store.waiting_capture(1);
+    store.fail_next_job("call_dr_smith_about_results");
+    let mut session = Session::over(&store.path);
+
+    let listed = list_failed(&mut session);
+    let entries = listed["failed"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["failure_reason"], "other");
+    assert!(!listed.to_string().contains("smith"));
 }
