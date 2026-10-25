@@ -383,7 +383,10 @@ jobs:
   # cost one more concurrent macOS job. Both run on macos-26-intel (14 GB).
   walkthrough:
     name: Screenshot walkthrough (${{ matrix.width }} width)
-    runs-on: macos-26-intel
+    # Measured against macos-26-intel at head cde5ac8 (run 40233254176): cold boots took 323-563 s at peak load 750-917 with
+    # swapouts 0, and the readiness settle failed. arm64 has faster cores and a GPU; the build service is stopped before the
+    # first boot so the memory the build held is returned (this job only runs UI tests, which need less than the simulator job).
+    runs-on: macos-26
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -452,6 +455,13 @@ jobs:
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath .derived/Walkthrough \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/walkthrough-build.log
+
+      - name: Stop the build service before the first boot
+        shell: bash
+        run: |
+          pkill -x XCBBuildService || true
+          pkill -x SourceKitService || true
+          vm_stat | head -4
 
       - name: Walkthrough at ${{ matrix.width }} width
         if: steps.simulator.outputs.udid != ''
