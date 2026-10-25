@@ -231,6 +231,18 @@ final class CompositionRootTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("composition-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        // The previous test's resumed reset can still be finishing on a background task; take the baseline only once
+        // the process-wide counts have stopped moving (two equal reads a moment apart), bounded.
+        var previousHandles = -1
+        var previousBuffers = -1
+        _ = pump(
+            until: {
+                let handles = CoreHandle.liveHandleCount
+                let buffers = CoreHandle.liveResultBufferCount
+                defer { previousHandles = handles; previousBuffers = buffers }
+                return handles == previousHandles && buffers == previousBuffers
+            },
+            timeout: 10)
         baselineHandles = CoreHandle.liveHandleCount
         baselineBuffers = CoreHandle.liveResultBufferCount
     }
