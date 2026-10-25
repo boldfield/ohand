@@ -42,6 +42,7 @@ mod config;
 mod evidence;
 mod harness;
 mod oracle;
+mod revocation;
 mod tls_fixture;
 mod transport;
 
@@ -490,4 +491,304 @@ fn live_providers_end_to_end() {
     for scenario in &scenarios {
         assert!(scenario.passed, "{scenario:?}");
     }
+}
+
+const REVOCATION_TWIN_CREDENTIAL: &str = "synthetic-throwaway-key-4c2e9a71d85b";
+const REVOCATION_TWIN_LABEL: &str = "twin-key-label";
+
+fn revocation_twin_transport(server: &TlsFixture) -> std::sync::Arc<CurlTransport> {
+    CurlTransport::new(
+        30,
+        TestRouting {
+            ca_file: Some(server.ca_file()),
+            connect_to: vec![("api.anthropic.com".to_string(), 443, server.port)],
+        },
+    )
+}
+
+#[test]
+fn a_key_accepted_once_then_revoked_is_unauthorized_and_leaves_no_trace() {
+    let server = TlsFixture::start();
+    let backend = Backend {
+        protocol: Protocol::Anthropic,
+        model: "fixture-anthropic-model".to_string(),
+        endpoint: None,
+        credential: REVOCATION_TWIN_CREDENTIAL.to_string(),
+    };
+    server.set_credential(REVOCATION_TWIN_CREDENTIAL);
+    server.set_reply(&oracle_proposal(&load_fixtures()[0]));
+    let scratch = tempfile::tempdir().unwrap();
+    let artifact_dir = scratch.path().join("artifacts");
+    let private_dir = ensure_private_directory(&scratch.path().join("private"));
+
+    // After before there is no older artifact to rely on: refused.
+    let refused = revocation::find_before_artifact(
+        &artifact_dir,
+        REVOCATION_TWIN_LABEL,
+        &backend.label(),
+        chrono::Utc::now(),
+    );
+    assert!(refused.is_err());
+
+    let mut before_harness = Harness::new(revocation_twin_transport(&server), 30);
+    let before = revocation::run_phase(
+        &mut before_harness,
+        &backend,
+        revocation::Phase::Before,
+        REVOCATION_TWIN_LABEL,
+    )
+    .unwrap();
+    assert!(
+        before.passed,
+        "{:?} {:?}",
+        before.failed_checks, before.outcome
+    );
+    assert!(before.outcome.is_applied() || before.outcome.result == "abstained");
+    let before_written = revocation::write_revocation_evidence(
+        &before,
+        &backend,
+        revocation::Phase::Before,
+        &artifact_dir,
+        &private_dir,
+    );
+
+    // The provider revokes the key: the same key now gets its 401 authentication error.
+    server.set_credential("some-other-key-that-is-valid");
+    let served_before = server.requests().len();
+    let mut after_harness = Harness::new(revocation_twin_transport(&server), 30);
+    let after = revocation::run_phase(
+        &mut after_harness,
+        &backend,
+        revocation::Phase::After,
+        REVOCATION_TWIN_LABEL,
+    )
+    .unwrap();
+    assert!(after.passed, "{:?}", after.failed_checks);
+    assert_eq!(after.outcome.reason.as_deref(), Some("unauthorized"));
+    assert_eq!(after.outcome.retriable, Some(false));
+    assert_eq!(after.provider_calls, 1);
+    assert_eq!(server.requests().len() - served_before, 1);
+    assert_eq!(server.requests().last().unwrap().1, 401);
+    assert_eq!(after.applied_proposals, 0);
+    assert!(after.capture_durable);
+    assert_eq!(after.forbidden_mutations.total(), 0);
+
+    // The job fails exactly as it does for a credential that was never valid.
+    let mut invalid_harness = Harness::new(revocation_twin_transport(&server), 30);
+    invalid_harness
+        .configure(&backend, Some(harness::INVALID_SCENARIO_CREDENTIAL))
+        .unwrap();
+    let ingested = invalid_harness.ingest(harness::CaptureSpec::plain(harness::PROVIDER_ONLY_TEXT));
+    let invalid = invalid_harness.run(&ingested, false);
+    assert_eq!(invalid.outcome, after.outcome);
+    assert_eq!(invalid.job_status, after.job_status);
+    assert_eq!(invalid.job_failure_reason, after.job_failure_reason);
+
+    let after_written = revocation::write_revocation_evidence(
+        &after,
+        &backend,
+        revocation::Phase::After,
+        &artifact_dir,
+        &private_dir,
+    );
+
+    for written in [&before_written, &after_written] {
+        for fragment in revocation::credential_forbidden_values(REVOCATION_TWIN_CREDENTIAL) {
+            assert!(!written.artifact_text.contains(&fragment));
+            assert!(!written.raw_text.contains(&fragment));
+        }
+    }
+    let artifacts: Vec<Value> = [&before_written, &after_written]
+        .iter()
+        .map(|written| serde_json::from_str(&written.artifact_text).unwrap())
+        .collect();
+    for (artifact, phase) in artifacts.iter().zip(["before", "after"]) {
+        assert_eq!(artifact["revocation"]["phase"], phase);
+        assert_eq!(artifact["revocation"]["label"], REVOCATION_TWIN_LABEL);
+        assert_eq!(artifact["backend"], backend.label());
+        assert!(artifact["build_revision"]["commit"].is_string());
+        assert!(artifact["collected_at"].is_string());
+        assert!(artifact["outcome"]["result"].is_string());
+    }
+    assert!(artifacts[0]["collected_at"].as_str() < artifacts[1]["collected_at"].as_str());
+}
+
+#[test]
+#[should_panic(expected = "no passing before artifact")]
+fn an_after_artifact_is_refused_without_a_before_artifact() {
+    let scratch = tempfile::tempdir().unwrap();
+    let private_dir = ensure_private_directory(&scratch.path().join("private"));
+    let backend = fixture_backends().remove(1);
+    let record = revocation::RevocationRecord {
+        phase: "after".to_string(),
+        label: REVOCATION_TWIN_LABEL.to_string(),
+        backend: backend.label(),
+        outcome: harness::Outcome {
+            result: "failed".to_string(),
+            route: None,
+            reason: Some("unauthorized".to_string()),
+            retriable: Some(false),
+        },
+        provider_calls: 1,
+        applied_proposals: 0,
+        capture_durable: true,
+        forbidden_mutations: Default::default(),
+        job_status: Some("failed".to_string()),
+        job_failure_reason: Some("unauthorized".to_string()),
+        failed_checks: Vec::new(),
+        passed: true,
+        exchanges: Vec::new(),
+    };
+    revocation::write_revocation_evidence(
+        &record,
+        &backend,
+        revocation::Phase::After,
+        &scratch.path().join("artifacts"),
+        &private_dir,
+    );
+}
+
+#[test]
+fn a_before_artifact_counts_only_for_its_label_and_backend_and_when_older_and_passing() {
+    let scratch = tempfile::tempdir().unwrap();
+    let write = |name: &str, label: &str, backend: &str, collected_at: &str, passed: bool| {
+        let artifact = json!({
+            "collected_at": collected_at,
+            "backend": backend,
+            "revocation": {"phase": "before", "label": label},
+            "scenario": {"passed": passed},
+        });
+        std::fs::write(scratch.path().join(name), artifact.to_string()).unwrap();
+    };
+    let after_time = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let find = |label: &str, backend: &str| {
+        revocation::find_before_artifact(scratch.path(), label, backend, after_time)
+    };
+    write(
+        "wrong-label.json",
+        "other",
+        "anthropic:m",
+        "2026-01-01T00:00:00.000Z",
+        true,
+    );
+    write(
+        "wrong-backend.json",
+        "key",
+        "openai:m",
+        "2026-01-01T00:00:00.000Z",
+        true,
+    );
+    write(
+        "newer.json",
+        "key",
+        "anthropic:m",
+        "2026-01-03T00:00:00.000Z",
+        true,
+    );
+    write(
+        "failed.json",
+        "key",
+        "anthropic:m",
+        "2026-01-01T00:00:00.000Z",
+        false,
+    );
+    assert!(find("key", "anthropic:m").is_err());
+    write(
+        "good.json",
+        "key",
+        "anthropic:m",
+        "2026-01-01T12:00:00.000Z",
+        true,
+    );
+    assert!(find("key", "anthropic:m").is_ok());
+}
+
+#[test]
+fn revocation_configuration_is_skipped_when_unset_and_strict_when_partial() {
+    let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    };
+    assert!(revocation::RevocationConfig::from_lookup(&lookup(&[]))
+        .unwrap()
+        .is_none());
+    let full: &'static [(&str, &str)] = &[
+        (
+            "OHAND_LIVE_REVOCATION_CREDENTIAL_ENV",
+            "anthropic=THROWAWAY",
+        ),
+        ("OHAND_LIVE_REVOCATION_PHASE", "after"),
+        ("OHAND_LIVE_REVOCATION_LABEL", "my-key.1"),
+        ("OHAND_LIVE_PROFILES", "openai:o,anthropic:claude-x"),
+        ("THROWAWAY", " synthetic-value "),
+    ];
+    let config = revocation::RevocationConfig::from_lookup(&lookup(full))
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.phase, revocation::Phase::After);
+    assert_eq!(config.backend.label(), "anthropic:claude-x");
+    assert_eq!(config.backend.credential, "synthetic-value");
+    let partial: &'static [(&str, &str)] = &[("OHAND_LIVE_REVOCATION_PHASE", "before")];
+    assert!(revocation::RevocationConfig::from_lookup(&lookup(partial)).is_err());
+    let bad_phase: &'static [(&str, &str)] = &[
+        (
+            "OHAND_LIVE_REVOCATION_CREDENTIAL_ENV",
+            "anthropic=THROWAWAY",
+        ),
+        ("OHAND_LIVE_REVOCATION_PHASE", "during"),
+        ("OHAND_LIVE_REVOCATION_LABEL", "k"),
+    ];
+    assert!(revocation::RevocationConfig::from_lookup(&lookup(bad_phase)).is_err());
+}
+
+#[test]
+#[ignore = "needs network access and a throwaway hosted key; see revocation.rs"]
+fn live_revocation_phase() {
+    let lookup = |name: &str| std::env::var(name).ok();
+    let Some(config) = revocation::RevocationConfig::from_lookup(&lookup)
+        .unwrap_or_else(|reason| panic!("{reason}"))
+    else {
+        println!(
+            "skipped: set {}, {} and {} to run the revoked-key scenario",
+            revocation::CREDENTIAL_ENV_VAR,
+            revocation::PHASE_ENV_VAR,
+            revocation::LABEL_ENV_VAR
+        );
+        return;
+    };
+    let evidence_dir = repository_root().join(PathBuf::from(
+        std::env::var(EVIDENCE_DIR_ENV_VAR)
+            .unwrap_or_else(|_| panic!("{EVIDENCE_DIR_ENV_VAR} must name the evidence directory")),
+    ));
+    if config.phase == revocation::Phase::After {
+        revocation::find_before_artifact(
+            &evidence_dir,
+            &config.label,
+            &config.backend.label(),
+            chrono::Utc::now(),
+        )
+        .unwrap_or_else(|reason| panic!("{reason}"));
+    }
+    let private_dir = private_evidence_directory();
+    let mut harness = Harness::new(
+        CurlTransport::new(config.timeout_seconds, TestRouting::default()),
+        config.timeout_seconds,
+    );
+    let record = revocation::run_phase(&mut harness, &config.backend, config.phase, &config.label)
+        .unwrap_or_else(|reason| panic!("{reason}"));
+    let written = revocation::write_revocation_evidence(
+        &record,
+        &config.backend,
+        config.phase,
+        &evidence_dir,
+        &private_dir,
+    );
+    println!("wrote {}", written.artifact_path.display());
+    assert!(record.passed, "{:?}", record.failed_checks);
 }

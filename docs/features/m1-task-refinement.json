@@ -3942,8 +3942,7 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F37",
-        "F47",
-        "F50"
+        "F47"
       ],
       "source_pointers": [
         "ios/Services/Assembly/CompositionRoot.swift:441",
@@ -3961,7 +3960,8 @@
         "fixtures/intent/contrastive-fixtures.json",
         "core/tests/fixture_validation/",
         "core/tests/live_providers/",
-        "core/src/interpretation/apply/mod.rs"
+        "core/src/interpretation/apply/mod.rs",
+        "docs/validation/intent-fixtures.md"
       ],
       "intent": "\"Remind me today to call the dentist at 10am\" is held for correction although the model proposes the right instant; add the split day-task-clock shape to the time grammar.",
       "acceptance": [
@@ -4003,8 +4003,7 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F37",
-        "F49",
-        "F50"
+        "F49"
       ],
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
@@ -4133,26 +4132,21 @@
       ]
     },
     {
-      "key": "F50",
+      "key": "E02b",
       "parent": null,
-      "title": "Find and fix the product races behind two intermittent test failures",
+      "title": "Exercise a genuinely revoked hosted key in the live harness",
       "file_scope": [
-        "ios/Services/Reset/",
-        "ios/Services/Assembly/CompositionRoot.swift",
-        "ios/Services/JobRunner/",
-        "core/src/lifecycle/reset/",
-        "ios/Tests/RaceRegressions/"
+        "core/tests/live_providers/"
       ],
-      "intent": "A capture held at an interrupted reset's boundary was never saved after start, and a deferred job type's capability-unavailable count flakes; reproduce by iteration, fix in product code, add deterministic regression tests.",
+      "intent": "E02 criterion 2 needs a key that was valid and then revoked at the provider; add a two-phase before/after scenario run by the maintainer with a throwaway key.",
       "acceptance": [
-        "See the F50 section of m1-task-refinement.md."
+        "See the E02b section of m1-task-refinement.md."
       ],
       "covers_parent_criteria": [],
       "depends_on": [],
       "source_pointers": [
-        "ios/Tests/Services/CompositionRootTests.swift:1666",
-        "ios/Tests/JobRunner/JobRunnerBoundaryTests.swift:383",
-        "ios/Services/Assembly/CompositionRoot.swift"
+        "core/tests/live_providers/harness.rs:866",
+        "core/tests/live_providers/harness.rs:977"
       ]
     }
   ],
@@ -4389,6 +4383,7 @@
     "E02": [
       "E01",
       "E02a",
+      "E02b",
       "F21",
       "I06",
       "V06",
@@ -4948,16 +4943,14 @@
     ],
     "F45": [
       "F37",
-      "F47",
-      "F50"
+      "F47"
     ],
     "F46": [
       "F29"
     ],
     "F47": [
       "F37",
-      "F49",
-      "F50"
+      "F49"
     ],
     "T10a": [
       "F45",
@@ -4973,7 +4966,7 @@
       "F44"
     ],
     "F49": [],
-    "F50": []
+    "E02b": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5203,6 +5196,14 @@
     {
       "date": "2026-10-24",
       "change": "Added F49 (hosted-runner simulator starvation: at most one first boot per device type per job) and F50 (product races behind the CompositionRoot reset-boundary and JobRunner deferred-job test failures). F47 now depends on F37, F49 and F50 (its stale F42 edge removed); F45 also waits for F50 (CompositionRoot.swift); U10a also waits for F49 (ios.yml)."
+    },
+    {
+      "date": "2026-10-24",
+      "change": "F46 also owns docs/validation/intent-fixtures.md for its two fixture rows. F50 retired: no product race reproduced in 250 iterations; the reproduced teardown liveResultBufferCount check in CompositionRootTests goes to F47 (amendment 2). F47 depends on F37 and F49; F45 on F37 and F47."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added E02b: a two-phase revoked-hosted-key scenario in the live harness (E02 criterion 2). E02 now depends on E02b."
     }
   ]
 }

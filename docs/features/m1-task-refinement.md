@@ -8,6 +8,8 @@ Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable ac
 
 Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity, metrics build field, the signing wrapper and an automated simulator upgrade check) and T10b (the maintainer's signed candidate and device upgrade). The original task `ddc1fc6c` blocked on the device criteria after three rejected rounds and is retired. T05 now depends on T10b. U10a now also depends on T10a, because both edit `ios/project.yml`.
 
+Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
+
 Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
 
 ## Execution authority
@@ -3778,6 +3780,8 @@ Acceptance:
 
 **Ownership amendment (coordinator, 2026-10-24, after the first claim blocked).** The worker was right. `record_reminder` and `candidate_agreement` (`core/src/interpretation/apply/mod.rs`) resolve only the quoted span. With the clock-only span form, the resolver sees "at 3 p.m." with no day, so it never sees Friday, and the model's correct instant is rejected. F46 now also owns `core/src/interpretation/apply/mod.rs`, only for this seam. When the span sits inside a covered split-shape sentence, resolve the combined day-and-clock phrase from `core/src/time/` instead of the span text. Use that same phrase for the agreement check and for `apply_derived_request`. Every other path through `record_reminder` is unchanged. F29, the last task that owned `apply/`, has landed.
 
+**Second ownership amendment (coordinator, 2026-10-24).** F46 also owns `docs/validation/intent-fixtures.md`, only to add the rows for `split-day-task-clock` and `split-clock-task-day`. `core/tests/fixture_validation/main.rs` fails when a contrastive fixture is missing from that document. The round-3 review's only blocking finding was this gap.
+
 ### F47
 
 Make the iOS test suite deterministic: fix the intermittent failures
@@ -3844,6 +3848,8 @@ Amendment (2026-10-24): F47 blocked with its test fixes done. Its three-run evid
 - `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased` failed its 30 s condition wait on an unloaded host. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` is still undiagnosed. F50 owns both.
 
 F47 now depends on F37, F49 and F50. After both land, rebase onto main and collect acceptance 5 as written. Its criteria are unchanged.
+
+Amendment 2 (2026-10-24, later): F50 is retired. Neither named failure reproduced in 250 iterations each (run 40074375705), and a read-through found no product interleaving that leaves the reset gate held. The only reproduced failure was test-side, at `CompositionRootTests.swift:240`: `tearDownWithError` checks the process-wide `CoreHandle.liveResultBufferCount` against its baseline without waiting for quiescence. The resumed reset in the two reset tests finishes on a background task after the assertion, so the next test's baseline can start at 1. It failed in 2 and 8 of 250 iterations. F47 owns that file and fixes it under acceptance 2 (state shared between tests): poll the live buffer and handle counts back to the baseline with a deadline in tearDown, as `AppServicesTests.swift:77` and `:530` already do, and settle setUp's baseline the same way. The assertion stays. If a named reset or JobRunner test fails during the acceptance-5 runs, report it with its log, as acceptance 5 already requires. F47 now depends on F37 and F49 only.
 
 ### T10a
 
@@ -4025,7 +4031,40 @@ Acceptance:
 5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, triggered as full reruns, with no readiness-gate failure in any of them. Link all three. Any failure is reported with its job, step and host snapshot.
 6. `make check` passes, including `ios-check`.
 
+#### F49 amendment (2026-10-25): move the simulator jobs to the free Intel runner
+
+Round 1 has five full reruns of PR #363 at f4b2c1c: pass, fail, fail, pass, fail. Clones booted as slowly as cold boots, 180–200 s. The failures happened after the readiness gate had passed, in `HomeRecentsModelTests`, `RestartAndDeletionFailureJourneyTests`, `AppServicesTests` and the walkthrough's `home.search` hittability, with free memory near 100 MB. So 7 GB cannot hold a booted simulator plus the test host, however the boots are arranged. The maintainer declined paid runners and a dedicated Mac on 2026-10-25.
+
+`macos-26-intel` is a **standard** GitHub-hosted runner, free for public repositories, with 4 Intel cores and 14 GB RAM: twice the memory of `macos-26`, at no cost. Its image carries Xcode 26.6 (the default) and the iOS 26.5 simulator runtime (runner-images `images/macos/macos-26-Readme.md`). Because it is a standard runner, the sentence above about paid runners does not forbid it. `core/bindings/build-ios.sh` already maps `iphonesimulator:x86_64` to `x86_64-apple-ios` and installs that target, so the Rust core needs no change.
+
+Changes to the approach:
+1. **Runner.**
+   - Run every job that boots a simulator on `macos-26-intel`: `simulator` and both walkthrough jobs.
+   - `tauri-probe` may stay on `macos-26`; say which in the PR.
+   - Anywhere the workflow names the Rust simulator target (`rustup target add aarch64-apple-ios-sim`), it must match the runner's architecture.
+2. **Build before the first boot.**
+   - Each job builds everything first: `xcodebuild build-for-testing` for its test schemes and the probe builds. Then it boots its simulator and runs `xcodebuild test-without-building` against the same `-derivedDataPath`.
+   - The compiler and the simulator must never run at the same time.
+   - Test results, logs and screenshots keep the file names that AGENTS.md lists.
+3. **Settling fails closed.**
+   - `wait_for_host_to_settle` must not just log a warning and continue.
+   - If the host has not settled within its bound, the step fails and prints the host snapshot.
+   - The bound and the thresholds are stated in the script and in the PR.
+4. **Clones only if they help.** Keep cloning only if the measurements show it does. If it doesn't, remove it.
+
+Acceptance changes:
+- Acceptance 1 also reports, for both `macos-26` and `macos-26-intel`, the time to responsive and the peak load and lowest free memory after boot, for the same job, each with a run link.
+- Acceptance 5 is unchanged: three consecutive full reruns, all successful, at the exact head.
+  - F47's test fixes are not merged and are not needed for this.
+  - If a failure on `macos-26-intel` comes from a test rather than the host, cite the test, the run and the host snapshot, then block. That failure belongs to F47. Do not edit tests.
+- AGENTS.md's "Required checks for macOS workers" section names the new runner, and `ios/scripts/test_check_project_config.py` fixtures may follow it.
+- Record in that section that the Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel. The Xcode 27 bump must come back to the 7 GB arm64 runner, or wait for one that is larger and free.
+
+Owned paths gain `ios/scripts/check_project_config.py` and `ios/scripts/test_check_project_config.py`, only where they name the runner label.
+
 ### F50
+
+**Retired 2026-10-24.** The diagnosis found no product race; see F47 amendment 2. This section is kept as an audit record.
 
 Find and fix the product races behind two intermittent test failures
 
@@ -4066,3 +4105,44 @@ Acceptance:
    - Existing reset, deletion and job-runner tests pass unchanged.
 4. **Iterations.** After the fix, each of the two named tests passes 200 iterations on the hosted runner, using the same temporary-workflow rule.
 5. `make check` and `make test` pass, plus the exact-head macOS CI evidence that AGENTS.md requires.
+
+### E02b
+
+Exercise a genuinely revoked hosted key in the live harness
+
+Found by E02's Sonnet attempt on 2026-10-24. E02's criterion 2 asks for revoked-credential behavior. The live harness (`core/tests/live_providers/harness.rs:866`, `:977`) only shows two things:
+- a made-up key that was never valid (`INVALID_SCENARIO_CREDENTIAL`);
+- the app retiring a profile version (`revoked_profile_version`), which never reaches the provider.
+
+Neither shows what happens when a key that worked is revoked at the provider.
+
+Add a two-phase scenario the maintainer runs with a throwaway Anthropic key:
+- `before`, while the key is valid;
+- `after`, once the maintainer has revoked it in the provider console.
+
+Owned paths: `core/tests/live_providers/` only.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Configuration.** `OHAND_LIVE_REVOCATION_CREDENTIAL_ENV` names the environment variable that holds the throwaway key, in the existing `provider=ENV` form. `OHAND_LIVE_REVOCATION_PHASE` is `before` or `after`. `OHAND_LIVE_REVOCATION_LABEL` is a label the maintainer chooses, for example the key's name in the console, and it links the two phases. When these are unset, the scenario is skipped and says so.
+2. **The `before` phase** runs one synthetic fixture through the production path with that key. The call must apply or abstain, which shows the key worked.
+3. **The `after` phase** runs the same fixture with the same key and requires all of these:
+   - `unauthorized`, not retriable;
+   - one provider call, with no retry;
+   - the capture is still durable and its raw source unchanged;
+   - zero applied proposals and zero forbidden mutations;
+   - the job's failure is visible in the same way as for an invalid credential.
+4. **Evidence.** Each phase writes a sanitized artifact in the existing format. It carries:
+   - the phase;
+   - the label;
+   - the build revision;
+   - the collection time;
+   - the backend;
+   - the outcome.
+
+   It never carries the key, any part of it, or any hash of it. The `after` artifact is accepted only when a `before` artifact with the same label and backend exists and is older.
+5. **Networkless twin.** A test using the existing fake server accepts the key once, then returns the provider's 401 authentication error for it. The test checks the `before` and `after` assertions, and the leak check over both artifacts.
+6. `make check` and `make test` pass.
+

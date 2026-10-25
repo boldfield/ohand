@@ -45,7 +45,7 @@ use crate::reminders::state::{
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
 use crate::time::resolver::{TimeContext, TimeResolver};
-use crate::time::{is_temporal_word, span_covers_time_expression};
+use crate::time::{is_temporal_word, span_covers_time_expression, split_shape_phrase};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
@@ -904,10 +904,17 @@ impl Clock for FixedClock {
     }
 }
 
+/// The phrase the candidate's span resolves as: the text it quotes, or, when it sits inside a
+/// covered split-shape sentence ("Remind me today to call the dentist at 10am"), the stretch from
+/// the day to the clock ("today to call the dentist at 10am"), since the quoted text alone lacks
+/// the other part. The resolver reads that stretch as one day and clock.
 fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
     candidate
         .source_span
         .map(|span| {
+            if let Some(combined) = split_shape_phrase(basis_text, span.start, span.end) {
+                return combined;
+            }
             basis_text
                 .chars()
                 .skip(span.start)
