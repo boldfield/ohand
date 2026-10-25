@@ -18,7 +18,10 @@ jobs:
     # macos-26-intel is a standard free runner with 14 GB (macos-26 has 7 GB, too little for a booted simulator plus the
     # test host). The Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel.
     runs-on: macos-26-intel
-    timeout-minutes: 60
+    # Run 40201105544 (head 6d7d6d7) was cancelled at 60 minutes with no test failing: the host reached load average 637
+    # (cold boot 322 s, free memory 92 MB), the settle step took 14 minutes and OhAndTests 22 minutes, where an earlier
+    # run of the same layout finished in 38 minutes. 90 leaves room for that slowdown; a hung step still ends the job.
+    timeout-minutes: 90
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
