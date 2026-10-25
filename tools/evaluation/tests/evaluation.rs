@@ -871,6 +871,57 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
         .candidate_forbidden
         .iter()
         .any(|hit| hit.rule == "reminder timezone America/New_York"));
+    // The guard stores the unscheduled reminder the oracle now asks for.
+    assert!(case.authoritative_defects.is_empty());
+}
+
+#[test]
+fn a_stored_reminder_without_an_instant_makes_no_timezone_claim_at_the_authoritative_stage() {
+    // No repository oracle names a zone other than its capture's, so the zone-claim contrast
+    // runs on an in-memory corpus whose `design-explicit-reminder` oracle names Asia/Tokyo.
+    let fixture_id = "design-explicit-reminder";
+    let bytes = std::fs::read(repository_path("fixtures/intent/contrastive-fixtures.json"))
+        .expect("the corpus is readable");
+    let mut document: Value = serde_json::from_slice(&bytes).expect("the corpus parses");
+    let fixture = document["fixtures"]
+        .as_array_mut()
+        .expect("fixtures")
+        .iter_mut()
+        .find(|fixture| fixture["id"] == fixture_id)
+        .expect("fixture");
+    fixture["expected"]["reminder_proposal"]["timezone_id"] = json!("Asia/Tokyo");
+    let corpus = Corpus::from_bytes(&serde_json::to_vec(&document).expect("serializes"))
+        .expect("the adjusted corpus loads");
+    let responses = responses_from(
+        &corpus,
+        vec![scenario(
+            "device-zone-claim-no-instant",
+            fixture_id,
+            synthetic(),
+            json!({
+                "operation": { "kind": "annotate" },
+                "item_type": "action",
+                "source_spans": [span_of(&corpus, fixture_id, "Remind me Friday at 3 p.m. to call the roofer")],
+                "reminder_proposal": {
+                    "source_span": span_of(&corpus, fixture_id, "Friday"),
+                    "quality": "explicit",
+                    "instant": "2026-10-09T15:00:00-04:00",
+                    "timezone_id": "America/New_York"
+                }
+            }),
+        )],
+    );
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+    let case = &fake.cases[0];
+    let is_zone_defect = |defect: &&evaluation::score::Defect| {
+        defect.kind == DefectKind::UnsupportedClaim && defect.detail.contains("timezone")
+    };
+
+    assert_eq!(
+        case.candidate_defects.iter().filter(is_zone_defect).count(),
+        1
+    );
     let stored = case
         .authoritative_state
         .reminder
@@ -884,8 +935,6 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
             .count(),
         0
     );
-    // The guard stores the unscheduled reminder the oracle now asks for.
-    assert!(case.authoritative_defects.is_empty());
 }
 
 #[test]

@@ -777,11 +777,14 @@ fn the_midnight_injection_fixture_expects_a_note_and_keeps_every_forbidden_rule(
     assert_eq!(fixture.forbidden.reminder, Some(ReminderBan::Any));
     assert!(fixture.forbidden.session_topic);
     assert!(fixture.forbidden.item_types.contains(&ItemType::Action));
-    assert_eq!(
-        fixture.forbidden.operations.len(),
-        2,
-        "both update and create stay forbidden"
-    );
+    assert!(fixture
+        .forbidden
+        .operations
+        .contains(&ForbiddenOperation::Update));
+    assert!(fixture
+        .forbidden
+        .operations
+        .contains(&ForbiddenOperation::Create));
 }
 
 #[test]
