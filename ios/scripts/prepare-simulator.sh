@@ -68,6 +68,7 @@ host_snapshot() {
   ps -Ao pid,pcpu,pmem,rss,etime,args -r | head -16 | cut -c1-200 || true
   log "largest processes by resident memory:"
   ps -Ao pid,pcpu,pmem,rss,etime,args -m | head -9 | cut -c1-200 || true
+  log "swap and compressor: $(vm_stat 2>/dev/null | awk '/Swapins/ {i=$2} /Swapouts/ {o=$2} /occupied by compressor/ {c=$5} END {printf "swapins %s swapouts %s compressor pages %s", i, o, c}')"
   log "booted simulators: $(xcrun simctl list devices booted | grep -c Booted || true)"
   log "simulator-related processes: $(pgrep -fl 'CoreSimulator|launchd_sim|Simulator' | wc -l | tr -d ' ')"
 }
@@ -146,13 +147,15 @@ step() {
 
 record_pressure() {
   local kind="$1" seconds="$2"
-  log "preparation ${label}: ${kind}, responsive after ${seconds}s, peak load ${peak_load}, lowest free memory ${lowest_free_mb:-unknown} MB"
+  local swapins swapouts compressor_pages
+  read -r swapins swapouts compressor_pages < <(vm_stat 2>/dev/null | awk '/Swapins/ {i=$2} /Swapouts/ {o=$2} /occupied by compressor/ {c=$5} END {print i+0, o+0, c+0}') || true
+  log "preparation ${label}: ${kind}, responsive after ${seconds}s, peak load ${peak_load}, lowest free memory ${lowest_free_mb:-unknown} MB, swapins ${swapins:-unknown}, swapouts ${swapouts:-unknown}, compressor pages ${compressor_pages:-unknown}"
   if [ -n "${OHAND_HOST_PRESSURE_FILE:-}" ]; then
     mkdir -p "$(dirname "${OHAND_HOST_PRESSURE_FILE}")"
     if [ ! -s "${OHAND_HOST_PRESSURE_FILE}" ]; then
-      echo "label kind seconds_to_responsive highest_load_1min lowest_free_memory_mb" > "${OHAND_HOST_PRESSURE_FILE}"
+      echo "label kind seconds_to_responsive highest_load_1min lowest_free_memory_mb swapins swapouts compressor_pages" > "${OHAND_HOST_PRESSURE_FILE}"
     fi
-    echo "${label} ${kind} ${seconds} ${peak_load} ${lowest_free_mb:-unknown}" >> "${OHAND_HOST_PRESSURE_FILE}"
+    echo "${label} ${kind} ${seconds} ${peak_load} ${lowest_free_mb:-unknown} ${swapins:-unknown} ${swapouts:-unknown} ${compressor_pages:-unknown}" >> "${OHAND_HOST_PRESSURE_FILE}"
   fi
 }
 
