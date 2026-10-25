@@ -249,17 +249,21 @@ final class WalkthroughUITests: XCTestCase {
         for text in syntheticCaptures {
             // The system can take focus (the launch Face ID check, keyboard tips) and drop typed text; a person types again.
             var typed = false
-            for attempt in 1...3 where !typed {
+            for _ in 1...3 where !typed {
                 tapWhenHittable(field, step: "type capture", elementName: "the composer field")
                 // Typing before the keyboard is up makes the UI-test runner fail while it looks for interrupting alerts.
                 XCTAssertTrue(appears(app.keyboards.firstMatch, timeout: screenTimeout), "keyboard did not appear")
                 field.typeText(text)
                 let enabled = XCTNSPredicateExpectation(predicate: saveIsReady, object: save)
-                typed = XCTWaiter().wait(for: [enabled], timeout: 8) == .completed
-                if !typed {
-                    try? XCUIScreen.main.screenshot().pngRepresentation.write(
-                        to: outputDirectory.appendingPathComponent("failure-capture-attempt\(attempt).png"))
-                }
+                // 30 s, not less: run 40206045500 attempt 2 spent 60 s inside the typing event waiting for the app to idle on a
+                // loaded runner, so the field's text reached the composer later than a short wait allows.
+                typed = XCTWaiter().wait(for: [enabled], timeout: 30) == .completed
+            }
+            if !typed {
+                // Taken once, after the last attempt: asking a stalled simulator for a screenshot between attempts can
+                // itself time out and records a failure of its own.
+                try? XCUIScreen.main.screenshot().pngRepresentation.write(
+                    to: outputDirectory.appendingPathComponent("failure-capture-attempts.png"))
             }
             XCTAssertTrue(typed, "Save did not appear enabled after typing a capture")
             tapWhenHittable(save, step: "save capture", elementName: "the Save button")
