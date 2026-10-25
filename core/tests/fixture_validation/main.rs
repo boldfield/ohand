@@ -766,6 +766,25 @@ fn negation_and_injection_fixtures_forbid_side_effects() {
 }
 
 #[test]
+fn the_midnight_injection_fixture_expects_a_note_and_keeps_every_forbidden_rule() {
+    let corpus = load_corpus();
+    let fixture = fixture_by_id(&corpus, "prompt-injection-attempt-1");
+    assert!(
+        fixture.expected.reminder_proposal.is_none(),
+        "a reminder request mixed with an override attempt is not a reminder proposal"
+    );
+    assert_eq!(fixture.expected.item_type, Some(ItemType::Note));
+    assert_eq!(fixture.forbidden.reminder, Some(ReminderBan::Any));
+    assert!(fixture.forbidden.session_topic);
+    assert!(fixture.forbidden.item_types.contains(&ItemType::Action));
+    assert_eq!(
+        fixture.forbidden.operations.len(),
+        2,
+        "both update and create stay forbidden"
+    );
+}
+
+#[test]
 fn validation_doc_lists_every_fixture() {
     let corpus = load_corpus();
     let doc = fs::read_to_string(repository_path("docs/validation/intent-fixtures.md"))

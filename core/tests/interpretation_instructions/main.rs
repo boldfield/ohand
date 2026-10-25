@@ -29,7 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const PINNED_VERSION: &str = "0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671";
+const PINNED_VERSION: &str = "798036ed8db89475886471020bf1db1a45d9a15da10be6a73d12aa1fa80e520e";
 const PROPOSAL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
 const ITEM_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
 const CAPTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440003";
@@ -439,6 +439,22 @@ fn assert_matches_fixture(fixture: &Value, request: &InterpretationRequest, prop
 }
 
 // ---- versioning and contract ----
+
+#[test]
+fn instructions_state_the_f52_boundaries() {
+    for required in [
+        "named recurring session or appointment",
+        "reports on or summarizes a meeting",
+        "is not a reminder request",
+        "repeating reminder",
+        "bare statement of fact, opinion or value",
+    ] {
+        assert!(
+            M1_INSTRUCTION_TEXT.contains(required),
+            "instructions lost: {required}"
+        );
+    }
+}
 
 #[test]
 fn instruction_version_is_pinned_to_a_literal_digest_of_the_text() {

@@ -516,9 +516,7 @@
             }
           ],
           "reminder_proposal": {
-            "timezone_id": "Asia/Tokyo",
-            "quality": "explicit",
-            "instant": "2026-10-09T09:00:00+09:00",
+            "quality": "ambiguous",
             "source_span": {
               "start": 10,
               "end": 39
@@ -721,7 +719,7 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "item_type": "idea",
+          "item_type": "note",
           "source_spans": [
             {
               "start": 0,

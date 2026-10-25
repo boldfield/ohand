@@ -856,10 +856,21 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
         defect.kind == DefectKind::UnsupportedClaim && defect.detail.contains("timezone")
     };
 
+    // The oracle is now an unscheduled `ambiguous` reminder with no zone (M1 cannot schedule
+    // a non-device zone), so a device-zone claim is caught by the kept forbidden zone rule and
+    // as an instant where the oracle has none, not as a zone mismatch.
     assert_eq!(
         case.candidate_defects.iter().filter(is_zone_defect).count(),
-        1
+        0
     );
+    assert!(case
+        .candidate_defects
+        .iter()
+        .any(|defect| defect.kind == DefectKind::FalseDeadline));
+    assert!(case
+        .candidate_forbidden
+        .iter()
+        .any(|hit| hit.rule == "reminder timezone America/New_York"));
     let stored = case
         .authoritative_state
         .reminder
@@ -873,10 +884,49 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
             .count(),
         0
     );
-    assert!(case
-        .authoritative_defects
-        .iter()
-        .any(|defect| defect.kind == DefectKind::MissedIntent));
+    // The guard stores the unscheduled reminder the oracle now asks for.
+    assert!(case.authoritative_defects.is_empty());
+}
+
+#[test]
+fn the_f52_fixtures_recorded_conforming_responses_match_their_oracles_through_the_guard() {
+    let corpus = corpus();
+    let responses = repository_responses(&corpus);
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+
+    for fixture_id in [
+        "timezone-conflicting",
+        "very-long-transcript",
+        "abstract-broad-thought",
+        "prompt-injection-attempt-1",
+    ] {
+        let case = fake
+            .cases
+            .iter()
+            .find(|case| case.case_id == format!("conforming/{fixture_id}"))
+            .unwrap_or_else(|| panic!("{fixture_id} runs as a conforming scenario"));
+        assert!(
+            case.candidate_defects.is_empty(),
+            "{fixture_id} candidate defects: {:?}",
+            case.candidate_defects
+        );
+        assert!(
+            case.authoritative_defects.is_empty(),
+            "{fixture_id} durable defects: {:?}",
+            case.authoritative_defects
+        );
+        assert!(case.candidate_forbidden.is_empty(), "{fixture_id}");
+        assert!(case.authoritative_forbidden.is_empty(), "{fixture_id}");
+        if fixture_id == "timezone-conflicting" {
+            let stored = case
+                .authoritative_state
+                .reminder
+                .as_ref()
+                .expect("the ambiguous reminder is kept as not scheduled");
+            assert!(stored.resolved_instant.is_none());
+        }
+    }
 }
 
 #[test]
