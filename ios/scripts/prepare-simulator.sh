@@ -20,12 +20,14 @@ responsive_probe_limit_seconds=3
 responsive_probes_required=10
 responsive_timeout_seconds=480
 probe_hard_limit_seconds=10
-# After the readiness gate passes, a first or cloned boot keeps the runner saturated with first-boot daemons for minutes,
-# which starves the next UI query or screenshot. Wait until the host has been at least 25% idle on 3 samples in a row (2 s
-# apart); if that does not happen within 480 s the preparation fails with a host snapshot, so no UI test starts on a starved host.
+# After the readiness gate passes, a first or cloned boot keeps the runner busy with first-boot work. CPU idle cannot be the
+# signal on a hosted runner: run 40165860852 on macos-26-intel stayed at 0% idle for 8 minutes with a fully responsive
+# warm-booted simulator (one simulator process held ~200% CPU), so an idle threshold was never met by a healthy device.
+# The settle step therefore asks the question UI tests care about, stricter than the readiness gate: the simulator must
+# answer 30 probes in a row, each within 3 s (the gate needs 10). If that does not happen within 480 s the preparation
+# fails with a host snapshot, so no UI test starts on a starved host. CPU idle is still logged for diagnosis.
+settle_probes_required=30
 settle_timeout_seconds=480
-settle_idle_percent_required=25
-settle_samples_required=3
 
 udid=""
 erase=0
@@ -100,12 +102,15 @@ probe_simulator() {
   echo "${finished} ${started}" | awk '{printf "%.2f", $1 - $2}'
 }
 
+# Waits for <required> probes in a row within the probe limit, for at most <timeout> seconds.
 wait_for_simulator_to_respond() {
+  local required="${1:-${responsive_probes_required}}"
+  local timeout="${2:-${responsive_timeout_seconds}}"
   local started=${SECONDS}
   local consecutive=0
   local elapsed
   local probe_count=0
-  while [ $((SECONDS - started)) -lt "${responsive_timeout_seconds}" ]; do
+  while [ $((SECONDS - started)) -lt "${timeout}" ]; do
     probe_count=$((probe_count + 1))
     sample_pressure
     if elapsed="$(probe_simulator)" && awk -v e="${elapsed}" -v l="${responsive_probe_limit_seconds}" 'BEGIN { exit !(e <= l) }'; then
@@ -113,38 +118,22 @@ wait_for_simulator_to_respond() {
     else
       consecutive=0
     fi
-    log "probe ${probe_count}: ${elapsed:-failed}s (need ${responsive_probes_required} in a row within ${responsive_probe_limit_seconds}s, ${consecutive} so far)"
-    if [ "${consecutive}" -ge "${responsive_probes_required}" ]; then
+    log "probe ${probe_count}: ${elapsed:-failed}s (need ${required} in a row within ${responsive_probe_limit_seconds}s, ${consecutive} so far)"
+    if [ "${consecutive}" -ge "${required}" ]; then
       log "simulator responsive after $((SECONDS - started))s"
       return 0
     fi
     sleep 1
   done
-  log "ERROR: simulator did not answer ${responsive_probes_required} probes in a row within ${responsive_probe_limit_seconds}s inside ${responsive_timeout_seconds}s"
+  log "ERROR: simulator did not answer ${required} probes in a row within ${responsive_probe_limit_seconds}s inside ${timeout}s"
   return 1
 }
 
 wait_for_host_to_settle() {
-  local started=${SECONDS}
-  local quiet=0
   local idle
-  while [ $((SECONDS - started)) -lt "${settle_timeout_seconds}" ]; do
-    sample_pressure
-    idle="$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
-    if [ -n "${idle}" ] && awk -v i="${idle}" -v m="${settle_idle_percent_required}" 'BEGIN { exit !(i >= m) }'; then
-      quiet=$((quiet + 1))
-    else
-      quiet=0
-    fi
-    log "settle: ${idle:-unknown}% idle (need ${settle_samples_required} samples in a row at ${settle_idle_percent_required}% or more, ${quiet} so far)"
-    if [ "${quiet}" -ge "${settle_samples_required}" ]; then
-      log "host settled after $((SECONDS - started))s"
-      return 0
-    fi
-    sleep 2
-  done
-  log "ERROR: host did not settle (${settle_samples_required} samples in a row at ${settle_idle_percent_required}% idle or more) within ${settle_timeout_seconds}s"
-  return 1
+  idle="$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
+  log "settle: waiting for ${settle_probes_required} probes in a row (CPU ${idle:-unknown}% idle, diagnostic only)"
+  wait_for_simulator_to_respond "${settle_probes_required}" "${settle_timeout_seconds}"
 }
 
 step() {
