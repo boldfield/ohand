@@ -4031,6 +4031,37 @@ Acceptance:
 5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, triggered as full reruns, with no readiness-gate failure in any of them. Link all three. Any failure is reported with its job, step and host snapshot.
 6. `make check` passes, including `ios-check`.
 
+#### F49 amendment (2026-10-25): move the simulator jobs to the free Intel runner
+
+Round 1 has five full reruns of PR #363 at f4b2c1c: pass, fail, fail, pass, fail. Clones booted as slowly as cold boots, 180–200 s. The failures happened after the readiness gate had passed, in `HomeRecentsModelTests`, `RestartAndDeletionFailureJourneyTests`, `AppServicesTests` and the walkthrough's `home.search` hittability, with free memory near 100 MB. So 7 GB cannot hold a booted simulator plus the test host, however the boots are arranged. The maintainer declined paid runners and a dedicated Mac on 2026-10-25.
+
+`macos-26-intel` is a **standard** GitHub-hosted runner, free for public repositories, with 4 Intel cores and 14 GB RAM: twice the memory of `macos-26`, at no cost. Its image carries Xcode 26.6 (the default) and the iOS 26.5 simulator runtime (runner-images `images/macos/macos-26-Readme.md`). Because it is a standard runner, the sentence above about paid runners does not forbid it. `core/bindings/build-ios.sh` already maps `iphonesimulator:x86_64` to `x86_64-apple-ios` and installs that target, so the Rust core needs no change.
+
+Changes to the approach:
+1. **Runner.**
+   - Run every job that boots a simulator on `macos-26-intel`: `simulator` and both walkthrough jobs.
+   - `tauri-probe` may stay on `macos-26`; say which in the PR.
+   - Anywhere the workflow names the Rust simulator target (`rustup target add aarch64-apple-ios-sim`), it must match the runner's architecture.
+2. **Build before the first boot.**
+   - Each job builds everything first: `xcodebuild build-for-testing` for its test schemes and the probe builds. Then it boots its simulator and runs `xcodebuild test-without-building` against the same `-derivedDataPath`.
+   - The compiler and the simulator must never run at the same time.
+   - Test results, logs and screenshots keep the file names that AGENTS.md lists.
+3. **Settling fails closed.**
+   - `wait_for_host_to_settle` must not just log a warning and continue.
+   - If the host has not settled within its bound, the step fails and prints the host snapshot.
+   - The bound and the thresholds are stated in the script and in the PR.
+4. **Clones only if they help.** Keep cloning only if the measurements show it does. If it doesn't, remove it.
+
+Acceptance changes:
+- Acceptance 1 also reports, for both `macos-26` and `macos-26-intel`, the time to responsive and the peak load and lowest free memory after boot, for the same job, each with a run link.
+- Acceptance 5 is unchanged: three consecutive full reruns, all successful, at the exact head.
+  - F47's test fixes are not merged and are not needed for this.
+  - If a failure on `macos-26-intel` comes from a test rather than the host, cite the test, the run and the host snapshot, then block. That failure belongs to F47. Do not edit tests.
+- AGENTS.md's "Required checks for macOS workers" section names the new runner, and `ios/scripts/test_check_project_config.py` fixtures may follow it.
+- Record in that section that the Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel. The Xcode 27 bump must come back to the 7 GB arm64 runner, or wait for one that is larger and free.
+
+Owned paths gain `ios/scripts/check_project_config.py` and `ios/scripts/test_check_project_config.py`, only where they name the runner label.
+
 ### F50
 
 **Retired 2026-10-24.** The diagnosis found no product race; see F47 amendment 2. This section is kept as an audit record.
