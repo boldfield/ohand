@@ -15,7 +15,9 @@ concurrency:
 jobs:
   simulator:
     name: Simulator build, unit tests and launch smoke test
-    runs-on: macos-26
+    # macos-26-intel is a standard free runner with 14 GB (macos-26 has 7 GB, too little for a booted simulator plus the
+    # test host). The Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel.
+    runs-on: macos-26-intel
     timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
@@ -62,7 +64,7 @@ jobs:
       - name: Generate Xcode project
         run: cd ios && ./scripts/generate.sh
 
-      # Compile before any simulator is booted: a freshly booted device keeps the 3-core runner saturated, and a compile on
+      # Compile before any simulator is booted: a freshly booted device keeps the runner saturated, and a compile on
       # top of that starves the tests that follow.
       - name: Build OhAndTests (no simulator booted yet)
         shell: bash
@@ -79,6 +81,81 @@ jobs:
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath .derived \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests-build.log
+
+      # Everything is compiled here, before the first simulator boot: the compiler and a booted simulator never run together.
+      - name: Build NotificationProbe UI tests (no simulator booted yet)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme NotificationProbeUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/NotificationProbeUITests-build.log
+
+      - name: Build CaptureProbe UI tests (no simulator booted yet)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme CaptureProbeUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/CaptureProbeUITests-build.log
+
+      - name: Build BridgeProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh BridgeProbe 2>&1 | tee .evidence/BridgeProbe-build.log
+
+      - name: Build CredentialProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
+
+      - name: Build OhAndApp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
+
+      - name: Build CaptureProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
+
+      - name: Build AudioProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
+
+      - name: Build TranscriptionProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
 
       # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
       # that the NotificationProbe suites clone again, so none of them pays for a first boot.
@@ -106,7 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          xcodebuild test \
+          xcodebuild test-without-building \
             -project OhAnd.xcodeproj \
             -scheme OhAndTests \
             -configuration Debug \
@@ -141,7 +218,7 @@ jobs:
             suite_udid="$(cat .evidence/suite-udid.txt)"
             rm -rf "${evidence_dir}/${suite}.xcresult"
             suite_status=0
-            xcodebuild test \
+            xcodebuild test-without-building \
               -project OhAnd.xcodeproj \
               -scheme NotificationProbeUITests \
               -configuration Debug \
@@ -159,20 +236,6 @@ jobs:
             xcrun simctl delete "${suite_udid}" || true
           done
           exit "${overall_status}"
-
-      - name: Build BridgeProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh BridgeProbe 2>&1 | tee .evidence/BridgeProbe-build.log
-
-      - name: Build CredentialProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
 
       - name: Run CredentialProbe Keychain self-test
         shell: bash
@@ -220,13 +283,6 @@ jobs:
             .evidence \
             "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
 
-      - name: Build OhAndApp
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
-
       - name: Launch OhAndApp smoke test
         shell: bash
         env:
@@ -265,27 +321,6 @@ jobs:
               exit 1
             fi
           } 2>&1 | tee .evidence/OhAndApp-bundle.txt
-
-      - name: Build CaptureProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
-
-      - name: Build AudioProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
-
-      - name: Build TranscriptionProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
 
       - name: Launch TranscriptionProbe smoke test
         shell: bash
@@ -337,12 +372,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # One job per width: each erased device's first boot saturates the 3-core runner for minutes, and a second one in the
-  # same job is the one that fails. Two jobs cost one more concurrent macOS job; cloning cannot help because an iPhone
-  # and an iPad are different device types.
+  # One job per width: an iPhone and an iPad are different device types, so each pays its own first boot, and two jobs
+  # cost one more concurrent macOS job. Both run on macos-26-intel (14 GB).
   walkthrough:
     name: Screenshot walkthrough (${{ matrix.width }} width)
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -389,7 +423,7 @@ jobs:
         if: steps.simulator.outputs.udid != ''
         run: cd ios && ./scripts/generate.sh
 
-      # Compile before the simulator is booted: a freshly booted device keeps the 3-core runner saturated, and the
+      # Compile before the simulator is booted: a freshly booted device keeps the runner saturated, and the
       # walkthrough's own xcodebuild would otherwise compile on top of that and starve its UI queries.
       - name: Build walkthrough UI tests (no simulator booted yet)
         if: steps.simulator.outputs.udid != ''

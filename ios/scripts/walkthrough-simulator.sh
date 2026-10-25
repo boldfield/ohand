@@ -2,6 +2,7 @@
 # Runs the screenshot walkthrough (OhAndWalkthroughUITests) on one simulator and checks that every expected screen
 # produced a PNG. Face ID is enrolled on the simulator and matching faces are sent while the test runs; the app's own
 # authentication is untouched. A screen the test cannot reach fails the test, and a missing PNG fails this script.
+# The UI tests must already be built (build-for-testing into .derived/Walkthrough) so no compile runs beside a booted simulator.
 # Usage: walkthrough-simulator.sh <simulator-udid> <evidence-dir> <label>
 # Output: <evidence-dir>/walkthrough/<label>/*.png, <label>.log, <label>-<appearance>.xcresult, screenshots-<label>.txt. macOS only.
 set -euo pipefail
@@ -47,7 +48,7 @@ for appearance in light dark; do
   run_status=0
   (
     cd "${ios_dir}"
-    TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test \
+    TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test-without-building \
       -project OhAnd.xcodeproj \
       -scheme OhAndWalkthroughUITests \
       -configuration Debug \

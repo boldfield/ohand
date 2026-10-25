@@ -41,7 +41,7 @@ xcrun simctl uninstall "${udid}" "${bundle_id}" 2>/dev/null || true
 
 echo "=== Running CaptureProbeUITests ==="
 rm -rf "${evidence_dir}/CaptureProbeUITests.xcresult"
-xcodebuild test \
+xcodebuild test-without-building \
   -project OhAnd.xcodeproj \
   -scheme CaptureProbeUITests \
   -configuration Debug \

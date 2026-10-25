@@ -2,7 +2,7 @@
 # Puts a simulator into a known state before a UI-test suite: shut down (which ends every leftover app), optionally
 # erase (which clears installed apps, permissions and recorded notification decisions), boot, wait until the boot has
 # finished, then wait (bounded; each probe is bounded too) until the simulator answers service calls promptly, failing the preparation if it never does. A freshly erased simulator keeps the
-# 3-core hosted runner at 0% idle for many minutes after bootstatus reports success (first-boot daemons, Spotlight
+# hosted runner at 0% idle for many minutes after bootstatus reports success (first-boot daemons, Spotlight
 # indexing), so CPU idle never becomes a usable signal; what UI tests actually see is launches and accessibility reads
 # that stall for seconds to a minute. The wait therefore polls the simulator itself and logs how long it took; the host
 # snapshots are diagnostics only. Output goes to stdout only. macOS with Xcode only.
@@ -21,7 +21,8 @@ responsive_probes_required=10
 responsive_timeout_seconds=480
 probe_hard_limit_seconds=10
 # After the readiness gate passes, a first or cloned boot keeps the runner saturated with first-boot daemons for minutes,
-# which starves the next UI query or screenshot. Wait (bounded, never failing) until the host has been mostly idle for a while.
+# which starves the next UI query or screenshot. Wait until the host has been at least 25% idle on 3 samples in a row (2 s
+# apart); if that does not happen within 480 s the preparation fails with a host snapshot, so no UI test starts on a starved host.
 settle_timeout_seconds=480
 settle_idle_percent_required=25
 settle_samples_required=3
@@ -142,8 +143,8 @@ wait_for_host_to_settle() {
     fi
     sleep 2
   done
-  log "WARNING: host still busy after ${settle_timeout_seconds}s; continuing (diagnostic only)"
-  return 0
+  log "ERROR: host did not settle (${settle_samples_required} samples in a row at ${settle_idle_percent_required}% idle or more) within ${settle_timeout_seconds}s"
+  return 1
 }
 
 step() {
@@ -168,7 +169,7 @@ record_pressure() {
 
 if [ -n "${clone_of}" ]; then
   kind="clone"
-  # Only the settled template may be booted at a time with the clone: shut down everything else first.
+  # The settled template is shut down, and no other simulator may be running while the clone boots: shut down all of them.
   log "shutting down every booted simulator before cloning"
   xcrun simctl shutdown all 2>/dev/null || true
   host_snapshot "before"
@@ -202,7 +203,11 @@ fi
 sample_pressure
 host_snapshot "after boot completed and simulator responsive"
 responsive_seconds="$((SECONDS - prepare_started))"
-wait_for_host_to_settle
+if ! wait_for_host_to_settle; then
+  host_snapshot "host never settled"
+  record_pressure "${kind}-unsettled" "${responsive_seconds}"
+  exit 1
+fi
 record_pressure "${kind}" "${responsive_seconds}"
 if [ "${shutdown_after}" -eq 1 ]; then
   step "shutdown after settling" xcrun simctl shutdown "${udid}"
