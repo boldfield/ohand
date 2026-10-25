@@ -165,7 +165,16 @@ final class WalkthroughUITests: XCTestCase {
     /// and hide the navigation bar, the others show it in the navigation bar. `leaving` is the control that opened the
     /// screen; it must be gone, so a row or link with the same text as the title does not count as the screen.
     private func waitForScreen(_ title: String, leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
-        waitForScreen(shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, timeout: timeout)
+        let opened = waitForScreen(shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, timeout: timeout)
+        if !opened {
+            // What was on screen instead, so the evidence says whether the screen never opened or its marker was not found.
+            let slug = title.lowercased().replacingOccurrences(of: " ", with: "-")
+            try? XCUIScreen.main.screenshot().pngRepresentation.write(
+                to: outputDirectory.appendingPathComponent("failure-screen-\(slug).png"))
+            try? app.debugDescription.write(
+                to: outputDirectory.appendingPathComponent("failure-screen-\(slug)-hierarchy.txt"), atomically: true, encoding: .utf8)
+        }
+        return opened
     }
 
     /// True once any of `markers` exists and `origin` has gone.
