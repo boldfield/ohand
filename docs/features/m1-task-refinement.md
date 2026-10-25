@@ -3851,6 +3851,23 @@ F47 now depends on F37, F49 and F50. After both land, rebase onto main and colle
 
 Amendment 2 (2026-10-24, later): F50 is retired. Neither named failure reproduced in 250 iterations each (run 40074375705), and a read-through found no product interleaving that leaves the reset gate held. The only reproduced failure was test-side, at `CompositionRootTests.swift:240`: `tearDownWithError` checks the process-wide `CoreHandle.liveResultBufferCount` against its baseline without waiting for quiescence. The resumed reset in the two reset tests finishes on a background task after the assertion, so the next test's baseline can start at 1. It failed in 2 and 8 of 250 iterations. F47 owns that file and fixes it under acceptance 2 (state shared between tests): poll the live buffer and handle counts back to the baseline with a deadline in tearDown, as `AppServicesTests.swift:77` and `:530` already do, and settle setUp's baseline the same way. The assertion stays. If a named reset or JobRunner test fails during the acceptance-5 runs, report it with its log, as acceptance 5 already requires. F47 now depends on F37 and F49 only.
 
+Amendment 3 (2026-10-25): F47 absorbs F49 and lands both in one PR.
+
+On `macos-26-intel`, F49's layout (PR #363, head ddc4ebe, run 40167745365) removed the host failures. There was no readiness-gate or settle failure, and no swapping. What failed was test code that F49 cannot edit:
+- `AppRealServicesTests.swift:343` (simulator job, attempt 1);
+- `WalkthroughUITests.swift:176` and `:90`, UI query timeouts at regular width;
+- `WalkthroughUITests.swift:277`, Search did not open, at compact width.
+
+F47's fixes are not on that branch. F49 cannot reach three green runs without F47, and F47 cannot reach them without F49's runner layout. F49 is therefore retired, and its work continues inside F47:
+1. **Branch.** Merge `origin/mr/198b583c` (F49 at ddc4ebe or later) into F47's branch `mr/e78d3dae`, then merge current `main`. Continue on PR #358, and close PR #363 with a link to #358 once #358 lands.
+2. **Owned paths.** F47 gains F49's owned paths, including its amendment: `.github/workflows/ios.yml` (job structure and simulator preparation), `ios/scripts/prepare-simulator.sh`, the `ios/scripts/*-simulator.sh` scripts where they boot, erase or shut down a simulator, their tests under `ios/scripts/`, the runner label in `ios/scripts/check_project_config.py` and its tests, and the "Required checks for macOS workers" section of `AGENTS.md`. Product code stays out of scope.
+3. **Acceptance.**
+   - F47's acceptance 1–4 still apply.
+   - F49's acceptance 1–4 and 6, and its amendment, also apply. Its runner, build-before-boot, fail-closed settle and `host-pressure.txt` stay as F49 left them, unless a change is measured and justified in the PR.
+   - Acceptance 5 is the shared criterion of both tasks: three consecutive successful full reruns of `ios.yml` at the exact head, with no readiness-gate or settle failure and no named test failing.
+   - The four Intel failures above join the named tests under acceptance 2, and each needs a stated cause.
+4. **Dependencies.** F47 depends on F37 only. U10a now depends on F47 in place of F49.
+
 ### T10a
 
 Version trial builds, carry the build identity into metrics, and check upgrades in the simulator
@@ -4030,6 +4047,8 @@ Acceptance:
    - Evidence names and contents that AGENTS.md lists stay as they are, with `retention-days` at most 7.
 5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, triggered as full reruns, with no readiness-gate failure in any of them. Link all three. Any failure is reported with its job, step and host snapshot.
 6. `make check` passes, including `ios-check`.
+
+**Retired 2026-10-25, absorbed into F47 (see F47 amendment 3).** The Intel layout is in PR #363 at ddc4ebe. It removed the host failures, but its three-run evidence failed in tests that F47 owns.
 
 #### F49 amendment (2026-10-25): move the simulator jobs to the free Intel runner
 

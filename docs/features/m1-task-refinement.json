@@ -3802,14 +3802,14 @@
         "DS09",
         "F44",
         "F45",
+        "F47",
         "F48",
         "T10a",
         "U03b",
         "U04b",
         "U07c",
         "U08b",
-        "U09",
-        "F49"
+        "U09"
       ],
       "source_pointers": [
         "ios/project.yml:330",
@@ -4002,8 +4002,7 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F37",
-        "F49"
+        "F37"
       ],
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift:115",
@@ -4105,30 +4104,6 @@
         "core/src/retrieval/recent/mod.rs:36",
         "core/src/ffi/notification_reconciliation.rs:591",
         "app/reminders/ReminderEditText.swift:44"
-      ]
-    },
-    {
-      "key": "F49",
-      "parent": null,
-      "title": "Stop the hosted macOS runner from starving when it boots simulators",
-      "file_scope": [
-        ".github/workflows/ios.yml",
-        "ios/scripts/prepare-simulator.sh",
-        "ios/scripts/walkthrough-simulator.sh",
-        "ios/scripts/smoke-simulator.sh",
-        "ios/scripts/",
-        "AGENTS.md"
-      ],
-      "intent": "Each macos-26 job cold-boots several erased simulators and the 3-core/7 GB runner reaches load ~480 with ~100 MB free, failing the readiness gate and UI queries; pay at most one first boot per device type per job.",
-      "acceptance": [
-        "See the F49 section of m1-task-refinement.md."
-      ],
-      "covers_parent_criteria": [],
-      "depends_on": [],
-      "source_pointers": [
-        "ios/scripts/prepare-simulator.sh",
-        "ios/scripts/walkthrough-simulator.sh",
-        ".github/workflows/ios.yml:90"
       ]
     },
     {
@@ -4943,8 +4918,8 @@
       "DS09",
       "F44",
       "F45",
+      "F47",
       "F48",
-      "F49",
       "T10a",
       "U03b",
       "U04b",
@@ -4969,8 +4944,7 @@
       "F29"
     ],
     "F47": [
-      "F37",
-      "F49"
+      "F37"
     ],
     "T10a": [
       "F45",
@@ -4985,7 +4959,6 @@
     "F48": [
       "F44"
     ],
-    "F49": [],
     "E02b": [],
     "F51": []
   },
@@ -5229,6 +5202,10 @@
     {
       "date": "2026-10-25",
       "change": "Added F51: the production OpenAI request omits temperature (gpt-5.5 rejected temperature 0.0 in the E02 live run). E02 now depends on F51."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "F49 retired and absorbed into F47 (amendment 3): one PR carries F49's Intel runner layout and F47's test fixes, judged on the shared three-run criterion. F47 depends on F37 only; U10a depends on F47 in place of F49."
     }
   ]
 }
