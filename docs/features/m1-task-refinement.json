@@ -4153,7 +4153,8 @@
         "fixtures/intent/contrastive-fixtures.json",
         "core/tests/fixture_validation/",
         "docs/validation/intent-fixtures.md",
-        "tools/evaluation/fixtures/recorded-responses.json"
+        "tools/evaluation/fixtures/recorded-responses.json",
+        "tools/evaluation/tests/evaluation.rs"
       ],
       "intent": "Four fixtures (timezone-conflicting, very-long-transcript, abstract-broad-thought, prompt-injection-attempt-1) are missed identically by every strong model because the oracle and the instructions disagree or an item-type definition is unclear; reconcile each against DESIGN.md, the instructions and the core guards, never weakening a forbidden rule.",
       "acceptance": [
@@ -5235,6 +5236,10 @@
     {
       "date": "2026-10-25",
       "change": "Added F52: reconcile four fixtures missed identically by every strong model (instruction/oracle conflicts). Off E02's path."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "F52 owns tools/evaluation/tests/evaluation.rs for re-pointing the zone-claim test only. F47 amendment 4: Intel hosts are CPU-bound (0 swapouts); measure host-service shutdown, diagnosticd reduction and an arm64 comparison per job."
     }
   ]
 }

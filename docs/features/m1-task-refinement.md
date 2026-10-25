@@ -3868,6 +3868,44 @@ F47's fixes are not on that branch. F49 cannot reach three green runs without F4
    - The four Intel failures above join the named tests under acceptance 2, and each needs a stated cause.
 4. **Dependencies.** F47 depends on F37 only. U10a now depends on F47 in place of F49.
 
+Amendment 4 (2026-10-25): the Intel hosts are CPU-bound, not memory-bound, and much of that CPU is host work the job does not need.
+
+Facts from runs 40167745365 and 40224042162 (PR #358 head b373cd8):
+- **No swapping.** Every host snapshot shows `0(0) swapins, 0(0) swapouts`, so memory is not the constraint on `macos-26-intel`.
+  - "Lowest free memory" (18–20 MB) is misleading on macOS, because file cache counts as used.
+  - `host-pressure.txt` must also record swapins, swapouts and compressor size for each preparation.
+- **Load and boot times.** Load reaches 400–800 on 4 cores. Cold boots took 548–987 s in some runs and 172 s in others.
+- **Host CPU use beyond the simulator, across the walkthrough and simulator-job snapshots:**
+  - host `diagnosticd`: 30–46% in each of six samples;
+  - `spindump`: 78%, running for 17 minutes;
+  - Spotlight `mds` and `mds_stores`: 47% and 15%;
+  - `WeatherWidget`: 41%;
+  - `diskimagesiod` and `diskarbitrationd`.
+- GitHub's `provjobd` cannot be touched. None of the rest is needed by the job.
+
+Levers, measured at the same head; keep each one only if it helps:
+1. **Stop unneeded host work at job start.** The hosted runner has passwordless `sudo`.
+   - Turn off Spotlight indexing on all volumes (`sudo mdutil -a -i off`).
+   - Disable and stop `spindump`.
+   - Stop host agents that no step uses, such as widgets.
+   - Log what was stopped. Never stop anything the runner, CoreSimulator, Xcode or the evidence needs.
+2. **Find what drives `diagnosticd`, and turn it down.** Candidates are host or simulator log streaming by a script or by `xcodebuild` result collection, and simulator log levels. Turn off only what the evidence AGENTS.md lists does not need. Keep `OhAndTests.xcresult` and the named logs.
+3. **Compare runners per job.** For each simulator-booting job at the same head, compare `macos-26` (arm64, 7 GB) with `macos-26-intel`.
+   - On arm64, build before boot and terminate the build service (`XCBBuildService`, SourceKit) before the first boot, so the memory the build held is returned.
+   - Report swapouts, peak load and time to responsive on both runners.
+   - Choose each job's runner from those numbers. Arm64 has a GPU and faster cores; Intel has the memory.
+4. **Splitting the simulator job.** It may be split, for example by moving NotificationProbe and the credential relaunch check into their own job. State the extra concurrent macOS job; the account runs at most 5.
+
+**Unchanged:**
+- Acceptance 5.
+- Every evidence file.
+- The readiness thresholds.
+- No `continue-on-error` and no test retries.
+
+Test waits may be bounded, but a wait longer than 90 s needs a measured reason in the PR.
+
+If the hosts still starve after levers 1–4, block with the measurements for each lever. The coordinator then takes the self-hosted option to the maintainer. Do not ask for paid runners: the maintainer declined them on 2026-10-25.
+
 ### T10a
 
 Version trial builds, carry the build identity into metrics, and check upgrades in the simulator
@@ -4259,3 +4297,10 @@ Acceptance:
 4. `make check` and `make test` pass.
 
 After F52 lands, the coordinator reruns the hosted live legs (Claude Haiku 5.5, gpt-6-luna, gpt-5.5) on the new instruction version and commits that evidence. The expected result is that these four fixtures match without any other fixture regressing. E02 does not wait for F52.
+
+Ownership amendment (2026-10-25): F52 also owns `tools/evaluation/tests/evaluation.rs`, only for the following.
+- **Required:** re-point `a_stored_reminder_without_an_instant_makes_no_timezone_claim` (around `:844`) at a fixture whose oracle still names a zone. Its positive case (a zone mismatch is reported) and its negative case (no zone claim without an instant) must both keep running.
+- **Optional:** host the networkless acceptance-2 test.
+
+Item 1 removes the zone from `timezone-conflicting`'s oracle, so the old test cannot pass unchanged. That does not weaken it: the scorer's zone-claim logic stays covered, on a fixture that still has a zone. No other edit to that file and no scorer source change is allowed. PR #367 (head 757c397) may continue under this amendment.
+
