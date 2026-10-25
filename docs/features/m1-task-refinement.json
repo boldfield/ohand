@@ -4130,6 +4130,24 @@
         "ios/scripts/walkthrough-simulator.sh",
         ".github/workflows/ios.yml:90"
       ]
+    },
+    {
+      "key": "E02b",
+      "parent": null,
+      "title": "Exercise a genuinely revoked hosted key in the live harness",
+      "file_scope": [
+        "core/tests/live_providers/"
+      ],
+      "intent": "E02 criterion 2 needs a key that was valid and then revoked at the provider; add a two-phase before/after scenario run by the maintainer with a throwaway key.",
+      "acceptance": [
+        "See the E02b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/tests/live_providers/harness.rs:866",
+        "core/tests/live_providers/harness.rs:977"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4365,6 +4383,7 @@
     "E02": [
       "E01",
       "E02a",
+      "E02b",
       "F21",
       "I06",
       "V06",
@@ -4946,7 +4965,8 @@
     "F48": [
       "F44"
     ],
-    "F49": []
+    "F49": [],
+    "E02b": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5180,6 +5200,10 @@
     {
       "date": "2026-10-24",
       "change": "F46 also owns docs/validation/intent-fixtures.md for its two fixture rows. F50 retired: no product race reproduced in 250 iterations; the reproduced teardown liveResultBufferCount check in CompositionRootTests goes to F47 (amendment 2). F47 depends on F37 and F49; F45 on F37 and F47."
+    },
+    {
+      "date": "2026-10-25",
+      "change": "Added E02b: a two-phase revoked-hosted-key scenario in the live harness (E02 criterion 2). E02 now depends on E02b."
     }
   ]
 }

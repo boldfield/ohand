@@ -4074,3 +4074,44 @@ Acceptance:
    - Existing reset, deletion and job-runner tests pass unchanged.
 4. **Iterations.** After the fix, each of the two named tests passes 200 iterations on the hosted runner, using the same temporary-workflow rule.
 5. `make check` and `make test` pass, plus the exact-head macOS CI evidence that AGENTS.md requires.
+
+### E02b
+
+Exercise a genuinely revoked hosted key in the live harness
+
+Found by E02's Sonnet attempt on 2026-10-24. E02's criterion 2 asks for revoked-credential behavior. The live harness (`core/tests/live_providers/harness.rs:866`, `:977`) only shows two things:
+- a made-up key that was never valid (`INVALID_SCENARIO_CREDENTIAL`);
+- the app retiring a profile version (`revoked_profile_version`), which never reaches the provider.
+
+Neither shows what happens when a key that worked is revoked at the provider.
+
+Add a two-phase scenario the maintainer runs with a throwaway Anthropic key:
+- `before`, while the key is valid;
+- `after`, once the maintainer has revoked it in the provider console.
+
+Owned paths: `core/tests/live_providers/` only.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Configuration.** `OHAND_LIVE_REVOCATION_CREDENTIAL_ENV` names the environment variable that holds the throwaway key, in the existing `provider=ENV` form. `OHAND_LIVE_REVOCATION_PHASE` is `before` or `after`. `OHAND_LIVE_REVOCATION_LABEL` is a label the maintainer chooses, for example the key's name in the console, and it links the two phases. When these are unset, the scenario is skipped and says so.
+2. **The `before` phase** runs one synthetic fixture through the production path with that key. The call must apply or abstain, which shows the key worked.
+3. **The `after` phase** runs the same fixture with the same key and requires all of these:
+   - `unauthorized`, not retriable;
+   - one provider call, with no retry;
+   - the capture is still durable and its raw source unchanged;
+   - zero applied proposals and zero forbidden mutations;
+   - the job's failure is visible in the same way as for an invalid credential.
+4. **Evidence.** Each phase writes a sanitized artifact in the existing format. It carries:
+   - the phase;
+   - the label;
+   - the build revision;
+   - the collection time;
+   - the backend;
+   - the outcome.
+
+   It never carries the key, any part of it, or any hash of it. The `after` artifact is accepted only when a `before` artifact with the same label and backend exists and is older.
+5. **Networkless twin.** A test using the existing fake server accepts the key once, then returns the provider's 401 authentication error for it. The test checks the `before` and `after` assertions, and the leak check over both artifacts.
+6. `make check` and `make test` pass.
+
