@@ -172,7 +172,8 @@ final class WalkthroughUITests: XCTestCase {
     private func waitForScreen(shownBy markers: [XCUIElement], leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if markers.contains(where: { $0.exists }), !isShowing(origin) { return true }
+            // Hittable, not merely present: a screen that flashes up and is dismissed again (a failed Face ID match) must not count.
+            if markers.contains(where: { isShowing($0) }), !isShowing(origin) { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
