@@ -298,10 +298,11 @@ final class WalkthroughUITests: XCTestCase {
             tapWhenHittable(done, step: "put the keyboard away", elementName: "the Done button")
         }
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: app.keyboards)
-        // 20 s rather than 10: the keyboard slides away with an animation that a loaded simulator slows right down.
+        // screenTimeout like the other waits: run 40219792886 (host load average ~700) still showed the keyboard 20 s after
+        // Done was tapped, because a loaded simulator slows the slide-away animation down to a crawl.
         XCTAssertEqual(
-            XCTWaiter().wait(for: [gone], timeout: 20), .completed,
-            "step \"put the keyboard away\": the keyboard was still showing 20 s after Done was tapped")
+            XCTWaiter().wait(for: [gone], timeout: screenTimeout), .completed,
+            "step \"put the keyboard away\": the keyboard was still showing \(Int(screenTimeout)) s after Done was tapped")
     }
 
     /// Taps a home link and waits for the destination. The first open per launch shows the system Face ID prompt,
