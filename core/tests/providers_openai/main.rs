@@ -106,7 +106,15 @@ impl RecordedCall {
 }
 
 enum Reply {
-    Http { status: u16, body: Vec<u8> },
+    Http {
+        status: u16,
+        body: Vec<u8>,
+    },
+    /// Behaves like a reasoning-family model: any request carrying `temperature` is answered
+    /// with the provider's 400 `unsupported_value`; otherwise the content succeeds.
+    DefaultTemperatureOnly {
+        content: String,
+    },
     Fail(TransportError),
 }
 
@@ -130,6 +138,16 @@ impl Step {
 
     fn ok(content: &str) -> Step {
         Step::http(200, completion(content))
+    }
+
+    fn default_temperature_only(content: &str) -> Step {
+        Step {
+            delay_ms: 0,
+            cancel_mid_call: false,
+            reply: Reply::DefaultTemperatureOnly {
+                content: content.to_string(),
+            },
+        }
     }
 
     fn fail(error: TransportError) -> Step {
@@ -180,6 +198,9 @@ impl HttpTransport for ScriptedTransport {
         if step.cancel_mid_call {
             cancel.cancel();
         }
+        let sent_temperature = serde_json::from_slice::<Value>(&body)
+            .map(|parsed| parsed.get("temperature").is_some())
+            .unwrap_or(false);
         self.calls.lock().unwrap().push(RecordedCall {
             endpoint: endpoint.to_string(),
             credential_ref: credential_ref.to_string(),
@@ -196,6 +217,20 @@ impl HttpTransport for ScriptedTransport {
         });
         match step.reply {
             Reply::Fail(error) => Err(error),
+            Reply::DefaultTemperatureOnly { content } if sent_temperature => {
+                let _ = content;
+                Ok((
+                    400,
+                    serde_json::to_vec(&json!({"error": {
+                        "message": "Unsupported value: 'temperature' does not support 0.0 with this model. Only the default (1) value is supported.",
+                        "type": "invalid_request_error",
+                        "param": "temperature",
+                        "code": "unsupported_value"
+                    }}))
+                    .unwrap(),
+                ))
+            }
+            Reply::DefaultTemperatureOnly { content } => Ok((200, completion(&content))),
             Reply::Http { status, mut body } => {
                 // A bounded transport never reads more than one byte past the limit.
                 body.truncate(max_response_bytes as usize + 1);
@@ -335,6 +370,19 @@ fn success_decodes_envelope_content_into_proposal() {
 }
 
 #[test]
+fn a_default_temperature_only_model_accepts_the_production_request() {
+    let harness = Harness::new(vec![Step::default_temperature_only(
+        r#"{"kind":"note","text":"reminder"}"#,
+    )]);
+    let output = harness
+        .run()
+        .expect("a request without temperature is not rejected");
+    assert_eq!(output.proposal["kind"], "note");
+    let body = harness.only_call().body_json();
+    assert!(body.get("temperature").is_none());
+}
+
+#[test]
 fn request_targets_chat_completions_with_json_object_output() {
     let harness = Harness::new(vec![Step::ok("{}")]);
     harness.run().expect("success");
@@ -343,7 +391,7 @@ fn request_targets_chat_completions_with_json_object_output() {
 
     let body = call.body_json();
     assert_eq!(body["model"], "gpt-4o");
-    assert_eq!(body["temperature"], 0.0);
+    assert!(body.get("temperature").is_none());
     assert_eq!(body["response_format"], json!({"type": "json_object"}));
     assert!(
         body.get("metadata").is_none(),
@@ -1142,11 +1190,11 @@ mod diagnostic {
     }
 
     #[test]
-    fn production_dispatch_still_uses_its_own_prompt_and_pinned_temperature() {
+    fn production_dispatch_still_uses_its_own_prompt_and_sends_no_temperature() {
         let harness = Harness::new(vec![Step::ok(PROVIDER_JSON)]);
         harness.run().expect("production dispatch succeeds");
         let body = harness.only_call().body_json();
-        assert_eq!(body["temperature"], json!(0.0));
+        assert!(body.get("temperature").is_none());
         assert!(body.get("seed").is_none());
         assert!(body.get("max_completion_tokens").is_none());
     }
