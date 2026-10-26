@@ -142,7 +142,7 @@ final class WalkthroughUITests: XCTestCase {
         // The "Erase everything" card on the Settings root must open the reset screen, which is captured. Nothing is confirmed.
         let eraseCard = app.descendants(matching: .any)["management.settings.erase"].firstMatch
         XCTAssertTrue(appears(eraseCard, timeout: screenTimeout), "Erase everything card not found on Settings")
-        if !isShowing(eraseCard) { app.swipeUp() }
+        if !isHittableNow(within: 3, eraseCard) { app.swipeUp() }
         tapWhenHittable(eraseCard, step: "erase everything", elementName: "the Erase everything card")
         let resetExplanation = app.descendants(matching: .any)["data-settings.reset.explanation"].firstMatch
         XCTAssertTrue(appears(resetExplanation, timeout: screenTimeout), "Erase everything did not open the reset screen")
@@ -230,8 +230,20 @@ final class WalkthroughUITests: XCTestCase {
 
     private func waitUntilHittable(_ element: XCUIElement, step: String, elementName: String) {
         XCTAssertTrue(
-            isShowing(element, within: screenTimeout),
+            isHittableNow(within: screenTimeout, element),
             "step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
+    }
+
+    /// True once `element` is showing (snapshot, which cannot record a failure) and XCTest's own `isHittable` agrees, so
+    /// an element that is covered or otherwise cannot take a tap does not pass on its frame alone. The snapshot gates
+    /// the `isHittable` read: asked of an element that is still sliding in or out, `isHittable` records its own failure.
+    private func isHittableNow(within seconds: TimeInterval, _ element: XCUIElement) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        repeat {
+            if isShowing(element, within: 1), element.isHittable { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        return false
     }
 
     /// The app makes one quiet Face ID attempt at launch. Its system prompt takes focus, so typing while it is up loses
@@ -310,6 +322,7 @@ final class WalkthroughUITests: XCTestCase {
     private func dismissKeyboard() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where appears(button, timeout: 2) {
+            waitUntilHittable(button, step: "dismiss the system tip", elementName: "the Continue button")
             button.tap()
         }
         if appears(app.keyboards.firstMatch, timeout: 5) {
@@ -360,10 +373,10 @@ final class WalkthroughUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(screenTimeout)
         var tapped = false
         repeat {
-            if isShowing(glassBack) {
+            if isHittableNow(within: 1, glassBack) {
                 glassBack.tap()
                 tapped = true
-            } else if isShowing(barBack) {
+            } else if isHittableNow(within: 1, barBack) {
                 barBack.tap()
                 tapped = true
             } else {

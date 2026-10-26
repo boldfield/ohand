@@ -164,15 +164,11 @@ final class ExportSettingsViewTests: XCTestCase {
             model.shareEnded(.failed)
             await settle()
             guard case .finished(.failed(let failed)) = model.phase else { return XCTFail("got \(model.phase)") }
-            _ = await waitForScreen { text(ExportSettingsView.stateIdentifier) == failed }
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), failed)
 
             await model.startExport()
             model.shareEnded(.completed)
             await settle()
-            // A fixed settle can end before the hosted view renders the new state on a loaded simulator (the run that failed
-            // here still showed the ready text): wait for the asserted text, then assert it below.
-            _ = await waitForScreen { (text(ExportSettingsView.stateIdentifier) ?? "").hasPrefix("Shared") }
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
             XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertTrue(shown.contains("cannot recall"))

@@ -396,8 +396,10 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
             session.waitForFinishedDrains(1),
             "the drain finished (started \(session.service.startedDrainCount), finished \(session.service.finishedDrainCount))")
 
-        // Cause: test timing. `JobRunnerService.handle` raises `finishedDrainCount` under its lock and calls the metrics
-        // sink only after unlocking, so a poll that sees the finished drain can read the sink before the report lands.
+        // Cause: not diagnosed. The only CI failure (run 39713189466) failed the 15 s wait for the drain above, so the
+        // drain did not finish and go idle in time; the cause is not established. The messages carry the drain counts and
+        // last summary so the next occurrence can be read. The wait below is only for the sink, which the service
+        // reports to just after unlocking.
         waitUntilPumping("the deferred job is reported to the metrics sink") { !metrics.records.isEmpty }
         XCTAssertEqual(
             metrics.records, [.processingFailure(.capabilityUnavailable)],
