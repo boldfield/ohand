@@ -18,8 +18,6 @@ enum UITestFixtureError: Error {
 final class UITestFixtureLaunch {
     /// Placed far in the future so a reminder stays in the future on any real date.
     static let sortedReminderPhrase = "2099-01-15 11:00:00"
-    /// The longest a launch waits for seeding. The simulator has no launch watchdog; this only bounds a stuck seed.
-    private static let seedingTimeout: TimeInterval = 60
 
     private let name: String
     private var pendingSeed: (fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer)?
@@ -56,11 +54,11 @@ final class UITestFixtureLaunch {
         return services
     }
 
-    /// Fills the store once the services have started, and returns when it is filled, so the first screen a test sees
-    /// is the finished fixture. Turns the main run loop meanwhile, as the seeding runs on the main actor.
-    func seedAndWait() {
+    /// Fills the store once the services have started. It runs on the main actor after launch returns, so the first
+    /// screen can appear before the fixture is complete; a test waits for the content it checks.
+    func seedInBackground() {
         guard let pendingSeed else { return }
-        var finished = false
+        let fixtureName = name
         Task { @MainActor in
             let seeder = UITestFixtureSeeder(
                 fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
@@ -68,13 +66,8 @@ final class UITestFixtureLaunch {
             do {
                 try await seeder.seed()
             } catch {
-                NSLog("UITestFixture \(self.name) seeding failed: \(error)")
+                NSLog("UITestFixture \(fixtureName) seeding failed: \(error)")
             }
-            finished = true
-        }
-        let deadline = Date().addingTimeInterval(Self.seedingTimeout)
-        while !finished, Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
     }
 }

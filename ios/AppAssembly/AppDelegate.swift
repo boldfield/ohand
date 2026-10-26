@@ -19,7 +19,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 makeServices: { try fixtureLaunch.makeServices() },
                 startServices: { services, isActive in
                     services.start(isActive: isActive)
-                    fixtureLaunch.seedAndWait()
+                    fixtureLaunch.seedInBackground()
                 })
         }
         #endif

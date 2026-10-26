@@ -19,8 +19,15 @@ final class FixtureLaunchUITests: XCTestCase {
     func testLockedShowsTheLockedCardAndUnlocksOnTheUnlockAction() {
         XCTAssertTrue(app.launch(fixture: .locked))
         XCTAssertTrue(app.element(identifier: "home.recents.locked").waitForExistence(timeout: seedingTimeout))
-        app.element(identifier: "home.recents.unlock").tap()
-        XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: seedingTimeout))
+        // The fixture unlocks the reads while it fills the store and locks them again when it is done, so an unlock
+        // tapped before then can be undone. Unlock again whenever the locked card is back, until the cards show.
+        let deadline = Date().addingTimeInterval(seedingTimeout)
+        while Date() < deadline, !app.homeCard(containing: "Synthetic").exists {
+            let unlock = app.element(identifier: "home.recents.unlock")
+            if unlock.exists { unlock.tap() }
+            _ = app.homeCard(containing: "Synthetic").waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(app.homeCard(containing: "Synthetic").exists)
     }
 
     func testPopulatedShowsTypedAndSpokenNotes() {
