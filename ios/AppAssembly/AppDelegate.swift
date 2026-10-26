@@ -11,6 +11,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
             return AppLauncher(makeServices: { throw HostingUnitTests() })
         }
+        #if DEBUG
+        // A UI test selects a fixture with `-OhAndUITestFixture <name>`; a release build never reads the argument.
+        if let fixtureName = UITestFixture.requestedName() {
+            return AppLauncher(makeServices: { try UITestFixtureServices.make(named: fixtureName) })
+        }
+        #endif
         return AppLauncher()
     }()
 

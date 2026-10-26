@@ -529,8 +529,50 @@ struct CompositionAdapters {
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
             recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore)
     }
+
+    /// Debug builds only: the adapter set a UI-test fixture launch runs on. Its read session starts locked, unlocks on
+    /// the normal unlock action, and unlocks on the launch's quiet attempt only when the fixture starts unlocked.
+    static func uiTestFixture(
+        sender: ProviderRequestSender,
+        notificationCenter: NotificationCenterProviding,
+        reachability: NetworkReachability,
+        recognizer: OnDeviceRecognizing?,
+        readsStartUnlocked: Bool,
+        lifecycleNotifications: NotificationCenter,
+        credentialServiceName: String
+    ) -> CompositionAdapters {
+        injectedForTests(
+            sender: sender,
+            readSession: ReadAuthenticationSession(
+                boundary: UITestFixtureReadBoundary(startsUnlocked: readsStartUnlocked)),
+            notificationCenter: notificationCenter, reachability: reachability,
+            lifecycleNotifications: lifecycleNotifications, recognizer: recognizer,
+            credentials: CredentialService(serviceName: credentialServiceName))
+    }
     #endif
 }
+
+#if DEBUG
+/// Debug builds only: the authentication prompt of a UI-test fixture launch. The explicit unlock action always succeeds,
+/// as the person passing the prompt would; the quiet attempt succeeds only when the fixture starts unlocked.
+final class UITestFixtureReadBoundary: ReadAuthenticationBoundary {
+    private let quietOutcome: ReadAuthenticationOutcome
+
+    init(startsUnlocked: Bool) {
+        quietOutcome = startsUnlocked ? .succeeded : .unavailable
+    }
+
+    func authenticate(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void) {
+        completion(.succeeded)
+    }
+
+    func authenticateQuietly(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void) {
+        completion(quietOutcome)
+    }
+
+    func invalidatePendingAttempt() {}
+}
+#endif
 
 // MARK: - Public outcomes
 
@@ -1175,6 +1217,32 @@ public final class ServiceCompositionRoot {
         modules: [CompositionModule] = []
     ) throws {
         try self.init(configuration: configuration, environment: environment, adapters: adapters, modules: modules)
+    }
+    #endif
+
+    #if DEBUG
+    /// Debug builds only: the assembly a UI-test fixture launch runs on. Every effectful boundary is a substitute the
+    /// fixture supplies, the credentials use `configuration.credentialServiceName` (which the fixture makes unique), and
+    /// the read session starts locked unless `readsStartUnlocked`. Compiled out of release builds.
+    public convenience init(
+        uiTestFixture configuration: CompositionConfiguration,
+        environment: CompositionEnvironment = CompositionEnvironment(),
+        sender: ProviderRequestSender,
+        notificationCenter: NotificationCenterProviding,
+        reachability: NetworkReachability,
+        recognizer: OnDeviceRecognizing?,
+        readsStartUnlocked: Bool,
+        lifecycleNotifications: NotificationCenter = .default,
+        modules: [CompositionModule] = []
+    ) throws {
+        try self.init(
+            configuration: configuration, environment: environment,
+            adapters: .uiTestFixture(
+                sender: sender, notificationCenter: notificationCenter, reachability: reachability,
+                recognizer: recognizer, readsStartUnlocked: readsStartUnlocked,
+                lifecycleNotifications: lifecycleNotifications,
+                credentialServiceName: configuration.credentialServiceName),
+            modules: modules)
     }
     #endif
 
