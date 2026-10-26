@@ -188,16 +188,21 @@ final class WalkthroughUITests: XCTestCase {
         return false
     }
 
-    private static let existsAndHittable = NSPredicate(format: "exists == true AND hittable == true")
-
-    /// True when `element` exists and is hittable, asked of a predicate expectation. Reading `isHittable` (or `frame`)
-    /// directly fails the test when the element has no activation point or has gone between the query and the read
-    /// ("Activation point invalid", "No matches found"), which a screen in transition does all the time; XCTest's own
-    /// predicate polling tolerates it. Resolving the element on a busy simulator takes a good part of a second, so the
-    /// answer is given up on only after `seconds`: a shorter wait always reads as "not there".
+    /// True when `element` exists, is enabled and its frame is a non-empty rectangle on the screen (not slid off its top or left): what "hittable" asks,
+    /// read from a snapshot. `element.isHittable`, `frame` and a `hittable` predicate all record a test failure of their own
+    /// ("Failed to determine hittability ... Activation point invalid") when the element is sliding in or out, even when the
+    /// caller is polling; a snapshot throws instead, and a throw simply reads as "not there yet".
     private func isShowing(_ element: XCUIElement, within seconds: TimeInterval = 3) -> Bool {
-        let showing = XCTNSPredicateExpectation(predicate: Self.existsAndHittable, object: element)
-        return XCTWaiter().wait(for: [showing], timeout: seconds) == .completed
+        let deadline = Date().addingTimeInterval(seconds)
+        repeat {
+            if let snapshot = try? element.snapshot(), snapshot.isEnabled,
+                !snapshot.frame.isEmpty, snapshot.frame.maxX > 0, snapshot.frame.maxY > 0
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        return false
     }
 
     /// True once `element` exists, within `timeout`. It polls through XCTest's predicate expectation rather than
@@ -221,9 +226,8 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     private func waitUntilHittable(_ element: XCUIElement, step: String, elementName: String) {
-        let showing = XCTNSPredicateExpectation(predicate: Self.existsAndHittable, object: element)
-        XCTAssertEqual(
-            XCTWaiter().wait(for: [showing], timeout: screenTimeout), .completed,
+        XCTAssertTrue(
+            isShowing(element, within: screenTimeout),
             "step \"\(step)\": \(elementName) did not exist and become hittable within \(Int(screenTimeout)) s")
     }
 
@@ -324,7 +328,15 @@ final class WalkthroughUITests: XCTestCase {
         // A failed or cancelled Face ID attempt leaves the user on home with a notice; asking again is what a person does.
         for attempt in 1...3 {
             let link = app.buttons[identifier]
-            XCTAssertTrue(appears(link, timeout: screenTimeout), "\(identifier) not on home")
+            let linkAppeared = appears(link, timeout: screenTimeout)
+            if !linkAppeared {
+                // What the home showed instead (a lock screen, a prompt, a notice).
+                try? XCUIScreen.main.screenshot().pngRepresentation.write(
+                    to: outputDirectory.appendingPathComponent("failure-home-\(identifier)-attempt\(attempt).png"))
+                try? app.debugDescription.write(
+                    to: outputDirectory.appendingPathComponent("failure-home-\(identifier)-hierarchy.txt"), atomically: true, encoding: .utf8)
+            }
+            XCTAssertTrue(linkAppeared, "\(identifier) not on home")
             if link.isEnabled { link.tap() }
             if waitForScreen(shownBy: [marker], leaving: link, timeout: 40) { return }
             let evidence = XCUIScreen.main.screenshot()
