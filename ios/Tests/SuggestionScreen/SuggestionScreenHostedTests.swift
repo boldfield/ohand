@@ -176,7 +176,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
     func testAnEmptySetIsCalmAndRelockLeavesTheScreenAndDropsTheOffer() {
         let model = host(responder: HostedResponder(activations: [.success(.nothingToOffer)]))
         tapPromptAndAuthenticate(model)
-        settle { rendered[SuggestionView.messageIdentifier] == SuggestionView.nothingToOfferLine }
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.nothingToOfferLine)
         XCTAssertNil(rendered[SuggestionView.textIdentifier])
 
@@ -196,7 +196,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
         settle { rendered[SuggestionView.textIdentifier] != nil }
 
         Task { @MainActor in await model.respond(.notNow) }
-        settle { rendered[SuggestionView.noticeIdentifier] != nil && rendered[SuggestionView.messageIdentifier] == SuggestionView.nothingToOfferLine }
+        settle { rendered[SuggestionView.noticeIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.noticeIdentifier], SuggestionView.text(for: .changed))
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.nothingToOfferLine)
     }
@@ -207,7 +207,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
         settle { rendered[SuggestionView.textIdentifier] != nil }
 
         Task { @MainActor in await model.respond(.done) }
-        settle { rendered[SuggestionView.messageIdentifier] == SuggestionView.text(forResponded: .done) }
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.text(forResponded: .done))
         XCTAssertNil(rendered[SuggestionView.notNowIdentifier])
     }
@@ -215,7 +215,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
     func testAnUnavailableSuggestionIsRendered() {
         let model = host(responder: HostedResponder(activations: [.failure(SuggestionResponseError.unreadable)]))
         tapPromptAndAuthenticate(model)
-        settle { rendered[SuggestionView.messageIdentifier] == SuggestionView.unavailableLine }
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.unavailableLine)
         XCTAssertNil(rendered[SuggestionView.textIdentifier])
     }
@@ -241,7 +241,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
         settle { rendered[SuggestionView.textIdentifier] != nil }
 
         Task { @MainActor in await model.respond(.done) }
-        settle { rendered[SuggestionView.messageIdentifier] == SuggestionView.lockedLine }
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.lockedLine)
         XCTAssertNil(rendered[SuggestionView.textIdentifier])
     }

@@ -240,9 +240,6 @@ final class RestartAndDeletionFailureJourneyTests: FailureJourneyTestCase {
 
         let itemID = try captureSilently(words)
         XCTAssertTrue(pump { self.itemColumn("item_type", of: itemID) == "action" }, "the capture is classified")
-        // The reminder row is written by the job that classifies the capture; reconciling before that job has finished
-        // (a loaded runner drains it late) finds nothing to schedule, so let the queue drain first, as the restarts below do.
-        settleBackgroundWork()
         runMain { _ = try? await self.services.root.reconcileReminders(trigger: .foreground) }
         XCTAssertTrue(
             pump { self.scalar("SELECT schedule_state FROM reminders WHERE item_id = '\(itemID)'") == "scheduled" },

@@ -390,7 +390,7 @@ jobs:
           retention-days: 7
 
   # One job per width: an iPhone and an iPad are different device types, so each pays its own first boot, and two jobs
-  # cost one more concurrent macOS job. Both run on macos-26-intel (14 GB).
+  # cost one more concurrent macOS job. Both run on macos-26 (arm64, 7 GB) with the build service stopped before the first boot.
   walkthrough:
     name: Screenshot walkthrough (${{ matrix.width }} width)
     # Measured against macos-26-intel at head cde5ac8 (run 40233254176): cold boots took 323-563 s at peak load 750-917 with

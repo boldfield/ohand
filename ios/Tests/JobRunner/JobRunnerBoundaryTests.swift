@@ -377,6 +377,9 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
 
         XCTAssertEqual(job(session)?.status, "completed")
         XCTAssertEqual(job(session, "job-native-4")?.status, "failed")
+        // The service marks the drain finished under its lock and reports to the metrics sink just after releasing it, so
+        // the sink can lag the drain count by a moment on a loaded host: wait for the report, then assert it exactly.
+        waitUntilPumping("the failed job is reported to the metrics sink") { !metrics.records.isEmpty }
         XCTAssertEqual(metrics.records, [.processingFailure(.other)], "only the failed job is counted")
     }
 
@@ -393,6 +396,9 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
             session.waitForFinishedDrains(1),
             "the drain finished (started \(session.service.startedDrainCount), finished \(session.service.finishedDrainCount))")
 
+        // Cause: test timing. `JobRunnerService.handle` raises `finishedDrainCount` under its lock and calls the metrics
+        // sink only after unlocking, so a poll that sees the finished drain can read the sink before the report lands.
+        waitUntilPumping("the deferred job is reported to the metrics sink") { !metrics.records.isEmpty }
         XCTAssertEqual(
             metrics.records, [.processingFailure(.capabilityUnavailable)],
             "drains started: \(session.service.startedDrainCount); last summary: \(String(describing: session.summary()))")

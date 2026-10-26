@@ -338,8 +338,11 @@ final class HomeRecentsModelTests: XCTestCase {
         await waitForFirstPage(model)
         await waitForPollToPause(pauses)
         await pauses.releaseAll()
+        await waitUntil("the saved item's interpretation is treated as finished, leaving no just-saved entry") {
+            model.justSaved.isEmpty
+        }
+        // Proving that no status read happens needs the fixed settle: there is no event to wait for.
         await settle()
-        XCTAssertTrue(model.justSaved.isEmpty)
         XCTAssertTrue(source.statusReadItemIDs.isEmpty)
     }
 

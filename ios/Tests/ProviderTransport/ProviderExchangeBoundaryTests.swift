@@ -344,28 +344,12 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
         XCTAssertTrue(otherServer.requests.isEmpty)
     }
 
-    /// Asks the local TLS server once through the system trust evaluator and waits for any outcome (at most 60 s). The
-    /// server's certificate is not trusted, so the call fails; only the evaluator's start-up cost matters.
-    private func warmUpSystemTrust(server: FixtureTLSServer) {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 60
-        let finished = expectation(description: "system trust evaluator warmed up")
-        let warmUp = URLSession(configuration: configuration).dataTask(with: server.baseURL) { _, _, _ in finished.fulfill() }
-        warmUp.resume()
-        wait(for: [finished], timeout: 60)
-    }
-
     func testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected() throws {
         let server = try startServer { _ in .complete(status: 200) }
         let reference = try storeSecret()
         let (session, _) = try openSession(
             server: server, scenario: ProviderExchangeScenario(credentialReference: reference),
             base: systemTrustTransport())
-
-        // The first system-trust evaluation in the process is a cold start (trustd) that took 17.8 s, 10.2 s and, in run
-        // 40262562806 on a starved host, longer than the profile's 30 s request timeout, which the transport reports as
-        // transient. Pay that cold start here, outside the asserted exchange, bounded at 60 s; whatever it returns is ignored.
-        warmUpSystemTrust(server: server)
 
         let operationID = try session.startExchange()
         // The first system-trust evaluation in the test process is a cold start that took 17.8 s on a hosted runner

@@ -188,15 +188,18 @@ final class WalkthroughUITests: XCTestCase {
         return false
     }
 
-    /// True when `element` exists, is enabled and its frame is a non-empty rectangle on the screen (not slid off its top or left): what "hittable" asks,
+    /// True when `element` exists, is enabled and the centre of its non-empty frame is on the screen (the app's own frame; not below the fold, not slid off any edge): what "hittable" asks,
     /// read from a snapshot. `element.isHittable`, `frame` and a `hittable` predicate all record a test failure of their own
     /// ("Failed to determine hittability ... Activation point invalid") when the element is sliding in or out, even when the
     /// caller is polling; a snapshot throws instead, and a throw simply reads as "not there yet".
     private func isShowing(_ element: XCUIElement, within seconds: TimeInterval = 3) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         repeat {
-            if let snapshot = try? element.snapshot(), snapshot.isEnabled,
-                !snapshot.frame.isEmpty, snapshot.frame.maxX > 0, snapshot.frame.maxY > 0
+            if let snapshot = try? element.snapshot(), snapshot.isEnabled, !snapshot.frame.isEmpty,
+                let screen = try? app.snapshot().frame, !screen.isEmpty,
+                // A tap lands on the frame's centre, so the centre has to be on the screen: a card below the fold, or a
+                // screen not yet slid in from the side, has a frame but no activation point a person could reach.
+                screen.contains(CGPoint(x: snapshot.frame.midX, y: snapshot.frame.midY))
             {
                 return true
             }
@@ -337,7 +340,8 @@ final class WalkthroughUITests: XCTestCase {
                     to: outputDirectory.appendingPathComponent("failure-home-\(identifier)-hierarchy.txt"), atomically: true, encoding: .utf8)
             }
             XCTAssertTrue(linkAppeared, "\(identifier) not on home")
-            if link.isEnabled { link.tap() }
+            waitUntilHittable(link, step: "open \(name) from home", elementName: "the \(identifier) link")
+            link.tap()
             if waitForScreen(shownBy: [marker], leaving: link, timeout: 40) { return }
             let evidence = XCUIScreen.main.screenshot()
             try? evidence.pngRepresentation.write(

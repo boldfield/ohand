@@ -394,7 +394,7 @@ final class CaptureEntryViewTests: XCTestCase {
         // to go rather than for a fixed time after the save.
         settle(
             until: "the Saved pill has faded",
-            timeout: max(0.1, CaptureEntryView.savedPillDuration + 3 - Date().timeIntervalSince(pillShownAt))
+            timeout: max(0.1, CaptureEntryView.savedPillDuration + 0.6 - Date().timeIntervalSince(pillShownAt))
         ) { self.frames[CaptureEntryView.savedPillIdentifier] == nil }
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the pill fades after about two seconds")
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the message outlives the pill")
