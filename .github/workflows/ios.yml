@@ -15,9 +15,12 @@ concurrency:
 jobs:
   simulator:
     name: Simulator build, unit tests and launch smoke test
-    # macos-26-intel is a standard free runner with 14 GB (macos-26 has 7 GB, too little for a booted simulator plus the
-    # test host). The Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel.
-    runs-on: macos-26-intel
+    # Measured per runner at the same head (F47 amendment 4). macos-26-intel (14 GB, bridge image: Xcode 27 needs macOS 27)
+    # failed this job's readiness settle with no test failing (run 40272866202 attempt 2: cold boot 317 s, peak load 617),
+    # and its cold boots took 376-535 s. macos-26 (arm64, 7 GB) passed both walkthrough jobs in every run since the fix to
+    # their tests (cold boots 177-336 s, peak load 387-540). The build service is stopped before the first boot so the
+    # memory the build held is returned.
+    runs-on: macos-26
     # Run 40201105544 (head 6d7d6d7) was cancelled at 60 minutes with no test failing: the host reached load average 637
     # (cold boot 322 s, free memory 92 MB), the settle step took 14 minutes and OhAndTests 22 minutes, where an earlier
     # run of the same layout finished in 38 minutes. 90 leaves room for that slowdown; a hung step still ends the job.
@@ -163,6 +166,13 @@ jobs:
           set -euo pipefail
           cd ios
           ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
+
+      - name: Stop the build service before the first boot
+        shell: bash
+        run: |
+          pkill -x XCBBuildService || true
+          pkill -x SourceKitService || true
+          vm_stat | head -4
 
       # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
       # that the NotificationProbe suites clone again, so none of them pays for a first boot.
