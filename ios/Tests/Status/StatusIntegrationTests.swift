@@ -108,9 +108,9 @@ final class StatusIntegrationTests: XCTestCase {
         window = nil
         if let services {
             // A save starts a drain; let it finish so no core result is still in flight when the root closes.
-            wait { !services.root.jobRunner.isDraining }
-            let settled = Date().addingTimeInterval(1.5)
-            wait(timeout: 2) { Date() >= settled }
+            wait("no drain is running at teardown") { !services.root.jobRunner.isDraining }
+            // A fixed quiet period after the drain, so nothing that drain triggered is still in flight at shutdown.
+            RunLoop.current.run(until: Date().addingTimeInterval(1.5))
         }
         services?.shutDown()
         services = nil
@@ -119,11 +119,12 @@ final class StatusIntegrationTests: XCTestCase {
         try? FileManager.default.removeItem(at: storageRoot)
     }
 
-    private func wait(timeout: TimeInterval = 30, until condition: () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition() && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
+    /// Turns the run loop until the condition holds, and fails the test naming it if it does not within `timeout`.
+    private func wait(
+        _ condition: String, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line,
+        until holds: () -> Bool
+    ) {
+        waitUntilPumping(condition, timeout: timeout, file: file, line: line, holds)
     }
 
     /// Runs an async status call from a synchronous test. The production root provisions its route by turning the main
@@ -172,7 +173,7 @@ final class StatusIntegrationTests: XCTestCase {
             handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
         services = built
         built.root.start(isActive: true)
-        wait { built.root.jobRunner.startedDrainCount > 0 && !built.root.jobRunner.isDraining }
+        wait("the launch drain started and finished") { built.root.jobRunner.startedDrainCount > 0 && !built.root.jobRunner.isDraining }
         return built
     }
 
@@ -189,7 +190,9 @@ final class StatusIntegrationTests: XCTestCase {
         let model = StatusModel(
             health: FailedHealth(), permissions: EmptyPermissions(), retrier: NoopRetrier(), openSystemSettings: {})
         host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 }))
-        wait(timeout: 10) { self.rendered[StatusView.rowIdentifier(.processing)]?.contains(StatusText.processingUnknownHeadline) == true }
+        wait("the processing row shows the unknown headline", timeout: 10) {
+            self.rendered[StatusView.rowIdentifier(.processing)]?.contains(StatusText.processingUnknownHeadline) == true
+        }
 
         for kind in StatusFactKind.allCases {
             XCTAssertNotNil(rendered[StatusView.rowIdentifier(kind)], "\(kind) row is shown")
@@ -209,7 +212,9 @@ final class StatusIntegrationTests: XCTestCase {
             openSystemSettings: {})
         host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 },
             actionReporter: { [unowned self] in actions = $0 }))
-        wait(timeout: 10) { self.rendered[StatusView.retryIdentifier] != nil && self.actions[StatusView.retryIdentifier] != nil }
+        wait("the Try again button and its action are reported", timeout: 10) {
+            self.rendered[StatusView.retryIdentifier] != nil && self.actions[StatusView.retryIdentifier] != nil
+        }
 
         XCTAssertTrue(rendered[StatusView.rowIdentifier(.processing)]?.contains(StatusText.processingStalledHeadline) == true)
         XCTAssertEqual(rendered[StatusView.retryIdentifier], StatusText.retryLabel)
@@ -217,9 +222,9 @@ final class StatusIntegrationTests: XCTestCase {
         // Runs exactly what a tap on the Try again button runs.
         XCTAssertNotNil(actions[StatusView.retryIdentifier], "the Try again button has an action")
         actions[StatusView.retryIdentifier]?()
-        wait(timeout: 10) { retrier.count > 0 }
+        wait("the retrier was asked", timeout: 10) { retrier.count > 0 }
         XCTAssertEqual(retrier.count, 1)
-        wait(timeout: 10) { self.rendered[StatusView.retryNoteIdentifier] != nil }
+        wait("the retry note is shown", timeout: 10) { self.rendered[StatusView.retryNoteIdentifier] != nil }
         XCTAssertEqual(rendered[StatusView.retryNoteIdentifier], StatusText.retryRequestedNote)
     }
 
@@ -234,7 +239,7 @@ final class StatusIntegrationTests: XCTestCase {
             StatusView(
                 model: model,
                 renderReporter: { [unowned self] in rendered = $0 }))
-        wait(timeout: 10) { self.rendered[StatusView.providerSettingsIdentifier] != nil }
+        wait("the provider settings route is shown", timeout: 10) { self.rendered[StatusView.providerSettingsIdentifier] != nil }
 
         XCTAssertEqual(rendered[StatusView.providerSettingsIdentifier], StatusText.providerSettingsLabel)
         XCTAssertNil(rendered[StatusView.retryIdentifier], "re-draining unchanged configuration is not offered")
@@ -250,7 +255,7 @@ final class StatusIntegrationTests: XCTestCase {
             permissions: EmptyPermissions(), retrier: retrier, openSystemSettings: {})
         host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 },
             actionReporter: { [unowned self] in actions = $0 }))
-        wait(timeout: 10) {
+        wait("both Try again and provider settings are shown", timeout: 10) {
             self.rendered[StatusView.retryIdentifier] != nil && self.rendered[StatusView.providerSettingsIdentifier] != nil
         }
 
@@ -260,7 +265,7 @@ final class StatusIntegrationTests: XCTestCase {
         XCTAssertEqual(rendered[StatusView.retryIdentifier], StatusText.retryLabel)
         XCTAssertEqual(rendered[StatusView.providerSettingsIdentifier], StatusText.providerSettingsLabel)
         actions[StatusView.retryIdentifier]?()
-        wait(timeout: 10) { retrier.count > 0 }
+        wait("the retrier was asked", timeout: 10) { retrier.count > 0 }
         XCTAssertEqual(retrier.count, 1)
     }
 
@@ -285,7 +290,7 @@ final class StatusIntegrationTests: XCTestCase {
             health: FixedHealth(healthSnapshot(summary: "idle")), permissions: GrantedNotifications(),
             retrier: NoopRetrier(), scheduling: scheduling, openSystemSettings: {})
         host(StatusView(model: model, renderReporter: { [unowned self] in rendered = $0 }))
-        wait(timeout: 10) {
+        wait("the notifications row shows the unfinished headline", timeout: 10) {
             self.rendered[StatusView.rowIdentifier(.notifications)]?.contains(StatusText.notificationsUnfinishedHeadline) == true
         }
 
@@ -301,18 +306,29 @@ final class StatusIntegrationTests: XCTestCase {
     func testTheAssembledScreenReadsRealHealthAndRetryKeepsTheSavedSourceUnchanged() throws {
         let built = try foregroundServices()
         let status = try XCTUnwrap(built.managementContext.statusModel)
+        let drainsBeforeSave = built.root.jobRunner.startedDrainCount
         built.captureEntry.textModel.updateText("remind me to water the plants")
         built.captureEntry.saveText()
-        wait { built.captureEntry.acknowledgment?.savedItemID != nil }
+        wait("the save is acknowledged") { built.captureEntry.acknowledgment?.savedItemID != nil }
         XCTAssertNotNil(built.captureEntry.acknowledgment?.savedItemID)
-        wait { !built.root.jobRunner.isDraining }
+        // The save starts a drain. It must have started and finished before the due job is seeded, or it would drain
+        // that job and the real core would have no stall to report.
+        wait("the drain the save started has started and finished") {
+            built.root.jobRunner.startedDrainCount > drainsBeforeSave
+                && built.root.jobRunner.finishedDrainCount >= built.root.jobRunner.startedDrainCount
+                && !built.root.jobRunner.isDraining
+        }
+
+        // With no provider configured the save's own job has ended `unsupported`, which the real status rightly reports as
+        // a provider fault beside any stall. This test is about the stall, so that finished job is removed first.
+        execute(["DELETE FROM jobs WHERE job_id <> 'job-stalled'"])
 
         // Work becomes due after the launch drain and nothing is draining it: the real core reports a stall.
         execute(dueJobStatements)
         run { await status.refresh() }
         let stalled = try XCTUnwrap(status.facts.first { $0.kind == .processing })
         XCTAssertEqual(stalled.headline, StatusText.processingStalledHeadline, "the real core reported the stall")
-        XCTAssertEqual(stalled.actions, [.retry])
+        XCTAssertEqual(stalled.actions, [.retry], "facts: \(status.facts); jobs: \(scalar("SELECT group_concat(job_id || ':' || status || ':' || ifnull(failure_reason, '-'), ', ') FROM jobs"))")
 
         let sourceBefore = scalar("SELECT text FROM captures WHERE capture_id = 'capture-stalled'")
         XCTAssertEqual(sourceBefore, "call the roofer about the leak")
@@ -321,10 +337,10 @@ final class StatusIntegrationTests: XCTestCase {
 
         run { await status.retry() }
         // A drain already in flight is followed by the requested one; either way the runner starts another.
-        wait { built.root.jobRunner.startedDrainCount > drainsBefore }
+        wait("retry made the runner start another drain") { built.root.jobRunner.startedDrainCount > drainsBefore }
         XCTAssertGreaterThan(built.root.jobRunner.startedDrainCount, drainsBefore, "retry made the real runner start a drain")
         XCTAssertTrue(status.retryRequested)
-        wait {
+        wait("the retried drain finished") {
             built.root.jobRunner.finishedDrainCount >= built.root.jobRunner.startedDrainCount
                 && !built.root.jobRunner.isDraining
         }
@@ -349,7 +365,7 @@ final class StatusIntegrationTests: XCTestCase {
         built.captureEntry.textModel.updateText("call the dentist")
         let started = Date()
         built.captureEntry.saveText()
-        wait(timeout: 5) { built.captureEntry.acknowledgment?.savedItemID != nil }
+        wait("the save is acknowledged", timeout: 5) { built.captureEntry.acknowledgment?.savedItemID != nil }
         let elapsed = Date().timeIntervalSince(started)
 
         XCTAssertNotNil(built.captureEntry.acknowledgment?.savedItemID, "the save is acknowledged under a real stall")
@@ -378,7 +394,7 @@ final class StatusIntegrationTests: XCTestCase {
         built.captureEntry.textModel.updateText("book the vet")
         let started = Date()
         built.captureEntry.saveText()
-        wait(timeout: 5) { built.captureEntry.acknowledgment?.savedItemID != nil }
+        wait("the save is acknowledged", timeout: 5) { built.captureEntry.acknowledgment?.savedItemID != nil }
 
         XCTAssertNotNil(built.captureEntry.acknowledgment?.savedItemID)
         XCTAssertLessThan(Date().timeIntervalSince(started), 3, "capture is immediate after nonuse")

@@ -83,6 +83,9 @@ actor PollPauses {
         await withCheckedContinuation { waiting.append($0) }
     }
 
+    /// How many pauses are being held; non-zero means the poll has reached its next wait.
+    var waitingCount: Int { waiting.count }
+
     func releaseAll() {
         let continuations = waiting
         waiting = []
@@ -112,8 +115,32 @@ final class HomeRecentsModelTests: XCTestCase {
         HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow })
     }
 
+    /// A fixed run of yields. Only for proving that nothing happens (or after a positive `waitUntil` for the work that
+    /// should have happened): a fixed wait cannot tell whether asynchronous work has finished.
     private func settle() async {
         for _ in 0..<500 { await Task.yield() }
+    }
+
+    /// Waits until the model's current first-page read, if any, has returned (loaded or failed).
+    private func waitForFirstPage(
+        _ model: HomeRecentsModel, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        await waitUntil("the first page read has finished", file: file, line: line) { !model.isLoadingFirstPage }
+    }
+
+    /// Waits until the poll task is holding its next pause, which means it has finished the previous round.
+    private func waitForPollToPause(
+        _ pauses: PollPauses, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(5)
+        while await pauses.waitingCount == 0 {
+            if Date() >= deadline {
+                XCTFail("timed out after 5.0 s waiting for: the poll to hold its next pause", file: file, line: line)
+                return
+            }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     func testCaptureOnlyShowsTheLockedStateAndNeverReads() async {
@@ -141,7 +168,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("a"), item("b", capturedAt: "2026-10-12T09:00:00Z")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.bodyState, .unlocked)
         XCTAssertEqual(model.entries.map(\.id), ["a", "b"])
         var calendar = Calendar(identifier: .gregorian)
@@ -155,7 +182,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         let model = makeModel()
         source.setAccess(authenticated: true)
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.bodyState, .unlocked)
         XCTAssertEqual(model.entries.map(\.id), ["a"])
     }
@@ -172,7 +199,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: "next")
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.entries.count, 1)
         source.setAccess(authenticated: false)
         XCTAssertEqual(model.bodyState, .locked, "applied before setAccess returned")
@@ -186,9 +213,10 @@ final class HomeRecentsModelTests: XCTestCase {
         source.holdsReads = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitUntil("the first read is held") { source.readCursors.count == 1 }
         source.setAccess(authenticated: false)
         source.releaseHeldReads()
+        await waitUntil("the held read has returned") { model.readsInFlight == 0 }
         await settle()
         XCTAssertTrue(model.entries.isEmpty)
         XCTAssertEqual(model.bodyState, .locked)
@@ -199,9 +227,9 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: "c1")
         source.pages["c1"] = CoreRecentItemsPage(items: [item("c")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         model.loadMoreIfNeeded(afterAppearing: "a")
-        await settle()
+        await waitUntil("the second page has been read") { !model.isLoadingMore }
         XCTAssertEqual(model.entries.map(\.id), ["a", "b", "c"])
         XCTAssertEqual(source.readCursors, [nil, "c1"])
         model.loadMoreIfNeeded(afterAppearing: "c")
@@ -213,7 +241,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         XCTAssertEqual(model.entries.map(\.id), ["new", "old"])
         XCTAssertTrue(model.entries[0].isSorting)
@@ -222,7 +250,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
         model.captureDidSave(itemID: "new", interpretationIsResolved: true)
-        await settle()
+        await waitUntil("the interpreted page has been merged") { model.justSaved.isEmpty && !model.isLoadingFirstPage && model.readsInFlight == 0 }
         XCTAssertEqual(model.entries.map(\.id), ["new", "old"])
         XCTAssertFalse(model.entries[0].isSorting)
     }
@@ -232,18 +260,19 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
-        await settle()
+        await waitForFirstPage(model)
+        await waitForPollToPause(pauses)
         await pauses.releaseAll()
-        await settle()
+        await waitForPollToPause(pauses)
         XCTAssertTrue(model.entries[0].isSorting, "still unclassified after the first poll")
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
         await pauses.releaseAll()
-        await settle()
+        await waitUntil("the typed page has been merged") { model.justSaved.isEmpty && model.readsInFlight == 0 }
         XCTAssertFalse(model.entries[0].isSorting)
         XCTAssertTrue(model.justSaved.isEmpty)
     }
@@ -251,9 +280,9 @@ final class HomeRecentsModelTests: XCTestCase {
     func testARelockStopsThePolling() async {
         source.isAuthenticated = true
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await PollPauses().wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
-        await settle()
+        await waitForFirstPage(model)
         source.setAccess(authenticated: false)
         let readsAtRelock = source.readCursors.count
         let statusReadsAtRelock = source.statusReadItemIDs.count
@@ -267,20 +296,21 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
-        await settle()
+        await waitForFirstPage(model)
+        await waitForPollToPause(pauses)
         await pauses.releaseAll()
-        await settle()
+        await waitForPollToPause(pauses)
         XCTAssertTrue(model.entries[0].isSorting, "still pending while the status says so")
         XCTAssertEqual(source.statusReadItemIDs, ["new"])
 
         // Abstained, uninterpreted or a topic-only result: finished, and the page still carries no type.
         source.finishedInterpretations = ["new"]
         await pauses.releaseAll()
-        await settle()
+        await waitUntil("the finished interpretation has cleared the sorting state") { model.justSaved.isEmpty && model.readsInFlight == 0 }
         XCTAssertEqual(model.entries.map(\.id), ["new", "old"])
         XCTAssertFalse(model.entries[0].isSorting)
         XCTAssertNil(model.entries[0].itemType)
@@ -301,14 +331,18 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z")], nextCursor: nil)
-        await settle()
+        await waitForFirstPage(model)
+        await waitForPollToPause(pauses)
         await pauses.releaseAll()
+        await waitUntil("the saved item's interpretation is treated as finished, leaving no just-saved entry") {
+            model.justSaved.isEmpty
+        }
+        // Proving that no status read happens needs the fixed settle: there is no event to wait for.
         await settle()
-        XCTAssertTrue(model.justSaved.isEmpty)
         XCTAssertTrue(source.statusReadItemIDs.isEmpty)
     }
 
@@ -341,21 +375,22 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
-        await settle()
+        await waitForFirstPage(model)
+        await waitForPollToPause(pauses)
         for _ in 0..<30 {
             await pauses.releaseAll()
-            await settle()
+            await waitForPollToPause(pauses)
         }
         XCTAssertTrue(model.entries[0].isSorting, "still pending after more attempts than the old limit")
         let readsBefore = source.readCursors.count
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
         await pauses.releaseAll()
-        await settle()
+        await waitUntil("the typed page has been merged") { model.justSaved.isEmpty && model.readsInFlight == 0 }
         XCTAssertGreaterThan(source.readCursors.count, readsBefore)
         XCTAssertFalse(model.entries[0].isSorting)
     }
@@ -364,10 +399,11 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.holdsReads = true
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await PollPauses().wait() })
-        await settle()
+        await waitUntil("the first read is held") { source.readCursors.count == 1 }
         model.shutDown()
         source.holdsReads = false
         source.releaseHeldReads()
+        await waitUntil("the held read has returned") { model.readsInFlight == 0 }
         await settle()
         let reads = source.readCursors.count
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
@@ -387,7 +423,7 @@ final class HomeRecentsModelTests: XCTestCase {
     func testRelockForgetsTheJustSavedItems() async {
         source.isAuthenticated = true
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.setAccess(authenticated: false)
         XCTAssertTrue(model.justSaved.isEmpty)
@@ -403,7 +439,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.failure = RecentItemsError.core(CoreFailure.handleClosed)
         let model = makeModel()
-        await settle()
+        await waitUntil("the failed read is reported") { model.loadFailed }
         XCTAssertTrue(model.loadFailed)
         XCTAssertEqual(model.bodyState, .unlocked)
     }
@@ -414,11 +450,11 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.pages[nil] = CoreRecentItemsPage(items: [item("b")], nextCursor: nil)
         source.publish(.item("a"))
         XCTAssertEqual(model.entries.map(\.id), ["b"], "gone before the read returns")
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(source.readCursors.count, 2)
         XCTAssertEqual(model.entries.map(\.id), ["b"])
     }
@@ -427,10 +463,10 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "old words")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "new words")], nextCursor: nil)
         source.publish(.item("a"))
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.entries.map(\.text), ["new words"])
     }
 
@@ -438,7 +474,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.publish(.item("elsewhere"))
         await settle()
         XCTAssertEqual(source.readCursors.count, 1)
@@ -459,11 +495,11 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: "next")
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.pages[nil] = CoreRecentItemsPage(items: [], nextCursor: nil)
         source.publish(.allItems)
         XCTAssertTrue(model.entries.isEmpty)
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(source.readCursors.count, 2)
         XCTAssertTrue(model.entries.isEmpty)
         XCTAssertFalse(model.canLoadMore)
@@ -474,12 +510,12 @@ final class HomeRecentsModelTests: XCTestCase {
         source.holdsReads = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitUntil("the first read is held") { source.readCursors.count == 1 }
         source.publish(.item("a"))
         source.pages[nil] = CoreRecentItemsPage(items: [], nextCursor: nil)
         source.holdsReads = false
         source.releaseHeldReads()
-        await settle()
+        await waitUntil("the first page has been read again") { source.readCursors.count >= 2 && !model.isLoadingFirstPage }
         XCTAssertEqual(source.readCursors.count, 2)
         XCTAssertTrue(model.entries.isEmpty)
     }
@@ -489,17 +525,17 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: "second")
         source.pages["second"] = CoreRecentItemsPage(items: [item("z", text: "old words")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.holdsReads = true
         model.loadMore()
-        await settle()
+        await waitUntil("the next page read is held") { source.readCursors.count >= 2 }
         XCTAssertEqual(source.readCursors, [nil, "second"], "the next page is being read")
 
         source.publish(.item("z"))
         source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("z", text: "new words")], nextCursor: nil)
         source.holdsReads = false
         source.releaseHeldReads()
-        await settle()
+        await waitUntil("the first page has been read again") { !model.isLoadingFirstPage && model.readsInFlight == 0 }
 
         XCTAssertEqual(model.entries.map(\.id), ["a", "z"])
         XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "never the page read before the change")
@@ -510,16 +546,16 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: "second")
         source.pages["second"] = CoreRecentItemsPage(items: [item("z")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         source.holdsReads = true
         model.loadMore()
-        await settle()
+        await waitUntil("the next page read is held") { source.readCursors.count >= 2 }
 
         source.publish(.item("z"))
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         source.holdsReads = false
         source.releaseHeldReads()
-        await settle()
+        await waitUntil("the first page has been read again") { !model.isLoadingFirstPage && model.readsInFlight == 0 }
 
         XCTAssertEqual(model.entries.map(\.id), ["a"])
     }
@@ -529,24 +565,26 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a"), item("b")], nextCursor: nil)
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("a"), item("b")], nextCursor: nil)
-        await settle()
+        await waitForFirstPage(model)
+        await waitForPollToPause(pauses)
 
         source.heldSnapshotReads = 1
         await pauses.releaseAll()
-        await settle()
+        await waitUntil("the poll read is held") { source.readCursors.count >= 3 }
         XCTAssertEqual(source.readCursors.count, 3, "the poll's read is held with the page before the deletion")
 
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("b")], nextCursor: nil)
         source.publish(.item("a"))
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.entries.map(\.id), ["new", "b"], "the reload after the deletion has landed")
 
         source.releaseHeldReads()
+        await waitUntil("the held poll read has returned") { model.readsInFlight == 0 }
         await settle()
         XCTAssertEqual(model.entries.map(\.id), ["new", "b"], "the poll's older page never restores the deleted item")
     }
@@ -556,25 +594,26 @@ final class HomeRecentsModelTests: XCTestCase {
         source.pages[nil] = CoreRecentItemsPage(items: [item("a", text: "old words")], nextCursor: nil)
         let pauses = PollPauses()
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
-        await settle()
+        await waitForFirstPage(model)
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
-        await settle()
+        await waitForFirstPage(model)
 
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("a", text: "old words")],
             nextCursor: nil)
         source.heldSnapshotReads = 1
         model.captureDidSave(itemID: "new", interpretationIsResolved: true)
-        await settle()
+        await waitUntil("the refresh read is held") { source.readCursors.count >= 3 }
 
         source.pages[nil] = CoreRecentItemsPage(
             items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("a", text: "new words")],
             nextCursor: nil)
         source.publish(.item("a"))
-        await settle()
+        await waitForFirstPage(model)
         XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "the reload after the correction has landed")
 
         source.releaseHeldReads()
+        await waitUntil("the held refresh read has returned") { model.readsInFlight == 0 }
         await settle()
         XCTAssertEqual(model.entries.map(\.text), ["Synthetic text", "new words"], "the refresh's older page never restores old text")
         XCTAssertFalse(model.entries[0].isSorting, "the refresh still ends the sorting state with a current page")
@@ -585,7 +624,7 @@ final class HomeRecentsModelTests: XCTestCase {
         source.isAuthenticated = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)
         let model = makeModel()
-        await settle()
+        await waitForFirstPage(model)
         model.shutDown()
         source.publish(.allItems)
         await settle()

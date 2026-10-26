@@ -584,6 +584,11 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // A job drain or a core read started by the last pass completes on its own queue, so its result buffer is freed a
+        // moment after the test body ends. Wait for that, bounded, before judging a leak.
+        _ = pump(timeout: 10) {
+            CoreHandle.liveResultBufferCount == self.baselineBuffers && CoreHandle.liveHandleCount == self.baselineHandles
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -775,6 +780,9 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         XCTAssertTrue(foregrounded)
         XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
         XCTAssertEqual(coordinator.lastReport?.outcome(of: .promptEligibility), .completed)
+        // The jobs step only requested a drain; let it finish so no core read is left running when the root shuts down.
+        let drained = await lifecycleWaitUntil { root.jobRunner.startedDrainCount >= 1 && !root.jobRunner.isDraining }
+        XCTAssertTrue(drained, "the drain the passes requested has finished")
     }
 
     func testASlowLaunchPassNeverReactivatesTheJobRunnerAfterTheAppWentToTheBackground() async throws {

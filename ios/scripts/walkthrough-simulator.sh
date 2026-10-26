@@ -2,6 +2,7 @@
 # Runs the screenshot walkthrough (OhAndWalkthroughUITests) on one simulator and checks that every expected screen
 # produced a PNG. Face ID is enrolled on the simulator and matching faces are sent while the test runs; the app's own
 # authentication is untouched. A screen the test cannot reach fails the test, and a missing PNG fails this script.
+# The UI tests must already be built (build-for-testing into .derived/Walkthrough) so no compile runs beside a booted simulator.
 # Usage: walkthrough-simulator.sh <simulator-udid> <evidence-dir> <label>
 # Output: <evidence-dir>/walkthrough/<label>/*.png, <label>.log, <label>-<appearance>.xcresult, screenshots-<label>.txt. macOS only.
 set -euo pipefail
@@ -17,7 +18,9 @@ output_dir="${evidence_dir}/walkthrough/${label}"
 rm -rf "${output_dir}" "${evidence_dir}/${label}"-*.xcresult
 mkdir -p "${output_dir}"
 
-"${script_dir}/prepare-simulator.sh" "${udid}" --erase
+# One first boot, left to settle and shut down; the boot the test runs on is then a warm one that no longer carries first-boot work.
+"${script_dir}/prepare-simulator.sh" "${udid}" --erase --shutdown-after --label "walkthrough-${label}-first-boot"
+"${script_dir}/prepare-simulator.sh" "${udid}" --label "walkthrough-${label}"
 
 # Mark the keyboard's slide-to-type introduction as seen, as a person who has used the keyboard before would have.
 xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences DidShowGestureKeyboardIntroduction -bool true || true
@@ -34,7 +37,7 @@ sleep 2
   done
 ) &
 matcher_pid=$!
-# Shut the simulator down at the end: a second booted simulator starves the next walkthrough on the hosted runner.
+# Shut the simulator down at the end: a booted simulator that is no longer needed loads the hosted runner for whatever follows.
 trap 'kill "${matcher_pid}" 2>/dev/null || true; xcrun simctl shutdown "${udid}" 2>/dev/null || true' EXIT
 
 # One test run per appearance: the simulator's appearance is set from outside the app, as a person would in Settings.
@@ -45,7 +48,7 @@ for appearance in light dark; do
   run_status=0
   (
     cd "${ios_dir}"
-    TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test \
+    TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test-without-building \
       -project OhAnd.xcodeproj \
       -scheme OhAndWalkthroughUITests \
       -configuration Debug \

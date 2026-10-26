@@ -251,7 +251,7 @@ final class ActionHandlerTests: XCTestCase {
         let handler = ActionHandler(
             core: core, journal: InMemoryActionJournal(), authorization: FakeActionAuthorization(), openItem: { _ in })
         XCTAssertEqual(handler.ingest(event(.delivered)), .persisted)
-        for _ in 0..<500 where core.calls.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        await waitUntil("the ingested delivery reaches the core without an explicit reconcile") { !core.calls.isEmpty }
         XCTAssertEqual(core.calls, ["evidence:delivered:rem-1#2"])
     }
 
