@@ -108,6 +108,17 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         pauseRunLoop()
     }
 
+    /// True while any navigation controller under the hosted root is animating a push or pop.
+    private func isNavigationTransitionRunning() -> Bool {
+        func running(_ controller: UIViewController) -> Bool {
+            if controller.transitionCoordinator != nil { return true }
+            if let presented = controller.presentedViewController, running(presented) { return true }
+            return controller.children.contains(where: running)
+        }
+        guard let root = retainedWindow?.rootViewController else { return false }
+        return running(root)
+    }
+
     /// Lays the hosted view out and runs the main loop briefly.
     private func pauseRunLoop() {
         retainedWindow?.rootViewController?.view.layoutIfNeeded()
@@ -161,10 +172,11 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         let searchRoute = ManagementRoute.entry(ManagementCatalog.searchEntryID)
         func lastIndex(of event: ManagementPresentationEvent) -> Int? { events.lastIndex(of: event) }
         let itemAppeared = try XCTUnwrap(lastIndex(of: .appeared(.item(Self.itemID), isPlaceholder: false)))
+        // A pop issued while the push animation is still running is dropped by UIKit (run 40256468525: no event in 30 s), so
+        // wait until no navigation controller in the hosted tree is mid-transition before going back.
+        settle("the push transition finished") { !self.isNavigationTransitionRunning() }
         navigation.path.removeLast()
-        // 30 s, not 10: the pop transition completes (and fires the search's appearance) only after the hosted window has
-        // laid out and animated, which run 40247595411 showed a loaded Intel runner can stretch past 10 s. The condition is unchanged.
-        settle("the search appeared again after the detail and the detail left the screen", timeout: 30) {
+        settle("the search appeared again after the detail and the detail left the screen") {
             guard events.contains(.disappeared(.item(Self.itemID))) else { return false }
             guard let searchAppeared = lastIndex(of: .appeared(searchRoute, isPlaceholder: false)) else { return false }
             return searchAppeared > itemAppeared
