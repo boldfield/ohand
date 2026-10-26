@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import OhAndCoreBridge
 
 /// Bounded waits for asserted state, replacing fixed-count `Task.yield()` loops and fixed sleeps. A fixed wait ends
 /// when a count runs out, which on a loaded simulator can be before the work it waits for; these end when the
@@ -42,4 +43,16 @@ func waitUntilPumping(
         }
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
     }
+}
+
+/// The live result-buffer count to use as a test's baseline. A core read started by an earlier test (or by the host app)
+/// can still hold its buffer when the next test's `setUp` runs, which would record 1 as the baseline and then fail the
+/// teardown's "no result buffer leaks" when the buffer is freed. Waits, bounded, for the count to reach zero first; a
+/// buffer that is still live after `timeout` seconds is a genuine leak from earlier and stays in the baseline.
+func settledLiveResultBufferCount(timeout: TimeInterval = 5) -> Int {
+    let deadline = Date().addingTimeInterval(timeout)
+    while CoreHandle.liveResultBufferCount != 0, Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+    return CoreHandle.liveResultBufferCount
 }

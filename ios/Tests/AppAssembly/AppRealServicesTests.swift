@@ -37,7 +37,7 @@ final class AppRealServicesTests: XCTestCase {
             .appendingPathComponent("app-real-services-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        baselineBuffers = settledLiveResultBufferCount()
         created = []
     }
 

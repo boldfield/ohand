@@ -25,7 +25,7 @@ final class ManagementPresentationTests: XCTestCase {
             .appendingPathComponent("management-presentation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        baselineBuffers = settledLiveResultBufferCount()
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
             configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])

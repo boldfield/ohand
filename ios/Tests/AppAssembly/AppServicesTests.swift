@@ -63,7 +63,7 @@ final class AppServicesTests: XCTestCase {
             .appendingPathComponent("app-services-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        baselineBuffers = settledLiveResultBufferCount()
         created = []
     }
 
