@@ -20,7 +20,7 @@ extension XCUIApplication {
     func launch(fixture: OhAndFixture, timeout: TimeInterval = 90) -> Bool {
         launchArguments += [Self.fixtureLaunchArgument, fixture.rawValue]
         launch()
-        return element(identifier: "capture-entry.composer").waitForExistence(timeout: timeout)
+        return element(identifier: "home.composer.field").waitForExistence(timeout: timeout)
     }
 
     /// Any element carrying an accessibility identifier.
