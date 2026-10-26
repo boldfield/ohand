@@ -804,6 +804,25 @@ private final class OpenItemRelay: @unchecked Sendable {
     }
 }
 
+/// Holds the callback that asks the person to unlock for a reminder tap that is waiting for authentication.
+private final class UnlockRequestRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable () -> Void)?
+
+    func set(_ handler: (@Sendable () -> Void)?) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    func request() {
+        lock.lock()
+        let current = handler
+        lock.unlock()
+        current?()
+    }
+}
+
 /// Holds the callback a prompt tap runs. A tap that arrives while none is set is held and handed over once, in order,
 /// when one is set, so it is never dropped.
 private final class PromptTapRelay: @unchecked Sendable {
@@ -843,6 +862,7 @@ final class NotificationActionClients: @unchecked Sendable {
     let ingestor: NotificationEventIngestor
     let receiver: NotificationEventReceiver
     fileprivate let openItem: OpenItemRelay
+    fileprivate let unlockRequest = UnlockRequestRelay()
     fileprivate let promptTap = PromptTapRelay()
     private let scopeToken: SessionScopeObserverToken
 
@@ -859,9 +879,10 @@ final class NotificationActionClients: @unchecked Sendable {
             directory: layout.directory(for: .temporaryFiles)
                 .appendingPathComponent(Self.journalDirectoryName, isDirectory: true))
         let relay = OpenItemRelay()
+        let unlockRequest = unlockRequest
         let handler = ActionHandler(
             core: ChangePublishingNotificationActionCore(base: client, changes: changes), journal: journal,
-            authorization: session, openItem: { relay.open($0) })
+            authorization: session, openItem: { relay.open($0) }, requestUnlock: { unlockRequest.request() })
         let promptTap = promptTap
         let ingestor = NotificationEventIngestor(
             now: now,
@@ -1097,6 +1118,7 @@ public final class ServiceCompositionRoot {
     private let protectionFailureTotal: Int
     private let statusReader: CoreItemStatusReader
     private let reminderCore: CoreReminderReconciler
+    private let reminderBridge: NotificationBridge
     private let promptScheduleClient: CorePromptScheduleClient
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
@@ -1176,6 +1198,7 @@ public final class ServiceCompositionRoot {
         jobRunner = assembly.jobRunner
         transcription = assembly.transcription
         reminderCore = assembly.reminderCore
+        reminderBridge = assembly.reminderBridge
         promptScheduleClient = assembly.promptScheduleClient
         promptSchedule = assembly.promptSchedule
         providerTransport = assembly.providerTransport
@@ -1232,6 +1255,25 @@ public final class ServiceCompositionRoot {
 
     deinit {
         shutDown()
+    }
+
+    /// The change to announce once a drain ends. A drain's summary names jobs, not items, so when interpretation or
+    /// transcription results were applied the change cannot say which items; it asks every list to read again
+    /// (`ItemChange.allItems`), which carries no content. Nothing is announced when no such job completed.
+    static func itemChange(afterDrain outcome: JobDrainOutcome?) -> ItemChange? {
+        guard case .finished(let summary)? = outcome else { return nil }
+        let appliesResults = summary.jobs.contains { job in
+            (job.jobType == "interpret" || job.jobType == TranscriptionJobHandler.transcriptionJobType)
+                && job.result == "settled" && job.settlement == "completed"
+        }
+        return appliesResults ? .allItems : nil
+    }
+
+    /// The change to announce for the event that ended a drain, read from the event itself: the runner's
+    /// `lastOutcome` can already belong to the re-run it started (or to that re-run's failure to start).
+    static func itemChange(afterDrainEvent event: CoreEvent) -> ItemChange? {
+        guard let summary = try? event.decode(JobDrainSummary.self) else { return nil }
+        return itemChange(afterDrain: .finished(summary))
     }
 
     // MARK: Reset
@@ -1577,6 +1619,28 @@ public final class ServiceCompositionRoot {
         notificationActions.openItem.set(handler)
     }
 
+    /// Sets (or clears, with `nil`) what runs when a reminder tap is waiting for an authenticated session, so the app can
+    /// ask the person to unlock. It may run on any thread. If the person does not unlock, call
+    /// `discardHeldNotificationOpens()`; otherwise the tap opens its item once the session authenticates.
+    public func setUnlockRequestHandler(_ handler: (@Sendable () -> Void)?) {
+        notificationActions.unlockRequest.set(handler)
+    }
+
+    /// Drops the reminder taps still waiting for authentication, so no later unlock replays them.
+    public func discardHeldNotificationOpens() async {
+        await notificationActions.handler.discardHeldOpens()
+    }
+
+    /// The ingestor every notification bridge shares, so callbacks the bridges see reach the journal and the core.
+    var notificationEventIngestor: NotificationEventIngestor { notificationActions.ingestor }
+
+    /// Records the notifications the OS delivered while the app was away, once each. Delivery evidence needs no
+    /// authenticated session. Call at launch and on each return to the foreground.
+    @discardableResult
+    public func ingestDeliveredNotifications() async -> Int {
+        (try? await reminderBridge.ingestDeliveredNotifications()) ?? 0
+    }
+
     /// Sets (or clears, with `nil`) what runs when a tapped daily prompt asks to open its suggestion. It receives the
     /// opened prompt event and may run on any thread. A tap that arrives while none is set is held and delivered once
     /// when one is set.
@@ -1600,6 +1664,18 @@ public final class ServiceCompositionRoot {
     public func reconcileReminders(
         trigger: NotificationReconcileTrigger = .explicit
     ) async throws -> NotificationPermissionReport {
+        try await reconcileReminders(trigger: trigger, ingestingDelivered: trigger == .launch || trigger == .foreground)
+    }
+
+    /// One reminder pass. With `ingestingDelivered`, notifications that fired while the app was away are recorded
+    /// first, before the pass reads what it needs to install. A lifecycle pass reads the delivered list once: the
+    /// coordinator's reminders step does, and the prompt step's second pass in the same lifecycle pass does not.
+    func reconcileReminders(
+        trigger: NotificationReconcileTrigger, ingestingDelivered: Bool
+    ) async throws -> NotificationPermissionReport {
+        if ingestingDelivered {
+            await ingestDeliveredNotifications()
+        }
         let report = try await reminderReconciler.refresh(trigger: trigger)
         recordReminderReport(report)
         return report
@@ -1784,6 +1860,7 @@ public final class ServiceCompositionRoot {
         let jobRunner: JobRunnerService
         let transcription: TranscriptionCapability
         let reminderCore: CoreReminderReconciler
+        let reminderBridge: NotificationBridge
         let promptScheduleClient: CorePromptScheduleClient
         let promptSchedule: PromptScheduleService
         let rootReference: WeakRootReference
@@ -1907,10 +1984,17 @@ public final class ServiceCompositionRoot {
             router.register { statusReader.handle($0) }
             undo.append { statusReader.shutDown() }
 
+            let itemChanges = ItemChangeSignal()
+            let notificationActions = NotificationActionClients(
+                core: core, layout: layout, session: adapters.readSession, now: environment.now,
+                changes: itemChanges, forwardTo: environment.notificationEvents)
+            undo.append { notificationActions.shutDown(session: adapters.readSession) }
+            router.register { notificationActions.client.handle($0) }
+
+            // Delivered notifications found at launch and on foreground go through the same ingestor as live
+            // callbacks, so they reach the journal and the core instead of a discarded handler.
             let bridge = NotificationBridge(
-                center: adapters.notificationCenter,
-                ingestor: NotificationEventIngestor(now: environment.now, handler: environment.notificationEvents),
-                now: environment.now)
+                center: adapters.notificationCenter, ingestor: notificationActions.ingestor, now: environment.now)
             let reminderCore = try CoreReminderReconciler(
                 core: core, bridge: bridge, center: adapters.notificationCenter)
             undo.append { reminderCore.invalidate() }
@@ -1924,15 +2008,10 @@ public final class ServiceCompositionRoot {
                 core: promptScheduleClient, timeZone: environment.timeZone,
                 install: { trigger in
                     guard let root = rootReference.root else { throw CancellationError() }
-                    return try await root.reconcileReminders(trigger: trigger)
+                    // The reminders step of the same lifecycle pass already read the delivered list.
+                    return try await root.reconcileReminders(trigger: trigger, ingestingDelivered: false)
                 })
 
-            let itemChanges = ItemChangeSignal()
-            let notificationActions = NotificationActionClients(
-                core: core, layout: layout, session: adapters.readSession, now: environment.now,
-                changes: itemChanges, forwardTo: environment.notificationEvents)
-            undo.append { notificationActions.shutDown(session: adapters.readSession) }
-            router.register { notificationActions.client.handle($0) }
             let itemCorrectionClient = CoreItemCorrectionClient(core: core)
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
@@ -2055,7 +2134,15 @@ public final class ServiceCompositionRoot {
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
                 retryDelay: configuration.jobRetryDelaySeconds)
             undo.append { jobRunner.shutDown() }
-            router.register { jobRunner.handle($0) }
+            // Each drain's end is checked as it happens, not only the last one of a re-run chain: a drain that
+            // applied results and was followed at once by an empty or failed drain must still refresh the lists.
+            router.register { event in
+                let handled = jobRunner.handle(event)
+                if handled, let change = ServiceCompositionRoot.itemChange(afterDrainEvent: event) {
+                    itemChanges.publish(change)
+                }
+                return handled
+            }
 
             let providerTransport = try adapters.attachProviderTransport(core, adapters.sender)
             undo.append { providerTransport.shutDown() }
@@ -2072,7 +2159,7 @@ public final class ServiceCompositionRoot {
             return Assembly(
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
-                reminderCore: reminderCore, promptScheduleClient: promptScheduleClient,
+                reminderCore: reminderCore, reminderBridge: bridge, promptScheduleClient: promptScheduleClient,
                 promptSchedule: promptSchedule, rootReference: rootReference, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
                 itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,

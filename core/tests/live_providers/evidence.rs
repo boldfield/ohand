@@ -135,7 +135,7 @@ pub fn ensure_private_directory(directory: &Path) -> PathBuf {
     resolved
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) {
+pub fn write_private_file(path: &Path, bytes: &[u8]) {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)

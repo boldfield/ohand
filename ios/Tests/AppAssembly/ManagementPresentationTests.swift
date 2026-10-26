@@ -25,7 +25,7 @@ final class ManagementPresentationTests: XCTestCase {
             .appendingPathComponent("management-presentation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        baselineBuffers = settledLiveResultBufferCount()
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
             configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
@@ -49,6 +49,11 @@ final class ManagementPresentationTests: XCTestCase {
         navigation = nil
         services.shutDown()
         services = nil
+        // A core read issued before the shutdown completes on its own queue; wait for its buffer to be freed.
+        let bufferDeadline = Date().addingTimeInterval(5)
+        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < bufferDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -66,7 +71,20 @@ final class ManagementPresentationTests: XCTestCase {
         settle { true }
     }
 
-    /// Runs the main loop until the condition holds or five seconds pass.
+    /// Lays the hosted view out and turns the run loop until the condition holds, failing the test (naming the condition)
+    /// if it does not within five seconds.
+    private func waitForScreen(
+        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        waitUntilPumping(condition, file: file, line: line) {
+            retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
+        }
+    }
+
+    /// Runs the main loop until the condition holds or five seconds pass, without failing. Only for a wait that is meant to
+    /// run out (`{ false }`, proving that nothing is presented) or a first layout pass; a positive wait uses
+    /// `waitForScreen`.
     private func settle(until condition: () -> Bool) {
         let deadline = Date(timeIntervalSinceNow: 5)
         repeat {
@@ -78,7 +96,7 @@ final class ManagementPresentationTests: XCTestCase {
     private let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
 
     private func assertPlaceholderIsVisible(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
-        settle { placeholderFrames[identifier] != nil }
+        waitForScreen("the placeholder is reported") { placeholderFrames[identifier] != nil }
         let frame = placeholderFrames[identifier] ?? .zero
         XCTAssertGreaterThan(frame.width, 0, "the placeholder has width", file: file, line: line)
         XCTAssertGreaterThan(frame.height, 0, "the placeholder has height", file: file, line: line)
@@ -98,7 +116,7 @@ final class ManagementPresentationTests: XCTestCase {
         XCTAssertTrue(events.isEmpty, "nothing is presented while the device owner has not answered")
 
         authenticate(.authenticated, grantingScope: true)
-        settle { events.contains(.appeared(.item("item-1"), isPlaceholder: true)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.item("item-1"), isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.item("item-1"), isPlaceholder: true)))
         assertPlaceholderIsVisible(ItemPlaceholderView.identifier)
@@ -110,7 +128,7 @@ final class ManagementPresentationTests: XCTestCase {
         host(ManagementDestinations())
 
         navigation.openItem(itemID: "item-2")
-        settle { events.contains(.appeared(.item("item-2"), isPlaceholder: true)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.item("item-2"), isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.item("item-2"), isPlaceholder: true)))
         assertPlaceholderIsVisible(ItemPlaceholderView.identifier)
@@ -128,7 +146,7 @@ final class ManagementPresentationTests: XCTestCase {
         host(destinations)
 
         navigation.openItem(itemID: "item-3")
-        settle { events.contains(.appeared(.item("item-3"), isPlaceholder: false)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.item("item-3"), isPlaceholder: false)) }
 
         XCTAssertTrue(events.contains(.appeared(.item("item-3"), isPlaceholder: false)))
         XCTAssertEqual(Set(builtFor), ["item-3"])
@@ -140,7 +158,7 @@ final class ManagementPresentationTests: XCTestCase {
         host(ManagementDestinations())
 
         navigation.openSuggestion()
-        settle { events.contains(.appeared(.suggestion, isPlaceholder: true)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.suggestion, isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.suggestion, isPlaceholder: true)))
         assertPlaceholderIsVisible(SuggestionPlaceholderView.identifier)
@@ -154,7 +172,7 @@ final class ManagementPresentationTests: XCTestCase {
         host(destinations)
 
         navigation.openSuggestion()
-        settle { events.contains(.appeared(.suggestion, isPlaceholder: false)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.suggestion, isPlaceholder: false)) }
 
         XCTAssertTrue(events.contains(.appeared(.suggestion, isPlaceholder: false)))
         XCTAssertNil(placeholderFrames[SuggestionPlaceholderView.identifier], "a registered destination replaces the placeholder")
@@ -164,11 +182,11 @@ final class ManagementPresentationTests: XCTestCase {
         scope = .authenticated
         host(ManagementDestinations())
         navigation.openItem(itemID: "item-4")
-        settle { events.contains(.appeared(.item("item-4"), isPlaceholder: true)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.item("item-4"), isPlaceholder: true)) }
 
         scope = .captureOnly
         navigation.revalidate()
-        settle { events.contains(.disappeared(.item("item-4"))) }
+        waitForScreen("the host reports that the screen disappeared") { events.contains(.disappeared(.item("item-4"))) }
 
         XCTAssertTrue(events.contains(.disappeared(.item("item-4"))))
         XCTAssertEqual(navigation.path, [])
@@ -179,10 +197,10 @@ final class ManagementPresentationTests: XCTestCase {
         scope = .authenticated
         host(ManagementDestinations())
         navigation.openItem(itemID: "item-5")
-        settle { events.contains(.appeared(.item("item-5"), isPlaceholder: true)) }
+        waitForScreen("the host reports that the screen appeared") { events.contains(.appeared(.item("item-5"), isPlaceholder: true)) }
 
         navigation.returnToCapture()
-        settle { events.contains(.disappeared(.item("item-5"))) }
+        waitForScreen("the host reports that the screen disappeared") { events.contains(.disappeared(.item("item-5"))) }
 
         XCTAssertTrue(events.contains(.disappeared(.item("item-5"))))
         XCTAssertEqual(navigation.path, [])

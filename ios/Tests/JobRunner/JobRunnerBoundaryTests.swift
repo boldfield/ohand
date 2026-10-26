@@ -377,6 +377,9 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
 
         XCTAssertEqual(job(session)?.status, "completed")
         XCTAssertEqual(job(session, "job-native-4")?.status, "failed")
+        // The service marks the drain finished under its lock and reports to the metrics sink just after releasing it, so
+        // the sink can lag the drain count by a moment on a loaded host: wait for the report, then assert it exactly.
+        waitUntilPumping("the failed job is reported to the metrics sink") { !metrics.records.isEmpty }
         XCTAssertEqual(metrics.records, [.processingFailure(.other)], "only the failed job is counted")
     }
 
@@ -389,9 +392,18 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
             storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), metrics: metrics)
 
         session.service.activate()
-        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertTrue(
+            session.waitForFinishedDrains(1),
+            "the drain finished (started \(session.service.startedDrainCount), finished \(session.service.finishedDrainCount))")
 
-        XCTAssertEqual(metrics.records, [.processingFailure(.capabilityUnavailable)])
+        // Cause: not diagnosed. The only CI failure (run 39713189466) failed the 15 s wait for the drain above, so the
+        // drain did not finish and go idle in time; the cause is not established. The messages carry the drain counts and
+        // last summary so the next occurrence can be read. The wait below is only for the sink, which the service
+        // reports to just after unlocking.
+        waitUntilPumping("the deferred job is reported to the metrics sink") { !metrics.records.isEmpty }
+        XCTAssertEqual(
+            metrics.records, [.processingFailure(.capabilityUnavailable)],
+            "drains started: \(session.service.startedDrainCount); last summary: \(String(describing: session.summary()))")
     }
 
     func testAnAllSuccessfulDrainReportsNoFailure() throws {

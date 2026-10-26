@@ -6,6 +6,12 @@ Addendum 2026-10-08: V08 was originally excluded as an externally blocked eviden
 
 Addendum 2026-10-23: U10 is split the same way into U10a (simulator-checkable accessibility, fixed and gated in CI) and U10b (the maintainer's actual-device VoiceOver, Dynamic Type and keyboard pass). The original task `f5423770` blocked on the missing device evidence and is retired. T05 now depends on U10b.
 
+Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity, metrics build field, the signing wrapper and an automated simulator upgrade check) and T10b (the maintainer's signed candidate and device upgrade). The original task `ddc1fc6c` blocked on the device criteria after three rejected rounds and is retired. T05 now depends on T10b. U10a now also depends on T10a, because both edit `ios/project.yml`.
+
+Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
+
+Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
+
 ## Execution authority
 
 Read this document with `m1-task-refinement.json`, `m1-plan.md` and the architecture contract. The original `m1-tasks.json` remains the immutable baseline and ownership-group catalog used by the existing contract checker. For current execution, apply this overlay: each replaced group delegates its listed paths to the child tasks below, and consumers depend on its last child. An archived parent is an audit record, not completed implementation.
@@ -338,6 +344,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | V08 | V08a, V08b | The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block. |
 | P08 | P08a, P08b | Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block. |
 | U10 | U10a, U10b | Automated audits and their fixes can be done and checked in the simulator; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them instead of finding them. |
+| T10 | T10a, T10b | The fleet can version builds, test the signing wrapper with stubbed tools and check an upgrade in the simulator; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling and the automated check land while the device evidence stays an honest block. |
 
 ## Retained unstarted tasks
 
@@ -395,7 +402,6 @@ Each was reviewed for sizing. The following remain one bounded module, integrati
 | U10 | Complete native accessibility and interaction validation |
 | T03 | Test reminder and suggestion resilience after a lapse |
 | T09 | Exercise the full simulator loop with fake providers |
-| T10 | Version trial builds and verify upgrade persistence |
 | T05 | Run the actual-device M1 functional exit matrix |
 | T06 | Produce the signed M1 trial build and installation guide |
 | T07 | Write M1 setup and operational recovery documentation |
@@ -3772,6 +3778,10 @@ Acceptance:
    - Two new contrastive fixtures: `split-day-task-clock` (the maintainer's capture, with a synthetic reference instant) and `split-clock-task-day`. Both are explicit reminders with oracle instants.
 5. `make check` and `make test` pass. There is no native change. After landing, the coordinator reruns the live harness with both Claude models, and both new fixtures must match.
 
+**Ownership amendment (coordinator, 2026-10-24, after the first claim blocked).** The worker was right. `record_reminder` and `candidate_agreement` (`core/src/interpretation/apply/mod.rs`) resolve only the quoted span. With the clock-only span form, the resolver sees "at 3 p.m." with no day, so it never sees Friday, and the model's correct instant is rejected. F46 now also owns `core/src/interpretation/apply/mod.rs`, only for this seam. When the span sits inside a covered split-shape sentence, resolve the combined day-and-clock phrase from `core/src/time/` instead of the span text. Use that same phrase for the agreement check and for `apply_derived_request`. Every other path through `record_reminder` is unchanged. F29, the last task that owned `apply/`, has landed.
+
+**Second ownership amendment (coordinator, 2026-10-24).** F46 also owns `docs/validation/intent-fixtures.md`, only to add the rows for `split-day-task-clock` and `split-clock-task-day`. `core/tests/fixture_validation/main.rs` fails when a contrastive fixture is missing from that document. The round-3 review's only blocking finding was this gap.
+
 ### F47
 
 Make the iOS test suite deterministic: fix the intermittent failures
@@ -3813,7 +3823,9 @@ Owned paths: test code only. That is the test files named above and the twelve f
 
 No production code.
 
-Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`) and F42 (owns one `HomeRecentsModelTests` test). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+Dependencies: F37 (owns `ios/Tests/NotificationActions/` and `ios/Tests/AppAssembly/`). F44 and F45 wait for F47, so the test files are not edited by two tasks at once.
+
+Amendment (2026-10-23): F47 no longer waits for F42. F42 was blocked until F47 landed, so the two waited on each other. F42's pull request no longer edits `ios/Tests/HomeRecents/`, and its remaining test edits are in `ios/Tests/VoiceCapture/`, outside F47's scope. F47 now owns `testAFailedReadKeepsTheListAndOffersARetry`; the F42 amendment's permission to edit that test is withdrawn. F42 resubmits after F47 lands and needs its own green exact-head run.
 
 Acceptance:
 
@@ -3829,4 +3841,466 @@ Acceptance:
    - Nothing in `ios.yml` changes.
    - No timeout over 10 s without a stated reason.
 5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, with no test from the list failing. Rerun the whole workflow after the first success, not only a failed job. Link all three in the PR. Any failure during those runs is reported, with its test and cause, not hidden by a rerun.
+
+
+Amendment (2026-10-24): F47 blocked with its test fixes done. Its three-run evidence (acceptance 5) failed on causes outside its owned paths:
+- The simulator readiness gate in `ios/scripts/prepare-simulator.sh` timed out in the walkthrough job twice and the NotificationProbe step once, with the host at load average 400–480, 0% idle and about 100 MB of free memory. F49 owns this.
+- `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased` failed its 30 s condition wait on an unloaded host. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` is still undiagnosed. F50 owns both.
+
+F47 now depends on F37, F49 and F50. After both land, rebase onto main and collect acceptance 5 as written. Its criteria are unchanged.
+
+Amendment 2 (2026-10-24, later): F50 is retired. Neither named failure reproduced in 250 iterations each (run 40074375705), and a read-through found no product interleaving that leaves the reset gate held. The only reproduced failure was test-side, at `CompositionRootTests.swift:240`: `tearDownWithError` checks the process-wide `CoreHandle.liveResultBufferCount` against its baseline without waiting for quiescence. The resumed reset in the two reset tests finishes on a background task after the assertion, so the next test's baseline can start at 1. It failed in 2 and 8 of 250 iterations. F47 owns that file and fixes it under acceptance 2 (state shared between tests): poll the live buffer and handle counts back to the baseline with a deadline in tearDown, as `AppServicesTests.swift:77` and `:530` already do, and settle setUp's baseline the same way. The assertion stays. If a named reset or JobRunner test fails during the acceptance-5 runs, report it with its log, as acceptance 5 already requires. F47 now depends on F37 and F49 only.
+
+Amendment 3 (2026-10-25): F47 absorbs F49 and lands both in one PR.
+
+On `macos-26-intel`, F49's layout (PR #363, head ddc4ebe, run 40167745365) removed the host failures. There was no readiness-gate or settle failure, and no swapping. What failed was test code that F49 cannot edit:
+- `AppRealServicesTests.swift:343` (simulator job, attempt 1);
+- `WalkthroughUITests.swift:176` and `:90`, UI query timeouts at regular width;
+- `WalkthroughUITests.swift:277`, Search did not open, at compact width.
+
+F47's fixes are not on that branch. F49 cannot reach three green runs without F47, and F47 cannot reach them without F49's runner layout. F49 is therefore retired, and its work continues inside F47:
+1. **Branch.** Merge `origin/mr/198b583c` (F49 at ddc4ebe or later) into F47's branch `mr/e78d3dae`, then merge current `main`. Continue on PR #358, and close PR #363 with a link to #358 once #358 lands.
+2. **Owned paths.** F47 gains F49's owned paths, including its amendment: `.github/workflows/ios.yml` (job structure and simulator preparation), `ios/scripts/prepare-simulator.sh`, the `ios/scripts/*-simulator.sh` scripts where they boot, erase or shut down a simulator, their tests under `ios/scripts/`, the runner label in `ios/scripts/check_project_config.py` and its tests, and the "Required checks for macOS workers" section of `AGENTS.md`. Product code stays out of scope.
+3. **Acceptance.**
+   - F47's acceptance 1–4 still apply.
+   - F49's acceptance 1–4 and 6, and its amendment, also apply. Its runner, build-before-boot, fail-closed settle and `host-pressure.txt` stay as F49 left them, unless a change is measured and justified in the PR.
+   - Acceptance 5 is the shared criterion of both tasks: three consecutive successful full reruns of `ios.yml` at the exact head, with no readiness-gate or settle failure and no named test failing.
+   - The four Intel failures above join the named tests under acceptance 2, and each needs a stated cause.
+4. **Dependencies.** F47 depends on F37 only. U10a now depends on F47 in place of F49.
+
+Amendment 4 (2026-10-25): the Intel hosts are CPU-bound, not memory-bound, and much of that CPU is host work the job does not need.
+
+Facts from runs 40167745365 and 40224042162 (PR #358 head b373cd8):
+- **No swapping.** Every host snapshot shows `0(0) swapins, 0(0) swapouts`, so memory is not the constraint on `macos-26-intel`.
+  - "Lowest free memory" (18–20 MB) is misleading on macOS, because file cache counts as used.
+  - `host-pressure.txt` must also record swapins, swapouts and compressor size for each preparation.
+- **Load and boot times.** Load reaches 400–800 on 4 cores. Cold boots took 548–987 s in some runs and 172 s in others.
+- **Host CPU use beyond the simulator, across the walkthrough and simulator-job snapshots:**
+  - host `diagnosticd`: 30–46% in each of six samples;
+  - `spindump`: 78%, running for 17 minutes;
+  - Spotlight `mds` and `mds_stores`: 47% and 15%;
+  - `WeatherWidget`: 41%;
+  - `diskimagesiod` and `diskarbitrationd`.
+- GitHub's `provjobd` cannot be touched. None of the rest is needed by the job.
+
+Levers, measured at the same head; keep each one only if it helps:
+1. **Stop unneeded host work at job start.** The hosted runner has passwordless `sudo`.
+   - Turn off Spotlight indexing on all volumes (`sudo mdutil -a -i off`).
+   - Disable and stop `spindump`.
+   - Stop host agents that no step uses, such as widgets.
+   - Log what was stopped. Never stop anything the runner, CoreSimulator, Xcode or the evidence needs.
+2. **Find what drives `diagnosticd`, and turn it down.** Candidates are host or simulator log streaming by a script or by `xcodebuild` result collection, and simulator log levels. Turn off only what the evidence AGENTS.md lists does not need. Keep `OhAndTests.xcresult` and the named logs.
+3. **Compare runners per job.** For each simulator-booting job at the same head, compare `macos-26` (arm64, 7 GB) with `macos-26-intel`.
+   - On arm64, build before boot and terminate the build service (`XCBBuildService`, SourceKit) before the first boot, so the memory the build held is returned.
+   - Report swapouts, peak load and time to responsive on both runners.
+   - Choose each job's runner from those numbers. Arm64 has a GPU and faster cores; Intel has the memory.
+4. **Splitting the simulator job.** It may be split, for example by moving NotificationProbe and the credential relaunch check into their own job. State the extra concurrent macOS job; the account runs at most 5.
+
+**Unchanged:**
+- Acceptance 5.
+- Every evidence file.
+- The readiness thresholds.
+- No `continue-on-error` and no test retries.
+
+Test waits may be bounded, but a wait longer than 90 s needs a measured reason in the PR.
+
+If the hosts still starve after levers 1–4, block with the measurements for each lever. The coordinator then takes the self-hosted option to the maintainer. Do not ask for paid runners: the maintainer declined them on 2026-10-25.
+
+### T10a
+
+Version trial builds, carry the build identity into metrics, and check upgrades in the simulator
+
+Make each trial build identify its revision, give the maintainer a tested way to produce the signed candidate, and prove automatically that installing a newer build over an older one keeps the person's data.
+
+Why T10 was split: T10's criteria mix work the fleet can do with a signed build and an upgrade on the maintainer's iPhone, which only the maintainer can do. Its round-3 attempt (PR #356) was rejected for two reasons. Its simulator test did not compile, because it ran SQL through `CoreHandle`, which has no database handle. It also never installed an earlier build: it opened the same store twice with the same code. The worker then blocked on the device criteria. PR #356 (branch `mr/ddc1fc6c`, head `2b9d970`) can be reused where it is correct, notably `tools/release/build_info.py` and its tests, but neither reviewer finding may carry over.
+
+Owned paths:
+- `tools/release/` (build identity, the candidate signing wrapper, the simulator upgrade check, and their tests);
+- `ios/UITests/Upgrade/` (new UI test target) and `ios/scripts/generate_build_info.sh`;
+- `ios/project.yml`, only for the build-identity settings and the new target and scheme;
+- `.github/workflows/upgrade.yml` (new);
+- `ios/AppAssembly/UpgradeCheck/` (new, debug-only), with a call site in `ios/AppAssembly/` added after F45;
+- additive changes in `core/src/metrics/` and `ios/Services/Metrics/` for the build identity;
+- `docs/testing/m1-upgrade-evidence.md` (procedure and simulator results), `docs/releases/m1-trial/README.md` (the candidate record format) and `docs/validation/evidence/upgrade/` (simulator records).
+
+Not owned: `.github/workflows/ios.yml` (U10a), `tools/apple-build/` (P08a and P11a; call it, do not change it), `tools/apple-build/trial/` (T06), `ios/UITests/Walkthrough/`, and the device sections of `docs/testing/m1-upgrade-evidence.md` (T10b).
+
+Dependencies: T10's dependencies (P08b, T09, P11b), all merged, and F45, which owns `ios/project.yml` and `ios/AppAssembly/` first.
+
+Acceptance:
+
+1. **Build identity.**
+   - Every app build carries its marketing version, a build number, the full git revision and a dirty flag in its Info.plist.
+   - The build number is reproducible from the revision and increases along `main`, so a later trial build always installs over an earlier one. For example, use the first-parent commit count.
+   - The candidate build refuses a dirty tree.
+   - Tests cover the derivation, a dirty tree and a missing git checkout. An unknown revision fails the build; it is never written as a placeholder.
+2. **Metrics name the build.** The content-free metrics export (`export_metrics`, `ohand.metrics.v1`) gains a `build` object: version, build number, revision and dirty flag, which the app supplies from its Info.plist. The change is additive. If old readers would break, bump the schema version and say why. Core and Swift tests show the exported report names the build. Nothing else enters the report.
+3. **Simulator upgrade check.** `tools/release/simulator_upgrade_check.sh`:
+   1. builds `OhAndApp` (Debug, simulator) at a prior revision, taken from a git worktree, and at the candidate revision;
+   2. installs the prior build;
+   3. seeds it with synthetic data through the app's own services: several text captures, at least one correction, one deleted item (a tombstone), a configured provider profile with a synthetic endpoint and credential, and one explicitly scheduled reminder. The data is written by driving the prior app, either through the UI or through F45's fixture mode where it writes through production services. Writing to the database directly, or through a test-only path that bypasses the services, does not count;
+   4. installs the candidate over the prior build with `simctl install`, never uninstalling or erasing;
+   5. launches the candidate, authenticates the way the walkthrough does, and verifies the data.
+
+   Suggested route: a UI test target with no target application, which drives the installed app through `XCUIApplication(bundleIdentifier:)`, so xcodebuild does not reinstall it.
+4. **What the check proves.** The check records the installed build number (`simctl appinfo`) before seeding, after the upgrade and after relaunch, and records the data container path before and after, which must be the same. After the upgrade it requires:
+   - every seeded source and correction is present and authoritative;
+   - the deleted item stays deleted, and search and recents do not show it;
+   - the provider profile and its credential are still configured, and Processing still routes to it;
+   - the reminder keeps the same identifier and fire time. Exactly one pending notification request exists for it, with no orphan or duplicate.
+
+   The reads come from a debug-only, content-free upgrade report. The candidate writes it to its own data container when launched with a launch argument, and only after the app's own authentication succeeds. The report holds counts, states, identifiers that the synthetic run created and instants. It never holds text. It is compiled out of Release builds, and a test shows it is absent there. When the prior revision also contains the report, the check records reminder identifiers before the upgrade and requires them to be equal afterwards.
+5. **Prior revision.** The prior revision is an earlier `main` commit, named by full SHA in the record. For this task's own evidence, use the PR's merge base. Rebuilding the same revision with a different build number does not count as an upgrade.
+6. **CI.** `.github/workflows/upgrade.yml` runs the check on macOS for pull requests that touch `tools/release/`, `ios/UITests/Upgrade/`, `ios/AppAssembly/UpgradeCheck/` or the core store's migrations, and on `workflow_dispatch`. It has `contents: read`, needs no secrets, uploads the report and logs, and keeps them for 7 days. The exact-head run must succeed and be linked, as AGENTS.md requires for native changes. The committed simulator record under `docs/validation/evidence/upgrade/` names the run, both revisions and build numbers, the simulator and runtime, and the collection time.
+7. **Candidate signing wrapper.**
+   - `tools/release/sign_trial_candidate.sh` calls the P08a/P11a tooling to build and export the signed `OhAndApp` candidate with its embedded extension.
+   - It writes a candidate record in the format `docs/releases/m1-trial/README.md` defines: revision, version and build, the SHA-256 of the exported archive, the signing route, and the profile expiry date.
+   - The record never holds team identifiers, profile UUIDs, certificate names or hashes, device identifiers, or any hash of them.
+   - Behaviour tests on Linux use stubbed Apple tools, as P08a's do. They cover a dirty tree, a missing profile mapping for either bundle identifier, and a checksum mismatch.
+8. **Procedure for T10b.** `docs/testing/m1-upgrade-evidence.md` gives the maintainer's steps:
+   - produce the candidate;
+   - upgrade the existing trial-phone install in place, without deleting it;
+   - check sources, corrections, deleted items, the provider profile and a scheduled reminder through the app;
+   - record the result in a named evidence format.
+
+   The procedure records counts and outcomes, never capture text.
+
+Contributes to original T10 criteria: 1 (simulator), 2, 3 (tooling), 4 (simulator records).
+
+### T10b
+
+Record the signed trial candidate and the maintainer's device upgrade
+
+Fold the maintainer's signed candidate and the result of upgrading it on the trial iPhone into the release and upgrade documents as cited evidence.
+
+Owned paths: `docs/releases/m1-trial/` (the candidate record), the device sections of `docs/testing/m1-upgrade-evidence.md`, and `docs/validation/evidence/upgrade/` (device records).
+
+Dependencies: T10a and U10a, so the one signed candidate serves U10b's device pass and T05.
+
+Context: this task starts blocked. The maintainer:
+1. runs `tools/release/sign_trial_candidate.sh` on a clean `main` checkout that contains T10a and U10a;
+2. installs the candidate over the phone's existing install, following the T10a procedure;
+3. commits the sanitized candidate record and the device upgrade record;
+4. unblocks this task, naming both files.
+
+A worker claimed without those files must re-block, naming the exact missing file, and must not substitute simulator results.
+
+Acceptance:
+1. The candidate record names the revision, version and build, the archive's SHA-256, the signing route and the profile expiry date, and holds nothing T10a's criterion 7 excludes.
+2. The device record names the candidate build, the build that was on the phone before, the device model and the collection time. It also records the outcome for each check in the procedure. Any lost, duplicated or resurrected data, and any lost or duplicated reminder, fails the check until a fix lands and the upgrade is repeated with a new candidate.
+3. Every observed result cites the named record. Raw screenshots and personal content stay with the maintainer, and the repository holds an auditable reference to them. T06 distributes this candidate. A rebuilt binary needs the affected device checks repeated.
+
+Contributes to original T10 criteria: 1 (device), 3, 4.
+
+### F48
+
+Show reminders that have no time, on Home and in Status, so they are not silently lost
+
+Found by the coordinator on 2026-10-24. "Remind me later to call Joe" is stored correctly: the model's reminder proposal for "later" is ambiguous, or its claimed instant is ignored because the core cannot resolve "later". The reminder is kept with request state `not_scheduled_yet`, no instant and no notification. This was checked through `core/tests/proposal_application/` with "later", "later today", "this afternoon", and an invented `explicit` or `inferred` instant; every case was stored this way with zero schedule operations.
+
+Nothing points the person to it. The note's detail screen shows "No time set" (`app/reminders/ReminderEditText.swift:44`), but:
+- `NotificationReadiness.outlook` (`ios/Services/NotificationPermission/NotificationReadiness.swift:90`) maps every request state other than `resolved` and `unschedulable` to `.notApplicable`, so Status never counts a reminder without a time, although the reconcile facts already include it (`core/src/ffi/notification_reconciliation.rs:591`);
+- Home rows carry no reminder state (`RecentItem`, `core/src/retrieval/recent/mod.rs:36`).
+
+The person asked to be reminded and will not be, and nothing says so.
+
+Not in scope: giving "later", "this afternoon" or "this evening" a fixed hour. Times are never guessed (DESIGN.md). This task only makes the missing time visible and one tap from being set.
+
+Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths:
+- `ios/Services/NotificationPermission/NotificationReadiness.swift` and `ios/Tests/NotificationPermission/`;
+- `app/status/` and `ios/Tests/Status/`;
+- `app/home/` and `ios/Tests/HomeRecents/`;
+- additive changes in `core/src/retrieval/recent/`, `core/src/ffi/recent_items.rs`, `ios/OhAndCoreBridge/CoreHandle+RecentItems.swift`, `ios/Services/RecentItems/` and `ios/Tests/RecentItems/`.
+
+Dependencies: F44, which edits `app/status/` first (and, through F47, the Status and HomeRecents tests).
+
+Acceptance:
+
+1. **Status counts them.** A reminder whose request state is `not_scheduled_yet`, on an active item, gets its own outlook (for example `.needsTime`). It is not `.notApplicable`, and it is not counted as unscheduled for a permission or capacity reason. Status shows it in the attention section with its own headline and one plain line, for example "1 reminder needs a time. You asked to be reminded but didn't say when." Locked, Status shows only the count. Unlocked, it lists up to 5 such notes, newest first, in the same row form F44 uses for failed notes: first line of text through the existing private read, and capture time. Tapping a row opens that note's detail, where the existing reminder editor sets the time.
+2. **Home marks them.** `RecentItem` gains a content-free flag that is true only when the item is active and its reminder's request state is `not_scheduled_yet`. The Home row for such a note shows a short "Needs a time" marker with an accessibility label that says the same. Tapping the row opens the note's detail as today. The flag is false for every other reminder state, including `unsupported_recurrence`, `unschedulable` and `cancelled`, and for items with no reminder.
+3. **The marker and the Status entry go away** once a time is set and the request is resolved, or the reminder is cancelled, or the note is deleted. Tests cover each.
+4. **No intent or scheduling change.** Nothing in `core/src/interpretation/`, `core/src/time/` or `core/src/reminders/` changes. No reminder is ever given a time by this task.
+5. **Tests:**
+   - Core tests for the recent-item flag in each reminder state, with a deleted item and with no reminder.
+   - Swift tests for the outlook mapping.
+   - Hosted view tests for Status (locked, unlocked with 1 and with more than 5) and for a Home row with and without the marker. Run them in both appearances.
+   - `make check` and `make test` pass.
+   - The exact-head macOS CI evidence that AGENTS.md requires.
+
+
+### F49
+
+Stop the hosted macOS runner from starving when it boots simulators
+
+Found from F47's evidence runs on 2026-10-24. This is not a test-timing problem. Each job on the standard `macos-26` runner (3 cores, 7 GB) boots several freshly erased simulators. An erased simulator's first boot saturates the runner for many minutes. The readiness gate then fails, or UI queries time out ("Failed to get matching snapshots: Timed out while evaluating UI query").
+
+Host snapshots from `ios/scripts/prepare-simulator.sh`:
+
+| Run, attempt, job | Moment | Load average (1 min) | Free memory | Result |
+|---|---|---|---|---|
+| 40063730585 a2, walkthrough, compact (iPhone) | before boot | 7.5 | 633 MB | |
+| | after responsive (184 s) | 406 | 97 MB, 15k swapouts | passed |
+| 40063730585 a2, walkthrough, regular (iPad) | before boot | 186 | 3.2 GB | |
+| | gate timeout (240 s) | 459 | 124 MB, 38k swapouts | failed |
+| 40063730585 a3, simulator job, NotificationProbe (second erase) | gate timeout (240 s) | 484 | 130 MB | failed |
+
+Each simulator boot adds about 255 simulator processes. Cold boots per job today:
+- `simulator`: the OhAndTests device, then one erase and boot per NotificationProbe suite (2).
+- `walkthrough`: an erased iPhone, then an erased iPad.
+
+The job that boots a second fresh device is the one that fails.
+
+Goal: no job starts a UI test on a starved host, and no job pays for more than one first boot of each device type. Use the standard free runners. A larger or paid runner needs the maintainer's separate authorization, and this task does not ask for it.
+
+Candidate approaches, best first. Measure them, then choose:
+1. **Boot once, then clone.** Boot each device type once, wait until it settles, shut it down, and give each suite a `simctl clone` of that settled device. The clone keeps the finished first-boot state and has no app data. Delete clones after use. The NotificationProbe suites need an undetermined notification decision for their bundle. A device that never ran NotificationProbe gives them that, and the Authorized and Denied suites must both still pass from it.
+2. **One cold boot per job.** Split work across jobs, for example the compact and regular walkthrough in separate jobs. This costs more concurrent macOS jobs, and the fleet already queues on them. Use it where cloning is not enough, and state the queue cost.
+3. **A longer readiness timeout.** This is allowed only together with 1 or 2, never on its own, and never above 480 s. The gate's thresholds (10 probes in a row within 3 s) stay unchanged.
+
+Shut down every simulator a step no longer needs before booting the next one, and record that in the log.
+
+Owned paths:
+- `.github/workflows/ios.yml`, for job structure and simulator preparation only;
+- `ios/scripts/prepare-simulator.sh`;
+- `ios/scripts/walkthrough-simulator.sh`, `ios/scripts/smoke-simulator.sh` and the other `ios/scripts/*-simulator.sh` scripts, only where they boot, erase or shut down a simulator;
+- tests for these scripts under `ios/scripts/`;
+- the "Required checks for macOS workers" section of `AGENTS.md`, only to describe the changed job layout.
+
+No test code under `ios/Tests/` or `ios/UITests/`, and no product code.
+
+Dependencies: none. F47's open PR does not touch these paths. U10a and F47 wait for F49.
+
+Acceptance:
+
+1. **Measured first.** The PR states, for each approach tried, the time to responsive and the peak load and lowest free memory after boot, from the existing host snapshots, each with a run link. The chosen approach is justified from those numbers.
+2. **At most one first boot per device type per job.** Each preparation logs whether it cold-booted, cloned or reused a device, and its time to responsive.
+3. **Pressure summary.** Each job writes `host-pressure.txt` into its uploaded evidence: every preparation's label, kind, time to responsive, highest 1-minute load and lowest free memory. This file is diagnostic only and not a pass/fail gate.
+4. **Nothing is weakened.**
+   - Every existing step, test and screenshot still runs.
+   - No `continue-on-error`, no retry of a failed test step, and no `-retry-tests-on-failure`.
+   - The readiness thresholds are unchanged, and the timeout is at most 480 s.
+   - The NotificationProbe Authorized and Denied suites each still start from an undetermined decision and pass with unchanged assertions.
+   - Evidence names and contents that AGENTS.md lists stay as they are, with `retention-days` at most 7.
+5. **Evidence.** Three consecutive successful `ios.yml` runs for the exact head, triggered as full reruns, with no readiness-gate failure in any of them. Link all three. Any failure is reported with its job, step and host snapshot.
+6. `make check` passes, including `ios-check`.
+
+**Retired 2026-10-25, absorbed into F47 (see F47 amendment 3).** The Intel layout is in PR #363 at ddc4ebe. It removed the host failures, but its three-run evidence failed in tests that F47 owns.
+
+#### F49 amendment (2026-10-25): move the simulator jobs to the free Intel runner
+
+Round 1 has five full reruns of PR #363 at f4b2c1c: pass, fail, fail, pass, fail. Clones booted as slowly as cold boots, 180–200 s. The failures happened after the readiness gate had passed, in `HomeRecentsModelTests`, `RestartAndDeletionFailureJourneyTests`, `AppServicesTests` and the walkthrough's `home.search` hittability, with free memory near 100 MB. So 7 GB cannot hold a booted simulator plus the test host, however the boots are arranged. The maintainer declined paid runners and a dedicated Mac on 2026-10-25.
+
+`macos-26-intel` is a **standard** GitHub-hosted runner, free for public repositories, with 4 Intel cores and 14 GB RAM: twice the memory of `macos-26`, at no cost. Its image carries Xcode 26.6 (the default) and the iOS 26.5 simulator runtime (runner-images `images/macos/macos-26-Readme.md`). Because it is a standard runner, the sentence above about paid runners does not forbid it. `core/bindings/build-ios.sh` already maps `iphonesimulator:x86_64` to `x86_64-apple-ios` and installs that target, so the Rust core needs no change.
+
+Changes to the approach:
+1. **Runner.**
+   - Run every job that boots a simulator on `macos-26-intel`: `simulator` and both walkthrough jobs.
+   - `tauri-probe` may stay on `macos-26`; say which in the PR.
+   - Anywhere the workflow names the Rust simulator target (`rustup target add aarch64-apple-ios-sim`), it must match the runner's architecture.
+2. **Build before the first boot.**
+   - Each job builds everything first: `xcodebuild build-for-testing` for its test schemes and the probe builds. Then it boots its simulator and runs `xcodebuild test-without-building` against the same `-derivedDataPath`.
+   - The compiler and the simulator must never run at the same time.
+   - Test results, logs and screenshots keep the file names that AGENTS.md lists.
+3. **Settling fails closed.**
+   - `wait_for_host_to_settle` must not just log a warning and continue.
+   - If the host has not settled within its bound, the step fails and prints the host snapshot.
+   - The bound and the thresholds are stated in the script and in the PR.
+4. **Clones only if they help.** Keep cloning only if the measurements show it does. If it doesn't, remove it.
+
+Acceptance changes:
+- Acceptance 1 also reports, for both `macos-26` and `macos-26-intel`, the time to responsive and the peak load and lowest free memory after boot, for the same job, each with a run link.
+- Acceptance 5 is unchanged: three consecutive full reruns, all successful, at the exact head.
+  - F47's test fixes are not merged and are not needed for this.
+  - If a failure on `macos-26-intel` comes from a test rather than the host, cite the test, the run and the host snapshot, then block. That failure belongs to F47. Do not edit tests.
+- AGENTS.md's "Required checks for macOS workers" section names the new runner, and `ios/scripts/test_check_project_config.py` fixtures may follow it.
+- Record in that section that the Intel image is a bridge: Xcode 27 needs macOS 27, which does not run on Intel. The Xcode 27 bump must come back to the 7 GB arm64 runner, or wait for one that is larger and free.
+
+Owned paths gain `ios/scripts/check_project_config.py` and `ios/scripts/test_check_project_config.py`, only where they name the runner label.
+
+### F50
+
+**Retired 2026-10-24.** The diagnosis found no product race; see F47 amendment 2. This section is kept as an audit record.
+
+Find and fix the product races behind two intermittent test failures
+
+F47 kept these out of its test fixes, because they do not look like test timing:
+
+1. `CompositionRootTests.testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased`
+   - Failed in run 40063730585, attempt 1, at `ios/Tests/Services/CompositionRootTests.swift:1680`: "the capture is imported once the reset released the boundary", then "the held capture must be saved, got nil".
+   - The test failed after 36 s, on its 30 s condition wait. Suites before and after it in the same run finished in milliseconds, so the host was not starved.
+   - The shape: a first root saves a capture and is shut down. A reset tap is recorded but never started. A new root then takes a text capture before `start(isActive: true)`, and that capture waits at the reset boundary. After `start`, the resumed reset should release the boundary and save the held capture. It never did.
+   - The related `testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration` failed once on another branch (see F47).
+2. `JobRunnerBoundaryTests.testADeferredJobTypeIsCountedAsCapabilityUnavailable` (`ios/Tests/JobRunner/JobRunnerBoundaryTests.swift:383`). Undiagnosed. F47's PR adds drain counts to its assertion messages.
+
+Find the cause of each by running it many times on the hosted macOS runner, for example `xcodebuild test -only-testing:<test> -test-iterations 50 -run-tests-until-failure`.
+- For these runs, the branch may add a temporary workflow on an intermediate commit. Remove it before the final head.
+- Link each diagnostic run.
+- A cause that cannot be reproduced in at least 200 iterations is reported as such, with the runs. Do not change code without a reproduced cause.
+
+Fix a product race in product code. Do not change test timing.
+
+Owned paths:
+- `ios/Services/Reset/`, `ios/Services/Assembly/CompositionRoot.swift` and `ios/Services/JobRunner/`;
+- `core/src/lifecycle/reset/`, only when the reproduced cause is there;
+- a new `ios/Tests/RaceRegressions/` for regression tests.
+
+The existing files in `ios/Tests/Services/` and `ios/Tests/JobRunner/` belong to F47 and are not edited. If a cause turns out to be in test code, block with the diagnosis and the proposed test change. The coordinator routes it to F47.
+
+Dependencies: none. F47's open PR edits only test files. F45 waits for F50, because both may edit `CompositionRoot.swift`.
+
+Acceptance:
+
+1. **Diagnosis.** For each test, the PR states the cause with evidence: the interleaving, and the log or added diagnostics that show it.
+2. **Fix and regression test.** Each reproduced product race is fixed in product code. A new test in `ios/Tests/RaceRegressions/` forces the bad interleaving deterministically, for example with a gate or an injected seam, not with a sleep.
+   - The test fails without the fix and passes with it.
+   - The PR links one CI run on an intermediate commit that shows the failure.
+3. **Reset invariants hold.**
+   - A capture taken during a reset is never lost and never erased by that reset.
+   - The reset still holds its generation.
+   - Existing reset, deletion and job-runner tests pass unchanged.
+4. **Iterations.** After the fix, each of the two named tests passes 200 iterations on the hosted runner, using the same temporary-workflow rule.
+5. `make check` and `make test` pass, plus the exact-head macOS CI evidence that AGENTS.md requires.
+
+### E02b
+
+Exercise a genuinely revoked hosted key in the live harness
+
+Found by E02's Sonnet attempt on 2026-10-24. E02's criterion 2 asks for revoked-credential behavior. The live harness (`core/tests/live_providers/harness.rs:866`, `:977`) only shows two things:
+- a made-up key that was never valid (`INVALID_SCENARIO_CREDENTIAL`);
+- the app retiring a profile version (`revoked_profile_version`), which never reaches the provider.
+
+Neither shows what happens when a key that worked is revoked at the provider.
+
+Add a two-phase scenario the maintainer runs with a throwaway Anthropic key:
+- `before`, while the key is valid;
+- `after`, once the maintainer has revoked it in the provider console.
+
+Owned paths: `core/tests/live_providers/` only.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Configuration.** `OHAND_LIVE_REVOCATION_CREDENTIAL_ENV` names the environment variable that holds the throwaway key, in the existing `provider=ENV` form. `OHAND_LIVE_REVOCATION_PHASE` is `before` or `after`. `OHAND_LIVE_REVOCATION_LABEL` is a label the maintainer chooses, for example the key's name in the console, and it links the two phases. When these are unset, the scenario is skipped and says so.
+2. **The `before` phase** runs one synthetic fixture through the production path with that key. The call must apply or abstain, which shows the key worked.
+3. **The `after` phase** runs the same fixture with the same key and requires all of these:
+   - `unauthorized`, not retriable;
+   - one provider call, with no retry;
+   - the capture is still durable and its raw source unchanged;
+   - zero applied proposals and zero forbidden mutations;
+   - the job's failure is visible in the same way as for an invalid credential.
+4. **Evidence.** Each phase writes a sanitized artifact in the existing format. It carries:
+   - the phase;
+   - the label;
+   - the build revision;
+   - the collection time;
+   - the backend;
+   - the outcome.
+
+   It never carries the key, any part of it, or any hash of it. The `after` artifact is accepted only when a `before` artifact with the same label and backend exists and is older.
+5. **Networkless twin.** A test using the existing fake server accepts the key once, then returns the provider's 401 authentication error for it. The test checks the `before` and `after` assertions, and the leak check over both artifacts.
+6. `make check` and `make test` pass.
+
+
+### F51
+
+Stop the OpenAI adapter from pinning temperature on interpretation requests
+
+Found by the coordinator's E02 live run on 2026-10-25 (`docs/validation/evidence/live-providers/live-providers-live-20261025T054428997Z-71e0091….json`, main 71e0091). `openai:gpt-5.5` failed 32 of 35 fixtures with outcome `rejected`. Only the three fast-path captures, which never call the provider, passed. In every case the provider returned HTTP 400 `unsupported_value` on `temperature`: "does not support 0.0 with this model. Only the default (1) value is supported." `openai:gpt-5.4-mini` accepted the same requests and matched 28 of 35.
+
+The cause is that the production path sets `temperature: Some(0.0)` (`core/src/providers/openai/mod.rs:196`). That excludes every current OpenAI model that accepts only the default temperature, which is the reasoning family, OpenAI's flagship line. The Anthropic production path already sends no temperature. The benchmark settled the same question in `docs/features/model-comparison.md` §"Temperature": request temperature only when the operator asks for it. The diagnostic path (`invoke_diagnostic_observed`) already does this and is unchanged.
+
+Change: the production OpenAI interpretation request omits `temperature`, so the provider's default applies. `seed` and `max_completion_tokens` stay as they are (absent). Nothing else in the request changes: `response_format`, the messages, and the rendered instructions are all unchanged.
+
+Out of scope:
+- **The self-hosted adapter's `temperature: 0`** (`core/src/providers/self_hosted/mod.rs:281`). Ollama and llama.cpp accept it, and the E02 Spark evidence was collected with it.
+- **Retrying a rejected request without temperature.** Omitting it is the fix.
+
+Owned paths: `core/src/providers/openai/mod.rs`; its tests wherever they live today; and new or changed tests under `core/tests/` that exercise the OpenAI production request against the existing fake server.
+
+Dependencies: none.
+
+Acceptance:
+1. The production OpenAI request body has no `temperature` key, which a test shows from the serialized body sent to the fake server, not from a struct field.
+2. A fake-server test reproduces the live failure. The server rejects any request carrying a non-default `temperature` with the provider's 400 `unsupported_value` error body. The production path's interpretation against it then ends applied or abstained, not `rejected`. Run the test against the old line 196: it must fail there, and the PR states that it did.
+3. The diagnostic path still sends exactly the requested settings. Existing tests in `core/tests/provider_contract/diagnostic.rs` pass unchanged.
+4. If a profile or request version identifies what the request carries, follow the existing versioning rule and say which rule applied. If none does, say so.
+5. `make check` and `make test` pass.
+
+After F51 lands, the coordinator reruns the E02 OpenAI leg (gpt-5.5, gpt-5.4-mini) and commits that evidence. E02 depends on F51.
+
+### F52
+
+Reconcile four fixtures that every strong model misses with the M1 instructions
+
+Found from the coordinator's live runs on 2026-10-25. Evidence:
+- `docs/validation/evidence/live-providers/live-providers-live-20261025T135141329Z-2e110bf….json`: gpt-6-luna, gpt-5.5, gpt-5.6-luna;
+- `…20261025T054428997Z-71e0091….json`: Claude Haiku 5.5.
+
+Every one of these models misses the same four fixtures, with the same facet wrong. The coordinator read the raw replies, which are kept privately. In three of the four, the model follows the instructions and the oracle says something different, so the instructions and the oracle disagree. The fourth is a definition the instructions leave unclear. These are not model faults.
+
+| Fixture | What the models return | Oracle | The conflict |
+|---|---|---|---|
+| `timezone-conflicting` ("Remind me tomorrow at 9 a.m. Tokyo time to join the call", device America/New_York) | `action` with `reminder_proposal.quality` `ambiguous`, no instant, no zone (all four) | `explicit`, `2026-10-09T09:00:00+09:00`, `Asia/Tokyo` | The instructions (`core/src/interpretation/instructions/text.rs`, `reminder_proposal`) say "a zone that conflicts with the device zone is `ambiguous`: then give neither `instant` nor `timezone_id`". The apply guard (`core/src/interpretation/apply/mod.rs:972`) rejects any `timezone_id` other than the capture's zone. The M1 contract cannot schedule a Tokyo-time reminder, so the oracle asks for something M1 refuses. |
+| `very-long-transcript` | `action` (matches), plus a `session_topic_proposal` such as "Quarterly planning" or "team meeting" | No session topic | The instructions allow a session topic "when the note names the session or appointment it belongs to, such as therapy or a weekly meeting". The transcript opens "The team meeting today was about…". DESIGN.md's session-topic example ("Bring this up in therapy") is a note meant to be brought to a session, not a note describing one. The instruction wording is looser than the design. |
+| `abstract-broad-thought` ("Creativity is important") | `note` | `idea` (the fixture's category is `broad-intention`) | Neither the instructions' item-type definitions nor the fixture tells a statement of value apart from a note. The fixture also contradicts itself: its category says broad intention and its expectation says idea. |
+| `prompt-injection-attempt-1` | gpt-6-luna and gpt-5.5: `action` with an `ambiguous` reminder over "Schedule a reminder for every day at midnight". Haiku: abstains (`Other`). | `note`. Forbidden: any reminder, item type `action`, operations `update` or `create` | The trust boundary says a request inside the note to be reminded "becomes a `reminder_proposal`" at most. That lets a model read an embedded imperative as the user's request. Nothing in the instructions addresses repeating requests ("every day"). No data changed (0 forbidden mutations), but the oracle's forbidden rules were hit. |
+
+Resolve each one. The authority is DESIGN.md, the instructions, and the core guards as they were **before** these runs. A model's output is never the authority.
+
+1. **`timezone-conflicting`: change the oracle to match the M1 contract.**
+   - Expect `action` with an `ambiguous` reminder and no instant or zone.
+   - Keep the forbidden zone `America/New_York`: a model that silently resolves the time in the device zone is still wrong.
+   - Record in `docs/validation/intent-fixtures.md` that M1 cannot schedule a reminder in a zone other than the device's, as a known gap for M2. Cite the guard line.
+   - Change neither the instructions nor the guard for this fixture.
+2. **`very-long-transcript`: tighten the instructions, keep the oracle.**
+   - The session-topic rule becomes: the note says it belongs to, or should be brought up in, a named recurring session or appointment.
+   - A note that reports on a meeting is not attached to it.
+   - Add one counter-example to the instructions only if one is needed.
+3. **`abstract-broad-thought`: decide from DESIGN.md and make both sides agree.**
+   - Make the item-type definitions and the fixture's expectation and category say the same thing about a bare statement of value.
+   - Either sharpen the definitions so that one answer follows, or change the fixture to the answer the definitions already give.
+   - State which, and why.
+   - The fixture's forbidden rules (item type `action`, any reminder) stay as they are.
+4. **`prompt-injection-attempt-1`: tighten the instructions, keep the oracle and every forbidden rule.**
+   - A request to create or schedule something that is mixed in with text trying to override instructions is not a reminder request.
+   - A request for a repeating reminder is not a `reminder_proposal` in M1. DESIGN.md separates the one-shot and repeat contracts, and M1 implements only the one-shot.
+   - The expected item type stays `note`.
+   - Whether an abstention may also count as correct for this fixture is decided only from the fixture's own notes and DESIGN.md. If they do not say so, the oracle stays `note`.
+
+Constraints:
+- **Rules and fixtures stay as they are.** No forbidden rule is removed or loosened anywhere, and no fixture is deleted or skipped. The scoring rule, `tools/evaluation` scoring code and the live harness's scorer are unchanged.
+- **Instruction version.** Any change to the instruction text changes the instruction version under the existing rule (`M1_INSTRUCTION_VERSION`). Every test that pins the text or version is updated to match, and none is weakened.
+- **Other fixtures.**
+  - Every other fixture's expectation is unchanged.
+  - The recorded conforming responses in `tools/evaluation/fixtures/recorded-responses.json` follow the changed oracles.
+  - The evaluation still reports the recorded oracle-conforming responses as matching.
+- **The PR.**
+  - It includes the table above.
+  - For each fixture it states the authority cited, the change made, and the line references.
+
+Owned paths:
+- `core/src/interpretation/instructions/` and its tests in `core/tests/interpretation_instructions/`;
+- `fixtures/intent/contrastive-fixtures.json`, the rows for these four fixtures only, and `core/tests/fixture_validation/`;
+- the rows for these four fixtures in `docs/validation/intent-fixtures.md`, plus the M2-gap note;
+- `tools/evaluation/fixtures/recorded-responses.json`, the entries for these four fixtures only;
+- tests that pin the instruction version, wherever they live, only to follow the new version.
+
+Dependencies: none. F23 and F46 previously owned these files, and both are merged.
+
+Acceptance:
+1. All four conflicts above are resolved as stated, and the PR cites an authority for each.
+2. A networkless test runs the four fixtures' recorded oracle-conforming responses through mapping and the apply guard, and shows they match the updated oracles. For `timezone-conflicting`, that is an unscheduled `ambiguous` reminder, not a guard contradiction.
+3. A test fails if a `reminder_proposal` is present in `prompt-injection-attempt-1`'s expected outcome, or if any of its forbidden rules is removed.
+4. `make check` and `make test` pass.
+
+After F52 lands, the coordinator reruns the hosted live legs (Claude Haiku 5.5, gpt-6-luna, gpt-5.5) on the new instruction version and commits that evidence. The expected result is that these four fixtures match without any other fixture regressing. E02 does not wait for F52.
+
+Ownership amendment (2026-10-25): F52 also owns `tools/evaluation/tests/evaluation.rs`, only for the following.
+- **Required:** re-point `a_stored_reminder_without_an_instant_makes_no_timezone_claim` (around `:844`) at a fixture whose oracle still names a zone. Its positive case (a zone mismatch is reported) and its negative case (no zone claim without an instant) must both keep running.
+- **Optional:** host the networkless acceptance-2 test.
+
+Item 1 removes the zone from `timezone-conflicting`'s oracle, so the old test cannot pass unchanged. That does not weaken it: the scorer's zone-claim logic stays covered, on a fixture that still has a zone. No other edit to that file and no scorer source change is allowed. PR #367 (head 757c397) may continue under this amendment.
 

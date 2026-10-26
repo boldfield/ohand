@@ -32,6 +32,21 @@
 //!   job, onto the profile the resolver selects now, only when that profile is authorized for the
 //!   route (`repin_waiting_interpretations`). It runs only when called, moves at most
 //!   `MAX_REPIN_BATCH` items, is idempotent and never changes a job pinned to a profile.
+//! * `failed_interpretations` (`read_scopes`, optional `limit`, optional `cursor`) -> `failed`,
+//!   `next_cursor`: the active items in `read_scopes` whose newest `interpret` job ended `failed`
+//!   and was not since replaced (`list_failed_interpretations`), newest capture first, at most
+//!   `limit` per page (default [`DEFAULT_FAILED_PAGE`], ceiling [`MAX_LISTED_JOBS`]). Each entry
+//!   is `item_id`, `captured_at`, `failure_reason` (a fixed machine label), `pinned` (whether the
+//!   failed job was pinned to a provider), `profile_version` (or `null`) and `recovery`
+//!   (`run_again` or `change_settings`). It returns no text. `read_scopes` is the non-empty list
+//!   of scopes the authenticated session may read, as for the other item reads: a locked session
+//!   passes none and is refused as `invalid_request`.
+//! * `rerun_failed_interpretations` (`read_scopes`, and either `item_ids` or `all_listed: true`)
+//!   -> `moved`, `skipped`, `skipped_items`: a new `interpret` job for each selected failed item,
+//!   pinned to what the resolver selects now and linked to the failed job
+//!   (`rerun_failed_interpretations`). At most `MAX_RERUN_BATCH` items per call. `skipped_items`
+//!   lists `{item_id, reason}` with reason `not_failed` or `no_provider_allowed`; `skipped` is its
+//!   length. It is idempotent and never modifies the failed job.
 //!
 //! A refusal is a normalized failure: `not_found` for an unknown job or profile,
 //! `invalid_request` for a malformed command, `job_configuration_refused` when the core's rules
@@ -44,21 +59,29 @@ use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::jobs::configuration::{
     get_jobs_pinned_to_profile, get_profile_id, get_requeue_record, jobs_retired_by_revocation,
-    repin_waiting_interpretations, requeue_job_to_new_profile, revoke_profile,
+    list_failed_interpretations, repin_waiting_interpretations, requeue_job_to_new_profile,
+    rerun_failed_interpretations, revoke_profile, RerunSelection, MAX_RERUN_BATCH,
 };
 use crate::jobs::queue::get_job;
 use crate::providers::contracts::ErrorClass;
+use crate::retrieval::recent::parse_cursor;
+use crate::store::events::ItemScope;
 use crate::store::schema::Database;
 use chrono::{SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 /// Longest identifier accepted in a command, in bytes.
 const MAX_IDENTIFIER_BYTES: usize = 512;
 /// Most jobs one listing returns.
 pub const MAX_LISTED_JOBS: usize = crate::jobs::configuration::MAX_LISTED_JOBS;
+/// Failed interpretations one page returns when the request names no `limit`.
+pub const DEFAULT_FAILED_PAGE: usize = 30;
+/// Longest cursor accepted, in bytes.
+const MAX_CURSOR_BYTES: usize = 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -89,6 +112,47 @@ enum Command {
     RepinWaitingWork {
         route_id: String,
     },
+    FailedInterpretations {
+        #[serde(default)]
+        read_scopes: Vec<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    RerunFailedInterpretations {
+        #[serde(default)]
+        read_scopes: Vec<String>,
+        #[serde(default)]
+        item_ids: Option<Vec<String>>,
+        #[serde(default)]
+        all_listed: Option<bool>,
+    },
+}
+
+fn parse_scopes(read_scopes: &[String]) -> Result<Vec<ItemScope>, AbiFailure> {
+    let mut scopes: Vec<ItemScope> = Vec::new();
+    for scope in read_scopes {
+        let scope = ItemScope::from_str(scope).map_err(|_| AbiFailure::INVALID_REQUEST)?;
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    if scopes.is_empty() {
+        return Err(AbiFailure::INVALID_REQUEST);
+    }
+    Ok(scopes)
+}
+
+fn rerun_selection(
+    item_ids: &Option<Vec<String>>,
+    all_listed: &Option<bool>,
+) -> Result<RerunSelection, AbiFailure> {
+    match (item_ids, all_listed) {
+        (Some(item_ids), None | Some(false)) => Ok(RerunSelection::Items(item_ids.clone())),
+        (None, Some(true)) => Ok(RerunSelection::AllListed),
+        _ => Err(AbiFailure::INVALID_REQUEST),
+    }
 }
 
 impl Command {
@@ -117,6 +181,29 @@ impl Command {
             Command::RequeueRecord { job_id } => acceptable(job_id),
             Command::RevokeProfile { profile_version } => acceptable(profile_version),
             Command::RepinWaitingWork { route_id } => acceptable(route_id),
+            Command::FailedInterpretations {
+                read_scopes,
+                limit,
+                cursor,
+            } => {
+                parse_scopes(read_scopes).is_ok()
+                    && limit.is_none_or(|limit| limit >= 1)
+                    && cursor.as_deref().is_none_or(|cursor| {
+                        cursor.len() <= MAX_CURSOR_BYTES && parse_cursor(cursor).is_some()
+                    })
+            }
+            Command::RerunFailedInterpretations {
+                read_scopes,
+                item_ids,
+                all_listed,
+            } => {
+                parse_scopes(read_scopes).is_ok()
+                    && rerun_selection(item_ids, all_listed).is_ok()
+                    && item_ids.as_ref().is_none_or(|item_ids| {
+                        item_ids.len() <= MAX_RERUN_BATCH
+                            && item_ids.iter().all(|id| acceptable(id))
+                    })
+            }
         };
         if valid {
             Ok(())
@@ -282,6 +369,55 @@ fn repin(database: &mut Database, route_id: &str) -> Result<Value, AbiFailure> {
     Ok(json!({ "moved": moved }))
 }
 
+fn failed_interpretations(
+    database: &mut Database,
+    read_scopes: &[String],
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<Value, AbiFailure> {
+    let scopes = parse_scopes(read_scopes)?;
+    let limit = limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .map_or(DEFAULT_FAILED_PAGE, |limit| limit.min(MAX_LISTED_JOBS));
+    let page = list_failed_interpretations(database, &scopes, limit, cursor)
+        .map_err(|error| store_failure(&error))?;
+    let failed: Vec<Value> = page
+        .failed
+        .iter()
+        .map(|entry| {
+            json!({
+                "item_id": entry.item_id,
+                "captured_at": entry.captured_at,
+                "failure_reason": entry.failure_reason,
+                "pinned": entry.pinned_profile_version.is_some(),
+                "profile_version": entry.pinned_profile_version,
+                "recovery": entry.recovery.as_str(),
+            })
+        })
+        .collect();
+    Ok(json!({ "failed": failed, "next_cursor": page.next_cursor }))
+}
+
+fn rerun_failed(
+    database: &mut Database,
+    read_scopes: &[String],
+    selection: &RerunSelection,
+) -> Result<Value, AbiFailure> {
+    let scopes = parse_scopes(read_scopes)?;
+    let outcome = rerun_failed_interpretations(database, &scopes, selection, Utc::now())
+        .map_err(|error| store_failure(&error))?;
+    let skipped_items: Vec<Value> = outcome
+        .skipped
+        .iter()
+        .map(|(item_id, reason)| json!({ "item_id": item_id, "reason": reason.as_str() }))
+        .collect();
+    Ok(json!({
+        "moved": outcome.moved,
+        "skipped": skipped_items.len(),
+        "skipped_items": skipped_items,
+    }))
+}
+
 fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> {
     match command {
         Command::JobsPinnedToProfile {
@@ -301,6 +437,20 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
         Command::RequeueRecord { job_id } => requeue_record(database, job_id),
         Command::RevokeProfile { profile_version } => revoke(database, profile_version),
         Command::RepinWaitingWork { route_id } => repin(database, route_id),
+        Command::FailedInterpretations {
+            read_scopes,
+            limit,
+            cursor,
+        } => failed_interpretations(database, read_scopes, *limit, cursor.as_deref()),
+        Command::RerunFailedInterpretations {
+            read_scopes,
+            item_ids,
+            all_listed,
+        } => rerun_failed(
+            database,
+            read_scopes,
+            &rerun_selection(item_ids, all_listed)?,
+        ),
     }
 }
 

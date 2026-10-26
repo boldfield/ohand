@@ -32,6 +32,20 @@
 // - A request prefix is the closed set of words that open a request ("Hey, can you remind me",
 //   "Set a reminder for"); it is not task content, so a comma inside it is allowed.
 //
+// Split shape. A day and a clock may also sit on either side of the task, in one sentence: day,
+// task, clock ("Remind me today to call the dentist at 10am", "Remind me Friday to call Sam at
+// 3 p.m.") or clock, task, day ("Remind me at 10am to call the dentist tomorrow"). The first
+// part directly follows the request prefix and the last part ends the sentence, apart from
+// closing punctuation or a filler. Each part is complete on its own: a single day word (`today`,
+// `tomorrow`, a weekday or an ISO date) and a clock that names no day (`10am`,
+// `3 p.m.`, `10:30 am`, `noon`, `midnight`), each optionally behind `on` or `at`. The task
+// between them opens with `to` or a filler, holds a word besides those, no clause mark and no
+// temporal token, and does not modify the last part ("by", "around", "before"). The whole-capture
+// rule applies as everywhere. A span is covered when it quotes the clock part alone or the whole
+// stretch from the first part to the last, and [`split_shape_phrase`] gives that stretch as the
+// phrase of the reminder, which the resolver reads through [`split_shape_combined_phrase`] as
+// the single phrase ("today at 10am") that day and clock resolve as together.
+//
 // A span that names no day ("at 5 p.m.") is anchored to today by the resolver, which is a guess
 // the capture must not contradict anywhere. It is covered only when its own sentence holds
 // nothing but request words before it, and nothing temporal after it ("... to call the roofer
@@ -315,6 +329,9 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         .collect::<String>()
         .to_lowercase();
     let meridiem_dot_open = span_text.ends_with("a.m") || span_text.ends_with("p.m");
+    if split_shape_phrase(basis_text, start, end).is_some() {
+        return true;
+    }
 
     let before = text_before_span(&before);
     let before_words = words(before);
@@ -382,6 +399,334 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         return false;
     }
     names_day(&span_text) || !task.iter().any(|word| is_temporal_token(&word.text))
+}
+
+/// The stretch from the first part to the last, when the span (character offsets into
+/// `basis_text`) quotes the clock part alone or that whole stretch of a covered split-shape
+/// sentence ([`span_covers_time_expression`]): "today to call the dentist at 10am" for "Remind me
+/// today to call the dentist at 10am". It is a phrase of the text itself, and
+/// [`split_shape_combined_phrase`] reads it as one time. `None` for any other span.
+pub fn split_shape_phrase(basis_text: &str, start: usize, end: usize) -> Option<String> {
+    let characters: Vec<char> = basis_text.chars().collect();
+    if start >= end || end > characters.len() {
+        return None;
+    }
+    let mut trimmed_start = start;
+    while trimmed_start < end
+        && (OPENERS.contains(characters[trimmed_start])
+            || characters[trimmed_start].is_whitespace())
+    {
+        trimmed_start += 1;
+    }
+    let mut trimmed_end = end;
+    while trimmed_end > trimmed_start
+        && (CLOSERS.contains(characters[trimmed_end - 1])
+            || characters[trimmed_end - 1].is_whitespace()
+            || characters[trimmed_end - 1] == ',')
+    {
+        trimmed_end -= 1;
+    }
+    let span_text: String = characters[trimmed_start..trimmed_end].iter().collect();
+    let span_words = words(&span_text);
+    let last_span_word = span_words.last()?;
+
+    let capture_words = words(basis_text);
+    let first_index = capture_words
+        .iter()
+        .position(|word| word.start == trimmed_start)?;
+    let (earlier, _) = split_at_last_sentence_end(&capture_words[..first_index]);
+    let sentence_start = earlier.len();
+    let (own, later) = split_at_first_sentence_end(&capture_words[first_index..]);
+    let sentence_end = first_index + own.len();
+    let span_last_index = first_index + span_words.len() - 1;
+    if span_last_index >= sentence_end
+        || capture_words[span_last_index].text != last_span_word.text
+        || earlier
+            .iter()
+            .chain(later)
+            .any(|word| is_temporal_token(&word.text))
+    {
+        return None;
+    }
+
+    let sentence = &capture_words[sentence_start..sentence_end];
+    let shape = parse_split_sentence(sentence)?;
+    let span_first = first_index - sentence_start;
+    let span_last = span_last_index - sentence_start;
+    let quotes_whole = shape.whole_starts.contains(&span_first) && span_last + 1 == shape.whole_end;
+    let quotes_clock = shape.clock_starts.contains(&span_first) && span_last + 1 == shape.clock_end;
+    (quotes_whole || quotes_clock).then_some(shape.stretch)
+}
+
+/// The one phrase ("today at 10am") that a phrase made of exactly a split-shape stretch ("today
+/// to call the dentist at 10am") resolves as, or `None` for any other phrase.
+pub fn split_shape_combined_phrase(phrase: &str) -> Option<String> {
+    let phrase_words = words(phrase);
+    let (own, _) = split_at_first_sentence_end(&phrase_words);
+    if own.len() != phrase_words.len() {
+        return None;
+    }
+    parse_split_sentence(&phrase_words).map(|shape| shape.combined)
+}
+
+/// Where the parts of a split-shape sentence sit, as word indexes into the sentence.
+struct SplitShape {
+    /// Where a span quoting the whole stretch may start: at the first part, or at the `on` or
+    /// `at` before it.
+    whole_starts: Vec<usize>,
+    whole_end: usize,
+    /// Where a span quoting the clock alone may start: at the clock, or at the `at` before it.
+    clock_starts: Vec<usize>,
+    clock_end: usize,
+    /// The text from the first part to the last, as it stands in the sentence.
+    stretch: String,
+    /// The day and the clock as one phrase.
+    combined: String,
+}
+
+/// Parses one sentence as day, task, clock or clock, task, day, or `None`.
+fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
+    let prefix_length = sentence
+        .iter()
+        .take_while(|word| is_request_prefix_token(word))
+        .count();
+    let prefix = &sentence[..prefix_length];
+    let rest = &sentence[prefix_length..];
+    rest.first()?;
+    let lead_start = |preposition: &[&str]| {
+        prefix
+            .last()
+            .filter(|word| preposition.contains(&word.text.as_str()))
+            .map(|_| prefix_length - 1)
+    };
+
+    // Only closing punctuation and fillers, at most one comma, may follow the last part.
+    let mut tail_end = rest.len();
+    while tail_end > 1
+        && (rest[tail_end - 1].text.is_empty()
+            || FILLERS.contains(&rest[tail_end - 1].text.as_str()))
+    {
+        tail_end -= 1;
+    }
+    let tail = &rest[tail_end..];
+    if tail
+        .iter()
+        .any(|word| has_clause_mark(&word.raw.replace(',', "")))
+    {
+        return None;
+    }
+    let tail_commas: usize = tail.iter().map(|word| word.raw.matches(',').count()).sum();
+    let last_part = &rest[tail_end - 1];
+    let closing_comma = usize::from(last_part.raw.ends_with(','));
+    if tail_commas + closing_comma > 1 || has_clause_mark(last_part.raw.trim_end_matches(',')) {
+        return None;
+    }
+    let body = &rest[..tail_end];
+
+    let leading_day_length = day_length(rest);
+    if leading_day_length > 0 {
+        // Day, task, clock.
+        let day = &rest[..leading_day_length];
+        if day.iter().any(|word| has_clause_mark(&word.raw)) || day.iter().any(|w| w.ends_sentence)
+        {
+            return None;
+        }
+        if made_inexact_by_modifier(prefix) {
+            return None;
+        }
+        let clock_length = [2, 1].into_iter().find(|&length| {
+            body.len() > leading_day_length + length
+                && clock_length(&body[body.len() - length..]) == Some(length)
+        })?;
+        let clock_start = body.len() - clock_length;
+        let at_length = usize::from(body[clock_start - 1].text == "at");
+        let task_end = clock_start - at_length;
+        let task = body.get(leading_day_length..task_end)?;
+        if !is_split_task(task) || made_inexact_by_modifier(task) {
+            return None;
+        }
+        let clock = &body[clock_start..];
+        let combined = format!("{} at {}", day_phrase(day), words_phrase(clock));
+        let whole_starts = std::iter::once(prefix_length)
+            .chain(lead_start(&["on", "at"]))
+            .collect();
+        return Some(SplitShape {
+            whole_starts,
+            whole_end: prefix_length + body.len(),
+            clock_starts: (prefix_length + task_end..=prefix_length + clock_start).collect(),
+            clock_end: prefix_length + body.len(),
+            stretch: stretch_phrase(body),
+            combined,
+        });
+    }
+
+    // Clock, task, day.
+    let clock_length = clock_length(body)?;
+    let clock = &body[..clock_length];
+    if clock.iter().any(|word| has_clause_mark(&word.raw)) {
+        return None;
+    }
+    let trailing_day_length = (1..=2).rev().find(|&length| {
+        body.len() > clock_length + length && day_length(&body[body.len() - length..]) == length
+    })?;
+    let day_index = body.len() - trailing_day_length;
+    let day = &body[day_index..];
+    let on_length = usize::from(body[day_index - 1].text == "on");
+    let task = &body[clock_length..day_index - on_length];
+    if !is_split_task(task) || made_inexact_by_modifier(task) {
+        return None;
+    }
+    let combined = format!("{} at {}", day_phrase(day), words_phrase(clock));
+    let starts: Vec<usize> = std::iter::once(prefix_length)
+        .chain(lead_start(&["at"]))
+        .collect();
+    Some(SplitShape {
+        whole_starts: starts.clone(),
+        whole_end: prefix_length + body.len(),
+        clock_starts: starts,
+        clock_end: prefix_length + clock_length,
+        stretch: stretch_phrase(body),
+        combined,
+    })
+}
+
+/// Whether the words between the parts of a split-shape sentence are a task: they open with `to`
+/// or a filler, hold a word besides those, no clause mark and no temporal token.
+fn is_split_task(task: &[Word]) -> bool {
+    task.first()
+        .is_some_and(|word| TASK_SEPARATORS.contains(&word.text.as_str()))
+        && task
+            .iter()
+            .any(|word| !word.text.is_empty() && !TASK_SEPARATORS.contains(&word.text.as_str()))
+        && !task
+            .iter()
+            .any(|word| has_clause_mark(&word.raw) || is_temporal_token(&word.text))
+}
+
+/// The day a single word names, when it is complete on its own.
+fn day_word(word: &Word) -> Option<&str> {
+    let text = word.text.as_str();
+    (matches!(
+        text,
+        "today"
+            | "tomorrow"
+            | "monday"
+            | "tuesday"
+            | "wednesday"
+            | "thursday"
+            | "friday"
+            | "saturday"
+            | "sunday"
+    ) || is_iso_date(text))
+    .then_some(text)
+}
+
+/// How many of the leading words form a complete day: one day word, or `next` and a weekday.
+/// 0 when they do not.
+fn day_length(words: &[Word]) -> usize {
+    let Some(first) = words.first() else {
+        return 0;
+    };
+    if first.text == "next" {
+        let weekday = words.get(1).and_then(day_word).is_some_and(|day| {
+            !matches!(day, "today" | "tonight" | "tomorrow") && !is_iso_date(day)
+        });
+        return if weekday { 2 } else { 0 };
+    }
+    usize::from(day_word(first).is_some())
+}
+
+/// How many of the leading words form a complete clock that names no day: `noon`, `midnight`,
+/// `10am`, `10:30 p.m.`. A bare number ("10") is not complete.
+fn clock_length(words: &[Word]) -> Option<usize> {
+    let first = words.first()?.text.as_str();
+    if matches!(first, "noon" | "midnight") {
+        return Some(1);
+    }
+    let meridiems = ["a.m", "p.m", "am", "pm"];
+    if words
+        .get(1)
+        .is_some_and(|second| meridiems.contains(&second.text.as_str()))
+        && is_clock_number(first)
+    {
+        return Some(2);
+    }
+    if is_twenty_four_hour_clock(first) {
+        return Some(1);
+    }
+    meridiems
+        .iter()
+        .find_map(|meridiem| first.strip_suffix(meridiem))
+        .filter(|number| is_clock_number(number))
+        .map(|_| 1)
+}
+
+/// A 24-hour clock with two-digit minutes: `15:00`, `00:00`.
+fn is_twenty_four_hour_clock(text: &str) -> bool {
+    text.split_once(':').is_some_and(|(hour, minutes)| {
+        hour.len() == 2
+            && hour.parse::<u32>().is_ok_and(|hour| hour < 24)
+            && minutes.len() == 2
+            && minutes.parse::<u32>().is_ok_and(|minutes| minutes < 60)
+    })
+}
+
+/// An hour from 1 to 12, optionally with two-digit minutes: `10`, `10:30`.
+fn is_clock_number(text: &str) -> bool {
+    let (hour, minutes) = match text.split_once(':') {
+        Some((hour, minutes)) => (hour, Some(minutes)),
+        None => (text, None),
+    };
+    hour.len() <= 2
+        && hour
+            .parse::<u32>()
+            .is_ok_and(|hour| (1..=12).contains(&hour))
+        && minutes.is_none_or(|minutes| {
+            minutes.len() == 2 && minutes.parse::<u32>().is_ok_and(|minutes| minutes < 60)
+        })
+}
+
+/// The words of a day, lowercased.
+fn day_phrase(words: &[Word]) -> String {
+    words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The words as written, without quotes and punctuation around them, but with a meridiem's dot.
+fn words_phrase(words: &[Word]) -> String {
+    words
+        .iter()
+        .map(|word| trim_phrase_edges(&word.raw))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The words as written, trimmed only at the two ends of the stretch.
+fn stretch_phrase(words: &[Word]) -> String {
+    let joined = words
+        .iter()
+        .map(|word| word.raw.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    trim_phrase_edges(&joined).to_string()
+}
+
+/// `raw` without quotes, brackets and punctuation around it, and without a closing dot unless it
+/// is a meridiem's own.
+fn trim_phrase_edges(raw: &str) -> &str {
+    let trimmed = raw
+        .trim_matches(|c: char| OPENERS.contains(c) || CLOSERS.contains(c) || ",;:!?".contains(c));
+    let ends_in_meridiem = DOTTED_MERIDIEMS
+        .iter()
+        .any(|meridiem| normalized_word(trimmed).ends_with(meridiem));
+    if trimmed.ends_with('.') && !ends_in_meridiem {
+        trimmed.trim_end_matches('.')
+    } else {
+        trimmed
+    }
 }
 
 /// Whether task content that sits directly against the clock continues the time instead: the
@@ -533,6 +878,8 @@ struct Word {
     raw: String,
     text: String,
     ends_sentence: bool,
+    /// Character offset of the token in the text given to [`words`].
+    start: usize,
 }
 
 /// The words of `text` in order. A line break ends a sentence, as does a word ending in `!`, `?`
@@ -540,15 +887,30 @@ struct Word {
 fn words(text: &str) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut lines = text.split('\n').peekable();
+    let mut line_offset = 0;
     while let Some(line) = lines.next() {
         let line_start = words.len();
-        for raw in line.split_whitespace() {
-            words.push(Word {
-                raw: raw.to_string(),
-                text: normalized_word(raw),
-                ends_sentence: ends_sentence(raw),
-            });
+        let mut token = String::new();
+        let mut token_start = 0;
+        for (column, character) in line.chars().chain(std::iter::once(' ')).enumerate() {
+            if character.is_whitespace() {
+                if !token.is_empty() {
+                    words.push(Word {
+                        text: normalized_word(&token),
+                        ends_sentence: ends_sentence(&token),
+                        start: line_offset + token_start,
+                        raw: std::mem::take(&mut token),
+                    });
+                }
+            } else {
+                if token.is_empty() {
+                    token_start = column;
+                }
+                token.push(character);
+            }
         }
+        // The line break counts as one character.
+        line_offset += line.chars().count() + 1;
         if lines.peek().is_some() {
             if let Some(last) = words[line_start..].last_mut() {
                 last.ends_sentence = true;
@@ -825,7 +1187,7 @@ fn without_clitic(word: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::span_covers_time_expression;
+    use super::{span_covers_time_expression, split_shape_combined_phrase, split_shape_phrase};
 
     fn covers(text: &str, quoted: &str) -> bool {
         let byte_start = text.find(quoted).expect("quoted text is in the basis");
@@ -1506,10 +1868,8 @@ mod tests {
                 "Call Sam on Friday. Remind me at 5 p.m. to check",
                 "at 5 p.m.",
             ),
-            (
-                "Remind me at 5 p.m. to call the roofer tomorrow",
-                "at 5 p.m.",
-            ),
+            // "... at 5 p.m. to call the roofer tomorrow" is the split shape (F46) and covered; an
+            // abbreviation of the day is not a day word of that shape.
             ("Remind me at 5 p.m. to call the roofer tmrw", "at 5 p.m."),
             (
                 "Remind me at 3 p.m. to call the roofer on October 15",
@@ -1734,6 +2094,258 @@ mod tests {
             ),
         ] {
             assert!(!covers(text, quoted), "{text:?} / {quoted:?}");
+        }
+    }
+    #[test]
+    fn split_shape_sentences_are_covered_with_either_span() {
+        for (text, clock, phrase) in [
+            (
+                "Remind me today to call the dentist at 10am",
+                "at 10am",
+                "today at 10am",
+            ),
+            (
+                "Remind me Friday to call Sam at 3 p.m.",
+                "at 3 p.m.",
+                "friday at 3 p.m.",
+            ),
+            (
+                "Remind me at 10am to call the dentist tomorrow",
+                "at 10am",
+                "tomorrow at 10am",
+            ),
+            (
+                "Remind me on Friday to call Sam at 3:30 pm, thanks",
+                "3:30 pm",
+                "friday at 3:30 pm",
+            ),
+            (
+                "Hey, can you remind me tomorrow to call Sam at noon!",
+                "noon",
+                "tomorrow at noon",
+            ),
+            (
+                "Remind me at 10 a.m. to call Sam on Friday.",
+                "10 a.m.",
+                "friday at 10 a.m.",
+            ),
+            (
+                "Remind me today please call Sam at 5pm. Thanks",
+                "5pm",
+                "today at 5pm",
+            ),
+            (
+                "Remind me today to call the dentist at 15:00",
+                "at 15:00",
+                "today at 15:00",
+            ),
+            (
+                "Remind me at 00:00 to call the dentist tomorrow",
+                "at 00:00",
+                "tomorrow at 00:00",
+            ),
+            (
+                "Remind me next Monday to call Sam at 8 a.m.",
+                "at 8 a.m.",
+                "next monday at 8 a.m.",
+            ),
+            (
+                "Remind me at 3 p.m. to call Sam next Monday",
+                "at 3 p.m.",
+                "next monday at 3 p.m.",
+            ),
+        ] {
+            assert!(covers(text, clock), "{text:?} / {clock:?}");
+            let byte_start = text.find(clock).unwrap();
+            let start = text[..byte_start].chars().count();
+            let end = start + clock.chars().count();
+            let stretch = split_shape_phrase(text, start, end).expect(text);
+            assert!(text.contains(&stretch), "{text:?}");
+            assert_eq!(
+                split_shape_combined_phrase(&stretch).as_deref(),
+                Some(phrase),
+                "{text:?}"
+            );
+        }
+        for (text, whole, phrase) in [
+            (
+                "Remind me today to call the dentist at 10am",
+                "today to call the dentist at 10am",
+                "today at 10am",
+            ),
+            (
+                "Remind me Friday to call Sam at 3 p.m.",
+                "Friday to call Sam at 3 p.m.",
+                "friday at 3 p.m.",
+            ),
+            (
+                "Remind me at 10am to call the dentist tomorrow",
+                "at 10am to call the dentist tomorrow",
+                "tomorrow at 10am",
+            ),
+            (
+                "Remind me at 10am to call the dentist tomorrow",
+                "10am to call the dentist tomorrow",
+                "tomorrow at 10am",
+            ),
+            (
+                "Remind me on Friday to call Sam at 3 p.m.",
+                "on Friday to call Sam at 3 p.m.",
+                "friday at 3 p.m.",
+            ),
+            (
+                "Remind me today to call the dentist at 15:00",
+                "today to call the dentist at 15:00",
+                "today at 15:00",
+            ),
+            (
+                "Remind me at 15:00 to call the dentist tomorrow",
+                "at 15:00 to call the dentist tomorrow",
+                "tomorrow at 15:00",
+            ),
+            (
+                "Remind me next Monday to call Sam at 8 a.m.",
+                "next Monday to call Sam at 8 a.m.",
+                "next monday at 8 a.m.",
+            ),
+            (
+                "Remind me at 3 p.m. to call Sam next Monday",
+                "at 3 p.m. to call Sam next Monday",
+                "next monday at 3 p.m.",
+            ),
+        ] {
+            assert!(covers(text, whole), "{text:?} / {whole:?}");
+            let start = text[..text.find(whole).unwrap()].chars().count();
+            let end = start + whole.chars().count();
+            let stretch = split_shape_phrase(text, start, end).expect(text);
+            assert!(text.contains(&stretch), "{text:?}");
+            assert_eq!(
+                split_shape_combined_phrase(&stretch).as_deref(),
+                Some(phrase),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_shape_sentences_that_are_not_exactly_the_shape_are_not_covered() {
+        for (text, quoted) in [
+            // Two days, two clocks.
+            ("Remind me today to call Sam tomorrow at 10am", "at 10am"),
+            ("Remind me today to call Sam at 9am or 10am", "10am"),
+            ("Remind me at 9am to call Sam at 10am", "at 9am"),
+            (
+                "Remind me at 10am to call Sam on Friday tomorrow",
+                "at 10am",
+            ),
+            // A clause mark, a number or a time word in the task.
+            (
+                "Remind me today to call the dentist, about the bill, at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me today to call the dentist about 2 fillings at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me today to call the dentist next week at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me at 10am to call the dentist (urgent) tomorrow",
+                "at 10am",
+            ),
+            // A hedge, or a modifier on a part.
+            (
+                "Maybe remind me today to call the dentist at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me maybe today to call the dentist at 10am",
+                "at 10am",
+            ),
+            ("Remind me today to call the dentist by 10am", "10am"),
+            ("Remind me today to call the dentist around 10am", "10am"),
+            (
+                "Remind me at 10am to call the dentist before tomorrow",
+                "at 10am",
+            ),
+            (
+                "Remind me at 10am to call the dentist by tomorrow",
+                "at 10am",
+            ),
+            (
+                "Remind me before today to call the dentist at 10am",
+                "at 10am",
+            ),
+            // A temporal token in another sentence.
+            (
+                "Talked to Jim on Monday. Remind me today to call the dentist at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me today to call the dentist at 10am. Actually, make it Saturday",
+                "at 10am",
+            ),
+            // A part that is not complete on its own.
+            ("Remind me today to call the dentist at 10", "at 10"),
+            (
+                "Remind me today to call the dentist at 10:5 am",
+                "at 10:5 am",
+            ),
+            ("Remind me next to call Sam at 3 p.m.", "at 3 p.m."),
+            ("Remind me next today to call Sam at 3 p.m.", "at 3 p.m."),
+            ("Remind me at 10 to call the dentist tomorrow", "at 10"),
+            (
+                "Remind me at 10am to call the dentist next today",
+                "at 10am",
+            ),
+            // The task does not open with `to` or a filler, or is empty.
+            ("Remind me today call the dentist at 10am", "at 10am"),
+            ("Remind me today to at 10am", "at 10am"),
+            // Not the first part right after the request, or not ending the sentence.
+            (
+                "Remind me to ring Sam, today to call the dentist at 10am",
+                "at 10am",
+            ),
+            (
+                "Remind me today to call the dentist at 10am to book a slot",
+                "at 10am",
+            ),
+            (
+                "Remind me today to call the dentist at 10am Tokyo time",
+                "at 10am",
+            ),
+            (
+                "Remind me at 10am to call the dentist tomorrow morning",
+                "at 10am",
+            ),
+        ] {
+            assert!(!covers(text, quoted), "{text:?} / {quoted:?}");
+        }
+        // The day alone, or a stretch that leaves out part of the shape, is not the clock part
+        // and not the whole stretch.
+        for (text, quoted) in [
+            (
+                "Remind me today to call the dentist at 10am",
+                "today to call the dentist at",
+            ),
+            (
+                "Remind me today to call the dentist at 10am",
+                "to call the dentist at 10am",
+            ),
+            (
+                "Remind me at 10am to call the dentist tomorrow",
+                "at 10am to call the dentist",
+            ),
+        ] {
+            let start = text[..text.find(quoted).unwrap()].chars().count();
+            let end = start + quoted.chars().count();
+            assert_eq!(
+                split_shape_phrase(text, start, end),
+                None,
+                "{text:?} / {quoted:?}"
+            );
         }
     }
 }

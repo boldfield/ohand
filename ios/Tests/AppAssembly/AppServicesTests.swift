@@ -63,7 +63,7 @@ final class AppServicesTests: XCTestCase {
             .appendingPathComponent("app-services-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        baselineBuffers = settledLiveResultBufferCount()
         created = []
     }
 
@@ -92,9 +92,19 @@ final class AppServicesTests: XCTestCase {
             outcome: .alreadyDecided(.usable)),
         isForeground: @escaping () -> Bool = { true }
     ) throws -> AppServices {
+        // The root gets injected adapters, not the production ones: those listen on `NotificationCenter.default`, where the
+        // host application's own activation callbacks (and any other test's posts) would start lifecycle passes in the
+        // middle of a test, and they watch the real network and use the real Keychain service. A private center keeps
+        // every pass attributable to what the test did.
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
-            configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
+            testing: AppConfiguration.production(storageRoot: storageRoot),
+            adapters: .injectedForTests(
+                sender: QuietUnreachableSender(),
+                readSession: ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary()),
+                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: false),
+                lifecycleNotifications: NotificationCenter()),
+            modules: [lifecycle])
         let services = AppServices(
             root: root, lifecycle: lifecycle, handoff: handoff, voice: voice,
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
@@ -117,6 +127,7 @@ final class AppServicesTests: XCTestCase {
             promptsGranted: 0, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: nil, converged: true)
     }
 
+    /// A fixed pause, only for proving that nothing happens (after a positive wait for what should have happened).
     private func settle() async {
         try? await Task.sleep(nanoseconds: 100_000_000)
     }
@@ -333,7 +344,10 @@ final class AppServicesTests: XCTestCase {
         services.sceneWillEnterForeground()
 
         handoff.registerAndAnnounce(source: .controlIntent, requestedMode: .voice)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        waitUntilPumping("the announced entry is presented and the management screen is left") {
+            services.captureEntry.mode == .voice && services.captureEntry.presentation?.source == .controlIntent
+                && services.navigation.path.isEmpty
+        }
 
         XCTAssertEqual(services.captureEntry.mode, .voice)
         XCTAssertEqual(services.captureEntry.presentation?.source, .controlIntent)

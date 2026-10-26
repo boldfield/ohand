@@ -60,6 +60,10 @@ final class RetrievalSearchViewTests: XCTestCase {
         window.rootViewController = hosting
         window.makeKeyAndVisible()
         retainedWindow = window
+        settle(until: "the prompt and the search button are drawn") {
+            self.rendered[RetrievalSearchView.promptIdentifier] != nil
+                && (self.rendered[RetrievalSearchView.searchButtonIdentifier]?.frame ?? .zero) != .zero
+        }
         settle()
     }
 
@@ -91,19 +95,36 @@ final class RetrievalSearchViewTests: XCTestCase {
         model.query = "synthetic"
         model.search()
         searcher.answerLatest(result)
+        settle(until: "the screen shows the answer") { self.answerIsShown(result) }
         settle()
+    }
+
+    /// Whether the screen has drawn what the answer to a search puts on it: its rows and count, the empty message or
+    /// the failure message.
+    private func answerIsShown(_ result: Result<RetrievalPage, RetrievalSearchFailure>) -> Bool {
+        switch result {
+        case .failure:
+            return rendered[RetrievalSearchView.failureIdentifier] != nil
+        case .success(let page):
+            if page.rows.isEmpty { return rendered[RetrievalSearchView.emptyIdentifier] != nil }
+            return rendered[RetrievalSearchView.countIdentifier] != nil
+                && page.rows.allSatisfy { rendered[RetrievalSearchView.rowIdentifier($0)] != nil }
+        }
     }
 
     private func renderedText(_ identifier: String) -> String? {
         rendered[identifier]?.text
     }
 
-    /// Settles until the screen shows what the test waits for; a sheet takes a moment to present and lay out.
-    private func settle(until condition: () -> Bool) {
-        var waited = 0
-        while !condition(), waited < 30 {
-            settle()
-            waited += 1
+    /// Runs the main loop until the screen shows what the test waits for (a sheet takes a moment to present and lay
+    /// out); fails the test naming the condition if ten seconds pass first.
+    private func settle(
+        until condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+    ) {
+        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+            self.retainedWindow?.rootViewController?.view.setNeedsLayout()
+            self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
+            return holds()
         }
     }
 
@@ -170,6 +191,11 @@ final class RetrievalSearchViewTests: XCTestCase {
 
         scope = .captureOnly
         model.revalidate()
+        settle(until: "the locked message replaces the result") {
+            self.rendered[RetrievalSearchView.lockedIdentifier] != nil
+                && self.rendered[RetrievalSearchView.rowTextIdentifier(shown)] == nil
+                && self.rendered[RetrievalSearchView.countIdentifier] == nil
+        }
         settle()
 
         XCTAssertEqual(renderedText(RetrievalSearchView.lockedIdentifier), RetrievalSearchView.lockedText)
@@ -182,6 +208,7 @@ final class RetrievalSearchViewTests: XCTestCase {
         scope = .captureOnly
         model.query = "synthetic"
         model.search()
+        settle(until: "the locked message is shown") { self.rendered[RetrievalSearchView.lockedIdentifier] != nil }
         settle()
 
         XCTAssertTrue(searcher.requests.isEmpty)
@@ -199,6 +226,7 @@ final class RetrievalSearchViewTests: XCTestCase {
 
     func testARequestWithNothingToSearchForShowsTheProblemAndSendsNothing() {
         model.search()
+        settle(until: "the problem message is shown") { self.rendered[RetrievalSearchView.problemIdentifier] != nil }
         settle()
 
         XCTAssertEqual(
@@ -210,6 +238,7 @@ final class RetrievalSearchViewTests: XCTestCase {
     func testAnotherPageOffersLoadMore() {
         let first = row(Self.firstID, text: "synthetic one", itemType: .action)
         runSearch(answering: .success(RetrievalPage(totalAccessible: 5, rows: [first], offset: 0)))
+        settle(until: "Load more is shown") { self.rendered[RetrievalSearchView.loadMoreIdentifier] != nil }
 
         XCTAssertEqual(renderedText(RetrievalSearchView.countIdentifier), "5 results")
         XCTAssertEqual(renderedText(RetrievalSearchView.loadMoreIdentifier), "Load more")
@@ -230,10 +259,8 @@ final class RetrievalSearchViewTests: XCTestCase {
         let shown = row(Self.firstID, text: "synthetic idea words", itemType: .idea)
         runSearch(answering: .success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
 
-        var waited = 0
-        while rendered[RetrievalSearchView.rowIdentifier(shown)] == nil, waited < 20 {
-            settle()
-            waited += 1
+        settle(until: "the result row is drawn in the regular-width host") {
+            self.rendered[RetrievalSearchView.rowIdentifier(shown)] != nil
         }
         let frame = try XCTUnwrap(rendered[RetrievalSearchView.rowIdentifier(shown)]?.frame)
         XCTAssertLessThanOrEqual(frame.width, RetrievalSearchView.regularResultsColumnWidth)
@@ -269,7 +296,9 @@ final class RetrievalSearchViewTests: XCTestCase {
         model.query = "roof"
         model.search()
         searcher.answerLatest(.success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
-        settle()
+        settle(until: "the replaced original is highlighted") {
+            self.rendered[RetrievalSearchView.rowOriginalIdentifier(shown)] != nil
+        }
         XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "roof")
     }
 
@@ -278,18 +307,21 @@ final class RetrievalSearchViewTests: XCTestCase {
         model.query = "roof"
         model.search()
         searcher.answerLatest(.success(RetrievalPage(totalAccessible: 2, rows: [shown], offset: 0)))
-        settle()
+        settle(until: "the replaced original is highlighted") {
+            self.renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)) == "roof"
+        }
         model.query = "proof"
         model.loadMore()
+        // Nothing answers the load-more request; give the screen time to redraw were it going to change.
         settle()
         XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "roof")
     }
 
     func testFilterChipsReportTheActiveFilterAsTheirTitle() {
-        settle()
+        settle(until: "the type chip is drawn") { self.renderedText(RetrievalSearchView.typeChipIdentifier) == "Type" }
         XCTAssertEqual(renderedText(RetrievalSearchView.typeChipIdentifier), "Type")
         model.itemType = .idea
-        settle()
+        settle(until: "the type chip shows Idea") { self.renderedText(RetrievalSearchView.typeChipIdentifier) == "Idea" }
         XCTAssertEqual(renderedText(RetrievalSearchView.typeChipIdentifier), "Idea")
     }
 
@@ -313,13 +345,20 @@ final class RetrievalSearchViewTests: XCTestCase {
         model.query = "foo-bar"
         model.search()
         searcher.answerLatest(.success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
-        settle()
+        settle(until: "the replaced original is highlighted") {
+            self.rendered[RetrievalSearchView.rowOriginalIdentifier(shown)] != nil
+        }
         XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "foo|bar")
     }
 
     func testChoosingDatesOpensTheDatesSheetWithItsDayControls() throws {
         filterPresentation.sheet = .dates
-        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) != nil }
+        settle(until: "the Dates sheet and its controls are drawn") {
+            self.renderedText(RetrievalSearchView.filterSheetTitleIdentifier) == "Dates"
+                && self.renderedText(RetrievalSearchView.sinceToggleIdentifier) != nil
+                && self.renderedText(RetrievalSearchView.untilToggleIdentifier) != nil
+                && self.renderedText(RetrievalSearchView.sheetDoneIdentifier) != nil
+        }
 
         XCTAssertEqual(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "Dates")
         XCTAssertEqual(renderedText(RetrievalSearchView.sinceToggleIdentifier), "Since: off")
@@ -330,7 +369,12 @@ final class RetrievalSearchViewTests: XCTestCase {
 
         let since = Date(timeIntervalSince1970: 1_791_462_600)
         model.since = since
-        settle { renderedText(RetrievalSearchView.sinceDateIdentifier) != nil }
+        settle(until: "the since day is offered and the time chip shows it") {
+            self.renderedText(RetrievalSearchView.sinceToggleIdentifier) == "Since: on"
+                && self.renderedText(RetrievalSearchView.sinceDateIdentifier) != nil
+                && self.renderedText(RetrievalSearchView.timeChipIdentifier)
+                    == "From \(since.formatted(date: .abbreviated, time: .omitted))"
+        }
 
         XCTAssertEqual(renderedText(RetrievalSearchView.sinceToggleIdentifier), "Since: on")
         XCTAssertEqual(
@@ -341,13 +385,18 @@ final class RetrievalSearchViewTests: XCTestCase {
             "From \(since.formatted(date: .abbreviated, time: .omitted))", "the time chip shows the chosen day")
 
         filterPresentation.sheet = nil
-        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) == nil }
+        settle(until: "the sheet is gone") { self.renderedText(RetrievalSearchView.filterSheetTitleIdentifier) == nil }
         XCTAssertNil(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "closing the sheet removes its controls")
     }
 
     func testChoosingATopicOpensTheTopicSheetWithItsFieldAndToggle() {
         filterPresentation.sheet = .topic
-        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) != nil }
+        settle(until: "the Session topic sheet and its controls are drawn") {
+            self.renderedText(RetrievalSearchView.filterSheetTitleIdentifier) == "Session topic"
+                && self.renderedText(RetrievalSearchView.topicIdentifier) != nil
+                && self.renderedText(RetrievalSearchView.onlyWithTopicIdentifier) != nil
+                && self.renderedText(RetrievalSearchView.sheetDoneIdentifier) != nil
+        }
 
         XCTAssertEqual(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "Session topic")
         XCTAssertEqual(renderedText(RetrievalSearchView.topicIdentifier), "")
@@ -358,7 +407,11 @@ final class RetrievalSearchViewTests: XCTestCase {
 
         model.sessionTopic = "synthetic garden"
         model.onlyWithSessionTopic = true
-        settle { renderedText(RetrievalSearchView.topicIdentifier) == "synthetic garden" }
+        settle(until: "the topic field, toggle and chip show the topic") {
+            self.renderedText(RetrievalSearchView.topicIdentifier) == "synthetic garden"
+                && self.renderedText(RetrievalSearchView.onlyWithTopicIdentifier) == "Only items with a session topic: on"
+                && self.renderedText(RetrievalSearchView.topicChipIdentifier) == "synthetic garden"
+        }
 
         XCTAssertEqual(renderedText(RetrievalSearchView.topicIdentifier), "synthetic garden")
         XCTAssertEqual(renderedText(RetrievalSearchView.onlyWithTopicIdentifier), "Only items with a session topic: on")

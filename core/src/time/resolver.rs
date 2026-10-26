@@ -1,3 +1,4 @@
+use super::expression::split_shape_combined_phrase;
 use chrono::{prelude::*, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,15 @@ impl TimeResolver {
         phrase: &str,
         context: &TimeContext,
     ) -> Result<ResolutionResult, ResolutionError> {
+        // A day and a clock on either side of the task resolve as one time.
+        // A repeat word beside it stays an unsupported repeat, which the check below reports.
+        let repeats = Self::is_unsupported_repeat(&phrase.trim().to_lowercase());
+        if let Some(combined) = split_shape_combined_phrase(phrase).filter(|_| !repeats) {
+            let mut result = Self::resolve(&combined, context)?;
+            result.original_phrase = phrase.to_string();
+            return Ok(result);
+        }
+
         let phrase_normalized = phrase.trim().to_lowercase();
 
         Self::validate_context(context)?;

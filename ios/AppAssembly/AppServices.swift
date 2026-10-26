@@ -163,6 +163,14 @@ final class AppServices {
         root.setOpenItemHandler { [weak self] itemID in
             DispatchQueue.main.async { self?.navigation.openItem(itemID: itemID) }
         }
+        root.setUnlockRequestHandler { [weak self] in
+            DispatchQueue.main.async {
+                self?.navigation.authenticateForHeldOpen { [weak self] in
+                    guard let root = self?.root else { return }
+                    Task { await root.discardHeldNotificationOpens() }
+                }
+            }
+        }
         root.setOpenSuggestionHandler { [weak self] event in
             DispatchQueue.main.async { self?.routePromptTap(event) }
         }

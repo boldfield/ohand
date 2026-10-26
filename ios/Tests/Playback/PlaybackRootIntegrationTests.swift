@@ -47,6 +47,10 @@ final class PlaybackRootIntegrationTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // A core read issued before the root shut down finishes on its own queue; wait for its buffer to be freed.
+        waitUntilPumping("every core result buffer is freed", timeout: 10) {
+            CoreHandle.liveResultBufferCount == self.baselineBuffers
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -149,7 +153,7 @@ final class PlaybackRootIntegrationTests: XCTestCase {
         opened.close()
         root.setAppActiveForTests(true)
         let pass = try run { await coordinator.reconcile(.foreground) }
-        XCTAssertEqual(pass.outcome(of: .deletion), .completed)
+        XCTAssertEqual(pass.outcome(of: .deletion), .completed, "the pass reported \(pass)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path), "cleanup finishes once playback closed")
     }
 

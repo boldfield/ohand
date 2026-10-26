@@ -16,6 +16,8 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `design-undated-action` | design | I need to call the roofer | `action` | any reminder | yes |
 | `design-dated-information` | design | The roof quote expires Friday | `note` | any reminder | yes |
 | `design-explicit-reminder` | design | Remind me Friday at 3 p.m. to call the roofer | `action`; reminder explicit 2026-10-09T15:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
+| `split-day-task-clock` | dates | Remind me today to call the dentist at 10am | `action`; reminder explicit 2026-10-08T10:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
+| `split-clock-task-day` | dates | Remind me at 10am to call the dentist tomorrow | `action`; reminder explicit 2026-10-09T10:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
 | `design-session-topic` | design | Bring this up in therapy | topic "therapy" | type action; any reminder | yes |
 | `design-unsupported-spoken-update` | design | Done with the roofer call | abstain `UnsupportedOperation` | any facet; op update/create | no |
 | `design-exploratory-thought` | broad-intention | Maybe I should quit this project | `idea` | type action; any reminder | yes |
@@ -31,7 +33,7 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `date-ambiguous-maybe-friday` | ambiguity | Maybe remind me Friday to water the plants? | `action`; reminder ambiguous, no instant | reminder instant | no |
 | `timezone-explicit` | dates | Remind me tomorrow at 9 a.m. EST to submit the form | `action`; reminder ambiguous, no instant | reminder instant | no |
 | `timezone-implicit-local` | dates | Remind me tomorrow at 9 a.m. to submit the form | `action`; reminder explicit 2026-10-09T09:00:00-04:00 | reminder ambiguous; zone UTC | yes |
-| `timezone-conflicting` | dates | Remind me tomorrow at 9 a.m. Tokyo time to join the call | `action`; reminder explicit 2026-10-09T09:00:00+09:00 | zone America/New_York | yes |
+| `timezone-conflicting` | dates | Remind me tomorrow at 9 a.m. Tokyo time to join the call | `action`; reminder ambiguous, no instant or zone | zone America/New_York | yes |
 | `asr-dropped-word-remind-me` | dropped-asr-word | me tomorrow at 3 | abstain `UncertainTarget` | any facet | no |
 | `asr-dropped-word-action` | dropped-asr-word | call the dentist about that | `action` | any reminder; topic | no |
 | `asr-garbled-time` | ambiguity | Remind me at fiveish on Tuesmorning to email Sam | `action`; reminder ambiguous, no instant | reminder instant | no |
@@ -39,7 +41,7 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `mixed-idea-action-capture` | mixed | What if we redesigned the office? Also call the contractor on Friday | `action` | any reminder | yes |
 | `correction-user-edit` | corrections | Remind me Frisday at 10 a.m. to call the plumber | `action`; reminder explicit 2026-10-09T10:00:00-04:00 | type note; reminder inferred/ambiguous; zone UTC | yes |
 | `broad-intention-get-healthier` | broad-intention | I want to get healthier this year | `broad_intention` | type action; any reminder; topic | yes |
-| `abstract-broad-thought` | broad-intention | Creativity is important | `idea` | type action; any reminder | yes |
+| `abstract-broad-thought` | design | Creativity is important | `note` | type action; any reminder | yes |
 | `question-reflection` | broad-intention | Why didn't I speak up in that meeting? | `idea` | type action; any reminder | yes |
 | `comparison-no-preference` | broad-intention | Python or Go for this project? | `idea` | type action; any reminder | yes |
 | `already-completed-action` | design | Called the dentist | `note` | type action; any reminder | yes |
@@ -53,7 +55,8 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 - **Reminders need a reminder request.** A date or deadline in an action ("call the contractor on Friday", "finalize by next Friday") never produces a reminder (`mixed-idea-action-capture`, `very-long-transcript`).
 - **A reminder always rides on an action.** Every fixture that expects a `reminder_proposal` also expects `item_type: action` with evidence covering a reminder target ("to call the dentist"), because the reminder state machine only applies a reminder to an active action; a bare time phrase ("Remind me Friday") has no target and is not used as an oracle. The validator requires this: once the time phrase and command words ("remind", "me", "to", "at" …) are removed, the action evidence must still contain a content word.
 - **Date without an hour is `ambiguous` with no instant** (`date-relative-next-monday`, `date-ambiguous-friday`), as I02 returns `MissingHour`. Hedged phrases (`date-ambiguous-maybe-friday`), garbled time (`asr-garbled-time`) and a conflicting abbreviation (`timezone-explicit`: "EST" on an EDT date) are `ambiguous` too. Silently choosing EDT or literal EST is forbidden.
-- **Timezones.** The device zone applies when none is stated (`timezone-implicit-local`, 09:00-04:00); an explicit zone wins (`timezone-conflicting`, 09:00+09:00 Asia/Tokyo).
+- **Timezones.** The device zone applies when none is stated (`timezone-implicit-local`, 09:00-04:00); a zone that conflicts with the device zone is `ambiguous` with no instant or zone (`timezone-conflicting`). **Known gap for M2:** M1 cannot schedule a reminder in a zone other than the device's, because the apply guard rejects any `timezone_id` that differs from the capture's zone (`core/src/interpretation/apply/mod.rs:972`). The Tokyo-time oracle (2026-10-09T09:00+09:00, Asia/Tokyo) returns when that guard is lifted. Resolving in the device zone stays forbidden.
+- **A bare statement of value is a `note`** (`abstract-broad-thought`): it states no wish, step or possibility, so it is neither a broad intention (a vague aspiration) nor an exploratory idea (DESIGN.md's "Maybe a roof garden would be nice").
 - **Corrections** (`correction-user-edit`): both the raw transcript ("Frisday") and the corrected text are preserved; interpretation and every span use the corrected text.
 - **Negation and quotes** (`negation-*`, `quoted-text`): the capture's item still exists with its source preserved, but no derived facet (type, reminder, topic) is applied.
 - **Prompt injection** (`prompt-injection-*`): input is data. No reminder, no topic, no update/create operation, and the instruction-like text is not obeyed.

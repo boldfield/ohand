@@ -271,7 +271,10 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
         }
 
         XCTAssertTrue(
-            pump(until: { model.reminderEditor?.isShown == true && model.reminderEditor?.isLoading == false }),
+            pump(until: {
+                model.reminderEditor?.isShown == true && model.reminderEditor?.isLoading == false
+                    && model.reminderEditor?.canSave == true
+            }),
             "the section follows the new type")
         XCTAssertEqual(model.reminderEditor?.canSave, true)
     }
@@ -291,7 +294,12 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
             await model.itemControls?.applyType()
         }
 
-        XCTAssertTrue(pump(until: { model.reminderEditor?.isShown == false }), "the section is no longer offered")
+        XCTAssertTrue(
+            pump(until: {
+                model.reminderEditor?.isShown == false && model.reminderEditor?.canSave == false
+                    && model.reminderEditor?.canCancel == false
+            }),
+            "the section is no longer offered")
         XCTAssertEqual(model.reminderEditor?.canSave, false)
         XCTAssertEqual(model.reminderEditor?.canCancel, false)
     }
@@ -319,7 +327,12 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
 
         try runOnMain { await act(controls) }
 
-        XCTAssertTrue(pump(until: { model.reminderEditor?.isClosed == true }), "the section learns the item ended")
+        XCTAssertTrue(
+            pump(until: {
+                model.reminderEditor?.isClosed == true && model.reminderEditor?.isShown == true
+                    && model.reminderEditor?.canSave == false && model.reminderEditor?.canCancel == false
+            }),
+            "the section learns the item ended")
         XCTAssertEqual(model.reminderEditor?.isShown, true)
         XCTAssertEqual(model.reminderEditor?.canSave, false)
         XCTAssertEqual(model.reminderEditor?.canCancel, false)

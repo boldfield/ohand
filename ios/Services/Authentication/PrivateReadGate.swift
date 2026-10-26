@@ -246,6 +246,17 @@ final class PrivateReadGate {
         }
     }
 
+    func startFailedInterpretations(operationID: UInt64, limit: Int?, cursor: String?) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(
+                operationID: operationID,
+                command: .failedInterpretations(readScopes: authorizedScopes, limit: limit, cursor: cursor))
+        }
+    }
+
+    /// The item scopes an authenticated session may read, for the mutations that name them (a rerun of failed work).
+    var authorizedReadScopes: [CoreExportScope] { authorizedScopes }
+
     func startRequeueRecord(operationID: UInt64, jobID: String) throws {
         try issue(operationID: operationID) {
             try source.startJobConfigurationRead(operationID: operationID, command: .requeueRecord(jobID: jobID))
