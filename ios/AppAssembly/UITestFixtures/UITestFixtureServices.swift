@@ -15,11 +15,20 @@ enum UITestFixtureError: Error {
 /// Keychain items production uses: the store is a fresh temporary directory, the credentials use a service name made for
 /// this launch, and the provider, recognizer, notification center and read session are scripted substitutes. The store
 /// is filled through the same operations the app runs (save, provider setup, grant, interpretation), never with SQL.
-enum UITestFixtureServices {
+final class UITestFixtureLaunch {
     /// Placed far in the future so a reminder stays in the future on any real date.
     static let sortedReminderPhrase = "2099-01-15 11:00:00"
+    /// The longest a launch waits for seeding. The simulator has no launch watchdog; this only bounds a stuck seed.
+    private static let seedingTimeout: TimeInterval = 60
 
-    static func make(named name: String) throws -> AppServices {
+    private let name: String
+    private var seeder: UITestFixtureSeeder?
+
+    init(name: String) {
+        self.name = name
+    }
+
+    func makeServices() throws -> AppServices {
         guard let fixture = UITestFixture(rawValue: name) else { throw UITestFixtureError.unknownFixture(name) }
         let storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-ui-fixture-\(UUID().uuidString)", isDirectory: true)
@@ -43,19 +52,27 @@ enum UITestFixtureServices {
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationPermission: UITestFixturePermissionAsker(
                 state: permission == .authorized ? .usable : .notRequested))
-        // Seeding waits on the core, so it runs after launch has started the services and returned.
-        DispatchQueue.main.async {
-            Task { @MainActor in
-                let seeder = UITestFixtureSeeder(
-                    fixture: fixture, services: services, sender: sender, recognizer: recognizer)
-                do {
-                    try await seeder.seed()
-                } catch {
-                    NSLog("UITestFixture \(fixture.rawValue) seeding failed: \(error)")
-                }
-            }
-        }
+        seeder = UITestFixtureSeeder(fixture: fixture, services: services, sender: sender, recognizer: recognizer)
         return services
+    }
+
+    /// Fills the store once the services have started, and returns when it is filled, so the first screen a test sees
+    /// is the finished fixture. Turns the main run loop meanwhile, as the seeding runs on the main actor.
+    func seedAndWait() {
+        guard let seeder else { return }
+        var finished = false
+        Task { @MainActor in
+            do {
+                try await seeder.seed()
+            } catch {
+                NSLog("UITestFixture \(self.name) seeding failed: \(error)")
+            }
+            finished = true
+        }
+        let deadline = Date().addingTimeInterval(Self.seedingTimeout)
+        while !finished, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
     }
 }
 
@@ -118,7 +135,7 @@ final class UITestFixtureSeeder {
         let typedNote = "Synthetic typed note about the garden hose"
         let typedIdea = "Synthetic typed idea about a herb planter"
         let typedAction = "Synthetic typed action to sweep the porch"
-        let reminderText = "Remind me \(UITestFixtureServices.sortedReminderPhrase) to call the roofer about the estimate"
+        let reminderText = "Remind me \(UITestFixtureLaunch.sortedReminderPhrase) to call the roofer about the estimate"
         try await saveTyped(typedNote, reply: .proposal(try Self.proposal(text: typedNote, itemType: "note")))
         try await saveTyped(typedIdea, reply: .proposal(try Self.proposal(text: typedIdea, itemType: "idea")))
         try await saveTyped(typedAction, reply: .proposal(try Self.proposal(text: typedAction, itemType: "action")))
@@ -127,7 +144,7 @@ final class UITestFixtureSeeder {
             reply: .proposal(
                 try Self.proposal(
                     text: reminderText, itemType: "action",
-                    reminder: .explicit(phrase: UITestFixtureServices.sortedReminderPhrase, instant: "2099-01-15T11:00:00Z"))))
+                    reminder: .explicit(phrase: UITestFixtureLaunch.sortedReminderPhrase, instant: "2099-01-15T11:00:00Z"))))
         let spokenTexts = [
             ("note", "Synthetic spoken note about the bookshelf"),
             ("idea", "Synthetic spoken idea about a window box"),

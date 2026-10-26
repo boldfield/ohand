@@ -14,7 +14,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         #if DEBUG
         // A UI test selects a fixture with `-OhAndUITestFixture <name>`; a release build never reads the argument.
         if let fixtureName = UITestFixture.requestedName() {
-            return AppLauncher(makeServices: { try UITestFixtureServices.make(named: fixtureName) })
+            let fixtureLaunch = UITestFixtureLaunch(name: fixtureName)
+            return AppLauncher(
+                makeServices: { try fixtureLaunch.makeServices() },
+                startServices: { services, isActive in
+                    services.start(isActive: isActive)
+                    fixtureLaunch.seedAndWait()
+                })
         }
         #endif
         return AppLauncher()

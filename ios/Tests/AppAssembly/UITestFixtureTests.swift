@@ -29,7 +29,7 @@ final class UITestFixtureTests: XCTestCase {
     }
 
     func testAnUnknownFixtureNameIsRefused() {
-        XCTAssertThrowsError(try UITestFixtureServices.make(named: "no-such-fixture"))
+        XCTAssertThrowsError(try UITestFixtureLaunch(name: "no-such-fixture").makeServices())
     }
 
     // MARK: isolation
