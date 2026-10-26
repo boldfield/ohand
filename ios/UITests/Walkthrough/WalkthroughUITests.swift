@@ -350,6 +350,14 @@ final class WalkthroughUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 0.5)
             }
         } while !tapped && Date() < deadline
+        if !tapped {
+            // What was on screen instead of a back button.
+            let slug = destinationName.lowercased().replacingOccurrences(of: " ", with: "-")
+            try? XCUIScreen.main.screenshot().pngRepresentation.write(
+                to: outputDirectory.appendingPathComponent("failure-back-to-\(slug).png"))
+            try? app.debugDescription.write(
+                to: outputDirectory.appendingPathComponent("failure-back-to-\(slug)-hierarchy.txt"), atomically: true, encoding: .utf8)
+        }
         XCTAssertTrue(tapped, "going back to \(destinationName): no back button was hittable within \(Int(screenTimeout)) s")
         XCTAssertTrue(appears(destination, timeout: screenTimeout), "going back did not return to \(destinationName)")
     }

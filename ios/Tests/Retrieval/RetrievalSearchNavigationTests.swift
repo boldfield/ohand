@@ -116,10 +116,11 @@ final class RetrievalSearchNavigationTests: XCTestCase {
 
     /// Runs the main loop until the condition holds; fails the test naming it if ten seconds pass first.
     private func settle(
-        _ condition: String, file: StaticString = #filePath, line: UInt = #line, _ holds: () -> Bool
+        _ condition: String, timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line,
+        _ holds: () -> Bool
     ) {
         pauseRunLoop()
-        waitUntilPumping(condition, timeout: 10, file: file, line: line) {
+        waitUntilPumping("\(condition) (events so far: \(events))", timeout: timeout, file: file, line: line) {
             self.retainedWindow?.rootViewController?.view.layoutIfNeeded()
             return holds()
         }
@@ -161,7 +162,9 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         func lastIndex(of event: ManagementPresentationEvent) -> Int? { events.lastIndex(of: event) }
         let itemAppeared = try XCTUnwrap(lastIndex(of: .appeared(.item(Self.itemID), isPlaceholder: false)))
         navigation.path.removeLast()
-        settle("the search appeared again after the detail and the detail left the screen") {
+        // 30 s, not 10: the pop transition completes (and fires the search's appearance) only after the hosted window has
+        // laid out and animated, which run 40247595411 showed a loaded Intel runner can stretch past 10 s. The condition is unchanged.
+        settle("the search appeared again after the detail and the detail left the screen", timeout: 30) {
             guard events.contains(.disappeared(.item(Self.itemID))) else { return false }
             guard let searchAppeared = lastIndex(of: .appeared(searchRoute, isPlaceholder: false)) else { return false }
             return searchAppeared > itemAppeared
