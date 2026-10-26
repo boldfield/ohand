@@ -24,6 +24,7 @@ final class WalkthroughUITests: XCTestCase {
         ("Unfinished recordings", "Unfinished recordings"),
         ("Processing", "Processing"),
         ("Privacy", "Privacy"),
+        ("Status", "Status"),
         ("Audio", "Audio"),
         ("Export", "Export"),
     ]

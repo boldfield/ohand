@@ -13,6 +13,12 @@ struct SourceDetailView: View {
     static let playButtonIdentifier = "source-detail.audio.play"
     static let pauseButtonIdentifier = "source-detail.audio.pause"
     static let audioNoticeIdentifier = "source-detail.audio.notice"
+    static let sortingIdentifier = "source-detail.sorting"
+    static let sortingFailedIdentifier = "source-detail.sorting-failed"
+    static let tryAgainIdentifier = "source-detail.sorting.try-again"
+    static let tryAgainSummaryIdentifier = "source-detail.sorting.summary"
+    static let tryAgainLabel = "Try again"
+    static let sortingText = "Sorting…"
 
     static let lockedText = "Your saved items are locked. Go back and open the item again to unlock it."
     static let notFoundText = "This item is not available. It may have been deleted."
@@ -67,6 +73,7 @@ struct SourceDetailView: View {
                 VStack(alignment: .leading, spacing: DSSpacing.lg) {
                     if let content = model.content {
                         detailCard(content)
+                        sortingLine
                         if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
                         history(content)
                         if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
@@ -137,6 +144,41 @@ struct SourceDetailView: View {
     private var ownControlIsWorking: Bool {
         model.itemControls?.isWorking == true || model.reminderEditor?.isWorking == true
             || model.deletion?.isBusy == true
+    }
+
+    /// One line under the card: why sorting failed with a "Try again", "Sorting…" while it runs, otherwise nothing.
+    @ViewBuilder private var sortingLine: some View {
+        switch model.sorting {
+        case .none:
+            EmptyView()
+        case .sorting:
+            Text(Self.sortingText)
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .padding(.horizontal, DSSpacing.md)
+                .reported(Self.sortingIdentifier, renderReporter, layoutReporter)
+        case .failed(let reason):
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(reason)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .reported(Self.sortingFailedIdentifier, renderReporter, layoutReporter)
+                Button(Self.tryAgainLabel) { Task { await model.tryAgain() } }
+                    .font(DSFont.rowLabel)
+                    .frame(minHeight: DSLayout.rowMinimumHeight)
+                    .disabled(model.isTryingAgain)
+                    .reported(Self.tryAgainIdentifier, renderReporter, layoutReporter)
+                if let summary = model.tryAgainSummary {
+                    Text(summary.text)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.tryAgainSummaryIdentifier, renderReporter, layoutReporter)
+                }
+            }
+            .padding(.horizontal, DSSpacing.md)
+        }
     }
 
     private var header: some View {

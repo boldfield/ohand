@@ -74,7 +74,32 @@ final class StatusModel: ObservableObject {
     /// Set once the person has asked for a retry, until a later read no longer offers one.
     @Published private(set) var retryRequested = false
 
+    /// What the failed-notes section can say. Locked keeps the count-only wording and offers unlock.
+    enum FailedNotesAccess: Equatable {
+        case notRead
+        case readable
+        case locked
+        case unreadable
+    }
+
+    /// The most notes the Status screen lists before "Show all".
+    static let listedNoteLimit = 5
+    private static let readLimit = 100
+
+    /// Newest first, as the core listed them. Empty unless `failedNotesAccess` is `readable`.
+    @Published private(set) var failedNotes: [FailedNote] = []
+    @Published private(set) var failedNotesAccess: FailedNotesAccess = .notRead
+    /// The first line of each listed note's text, by item. A note whose text cannot be read has no entry.
+    @Published private(set) var firstLines: [String: String] = [:]
+    @Published private(set) var rerunSummary: FailedNotesRerunSummary?
+    @Published private(set) var isRerunning = false
+
     private let health: ProcessingHealthReading
+    private let failedWork: FailedInterpretationsControlling?
+    private let noteText: FailedNoteTextReading?
+    private var requestedLines: Set<String> = []
+    /// Asks the person to unlock saved items; absent where the host offers none.
+    let requestUnlock: (() -> Void)?
     private let permissions: PermissionsReading
     private let scheduling: ReminderSchedulingReading
     private let retrier: ProcessingRetrying
@@ -83,8 +108,13 @@ final class StatusModel: ObservableObject {
     init(
         health: ProcessingHealthReading, permissions: PermissionsReading, retrier: ProcessingRetrying,
         scheduling: ReminderSchedulingReading = NoReminderSchedulingReport(),
+        failedWork: FailedInterpretationsControlling? = nil, noteText: FailedNoteTextReading? = nil,
+        requestUnlock: (() -> Void)? = nil,
         openSystemSettings: @escaping () -> Void
     ) {
+        self.failedWork = failedWork
+        self.noteText = noteText
+        self.requestUnlock = requestUnlock
         self.health = health
         self.permissions = permissions
         self.scheduling = scheduling
@@ -98,6 +128,7 @@ final class StatusModel: ObservableObject {
         let entries = await permissions.refresh()
         facts = Self.facts(
             health: outcome, notifications: entries.first { $0.kind == .notifications }, scheduling: scheduling.lastReport())
+        await refreshFailedNotes()
         hasLoaded = true
         if !facts.contains(where: { $0.actions.contains(.retry) }) { retryRequested = false }
     }
@@ -107,6 +138,54 @@ final class StatusModel: ObservableObject {
     @MainActor func retry() async {
         retryRequested = true
         retrier.retryNow()
+        await refresh()
+    }
+
+    /// The notes the Status screen lists: the first few, newest first.
+    var listedNotes: [FailedNote] { Array(failedNotes.prefix(Self.listedNoteLimit)) }
+    var hasMoreNotes: Bool { failedNotes.count > Self.listedNoteLimit }
+    /// True when there are failed notes to run again.
+    var offersNoteRetry: Bool { failedWork != nil && !failedNotes.isEmpty }
+
+    /// Reads which notes failed to sort. A locked session keeps the section's count-only wording.
+    @MainActor private func refreshFailedNotes() async {
+        guard let failedWork else { return }
+        do {
+            let page = try await failedWork.failedInterpretations(limit: Self.readLimit, cursor: nil)
+            failedNotes = page.failed.map(FailedNote.init)
+            failedNotesAccess = .readable
+        } catch {
+            failedNotes = []
+            firstLines = [:]
+            requestedLines = []
+            failedNotesAccess = (error as? JobConfigurationError) == .notAuthenticated ? .locked : .unreadable
+            if failedNotesAccess == .locked { rerunSummary = nil }
+        }
+    }
+
+    /// Reads one listed note's first line once, through the private item read. Row views call it as they appear.
+    @MainActor func ensureFirstLine(itemID: String) async {
+        guard let noteText, !requestedLines.contains(itemID) else { return }
+        requestedLines.insert(itemID)
+        if let line = await noteText.firstLine(itemID: itemID) {
+            firstLines[itemID] = line
+        } else {
+            requestedLines.remove(itemID)
+        }
+    }
+
+    /// Runs the listed failed notes again and records what happened. New jobs are then sent by a drain request.
+    @MainActor func retryFailedNotes() async {
+        guard let failedWork, !failedNotes.isEmpty, !isRerunning else { return }
+        isRerunning = true
+        defer { isRerunning = false }
+        do {
+            let result = try await failedWork.rerunFailedInterpretations(itemIDs: failedNotes.map(\.itemID))
+            rerunSummary = FailedNotesRerunSummary(result)
+            if result.moved > 0 { retrier.retryNow() }
+        } catch {
+            rerunSummary = .failed
+        }
         await refresh()
     }
 

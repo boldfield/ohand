@@ -111,6 +111,60 @@ enum StatusText {
     static let openSettingsLabel = "Open iOS Settings"
     static let refreshLabel = "Check again"
 
+    static let unlockLabel = "Unlock to see which"
+    static let showAllLabel = "Show all"
+    static let failedNotesTitle = "Notes that did not sort"
+    static let processingSettingsLabel = "Open Processing settings"
+    static let rerunFailed = "Could not run them again. Your notes are untouched. Check again in a moment."
+    static let notePlaceholder = "A saved note"
+    static let sortingLabel = "Sorting…"
+
+    static func capturedLabel(_ date: Date?) -> String {
+        guard let date else { return "Saved earlier" }
+        return "Saved " + date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    static func rerunSummary(queued: Int, needsSetting: Int) -> String {
+        func notes(_ count: Int) -> String { "\(count) \(count == 1 ? "note" : "notes")" }
+        switch (queued > 0, needsSetting > 0) {
+        case (true, true):
+            return "\(notes(queued)) queued again. \(needsSetting) can't run until a setting changes."
+        case (true, false): return "\(notes(queued)) queued again."
+        case (false, true): return "\(notes(needsSetting)) can't run until a setting changes."
+        case (false, false): return "Nothing needed to run again."
+        }
+    }
+
+    /// One plain line for each machine label the core can record on a failed job. Anything else is not echoed.
+    static func failureReason(_ label: String) -> String {
+        switch label {
+        case "timeout": return "The provider took too long to answer"
+        case "cancelled": return "The work was cancelled before it finished"
+        case "unavailable": return "The provider could not be reached"
+        case "rate_limited": return "The provider asked to slow down"
+        case "unauthorized": return "The provider did not accept the sign-in"
+        case "unsupported": return "No provider was allowed when it was saved"
+        case "unsupported_job_version": return "It was saved by a version that cannot sort it"
+        case "invalid_output": return "The provider's answer could not be used"
+        case "output_too_large": return "The provider's answer was too large"
+        case "input_too_large": return "The note was too long to send"
+        case "capability_unavailable": return "A needed capability was not available"
+        case "capability_did_not_settle": return "A needed capability did not finish in time"
+        case "profile_mismatch": return "The provider settings changed while it waited"
+        case "rejected": return "The request was not accepted"
+        case "source_unavailable": return "The saved original could not be read"
+        case "permanent": return "The provider reported a failure that will not clear"
+        case "native_failure": return "The app could not send the request"
+        case "offline_deferred": return "It was put off while the phone was offline"
+        case "retries_exhausted": return "It was tried several times and did not go through"
+        case "interrupted": return "The app stopped before it finished"
+        case "internal_error": return "The app hit an unexpected error"
+        case "profile_revoked": return "The provider was turned off for this note"
+        case "profile_missing": return "The provider it was set for is no longer there"
+        default: return "It stopped for a reason this version cannot name"
+        }
+    }
+
     static let introText =
         "Plain facts about what is saved, what is waiting and what is not set up. You never need to open this to keep "
         + "using Oh And."
