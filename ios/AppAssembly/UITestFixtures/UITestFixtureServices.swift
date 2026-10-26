@@ -22,7 +22,7 @@ final class UITestFixtureLaunch {
     private static let seedingTimeout: TimeInterval = 60
 
     private let name: String
-    private var seeder: UITestFixtureSeeder?
+    private var pendingSeed: (fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer)?
 
     init(name: String) {
         self.name = name
@@ -52,16 +52,19 @@ final class UITestFixtureLaunch {
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationPermission: UITestFixturePermissionAsker(
                 state: permission == .authorized ? .usable : .notRequested))
-        seeder = UITestFixtureSeeder(fixture: fixture, services: services, sender: sender, recognizer: recognizer)
+        pendingSeed = (fixture, services, sender, recognizer)
         return services
     }
 
     /// Fills the store once the services have started, and returns when it is filled, so the first screen a test sees
     /// is the finished fixture. Turns the main run loop meanwhile, as the seeding runs on the main actor.
     func seedAndWait() {
-        guard let seeder else { return }
+        guard let pendingSeed else { return }
         var finished = false
         Task { @MainActor in
+            let seeder = UITestFixtureSeeder(
+                fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
+                recognizer: pendingSeed.recognizer)
             do {
                 try await seeder.seed()
             } catch {
