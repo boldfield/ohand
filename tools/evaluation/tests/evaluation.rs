@@ -1,11 +1,15 @@
 //! Evaluation reports: separation of defect classes, the safety gate, execution-kind
 //! classification and reproducibility.
 
+use chrono::{DateTime, Utc};
 use evaluation::corpus::Corpus;
 use evaluation::report::{ExecutionKind, Report, RunStatus};
 use evaluation::responses::Responses;
 use evaluation::run::evaluate;
-use evaluation::score::{DefectKind, MutationClass};
+use evaluation::score::{
+    defects_against, DefectKind, FacetView, MutationClass, ReminderView, Stage,
+};
+use ohand_core::store::events::ItemType;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -856,6 +860,59 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
         defect.kind == DefectKind::UnsupportedClaim && defect.detail.contains("timezone")
     };
 
+    // The oracle is now an unscheduled `ambiguous` reminder with no zone (M1 cannot schedule
+    // a non-device zone), so a device-zone claim is caught by the kept forbidden zone rule and
+    // as an instant where the oracle has none, not as a zone mismatch.
+    assert_eq!(
+        case.candidate_defects.iter().filter(is_zone_defect).count(),
+        0
+    );
+    assert!(case
+        .candidate_defects
+        .iter()
+        .any(|defect| defect.kind == DefectKind::FalseDeadline));
+    assert!(case
+        .candidate_forbidden
+        .iter()
+        .any(|hit| hit.rule == "reminder timezone America/New_York"));
+    // The guard stores the unscheduled reminder the oracle now asks for.
+    assert!(case.authoritative_defects.is_empty());
+}
+
+#[test]
+fn a_stored_reminder_without_an_instant_makes_no_timezone_claim_at_the_authoritative_stage() {
+    // `timezone-implicit-local`'s oracle names the device zone (America/New_York). A candidate
+    // claiming Asia/Tokyo is a zone mismatch. Its span quotes only
+    // "9 a.m." of "tomorrow at 9 a.m.", so the guard stores the reminder as not scheduled, and a
+    // stored reminder without an instant makes no zone claim.
+    let fixture_id = "timezone-implicit-local";
+    let corpus = corpus();
+    let responses = responses_from(
+        &corpus,
+        vec![scenario(
+            "foreign-zone-claim",
+            fixture_id,
+            synthetic(),
+            json!({
+                "operation": { "kind": "annotate" },
+                "item_type": "action",
+                "source_spans": [span_of(&corpus, fixture_id, "Remind me tomorrow at 9 a.m. to submit the form")],
+                "reminder_proposal": {
+                    "source_span": span_of(&corpus, fixture_id, "9 a.m."),
+                    "quality": "explicit",
+                    "instant": "2026-10-09T09:00:00+09:00",
+                    "timezone_id": "Asia/Tokyo"
+                }
+            }),
+        )],
+    );
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+    let case = &fake.cases[0];
+    let is_zone_defect = |defect: &&evaluation::score::Defect| {
+        defect.kind == DefectKind::UnsupportedClaim && defect.detail.contains("timezone")
+    };
+
     assert_eq!(
         case.candidate_defects.iter().filter(is_zone_defect).count(),
         1
@@ -873,10 +930,80 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
             .count(),
         0
     );
-    assert!(case
-        .authoritative_defects
-        .iter()
-        .any(|defect| defect.kind == DefectKind::MissedIntent));
+
+    // The store keeps the capture's zone, which every repository oracle shares, so the stage
+    // contrast is also checked directly against this oracle with a stored zone that differs.
+    let expected = &corpus.fixture(fixture_id).expect("fixture").expected;
+    let view = |instant: Option<&str>| FacetView {
+        item_type: Some(ItemType::Action),
+        reminder: Some(ReminderView {
+            quality: None,
+            instant: instant.map(|text| {
+                DateTime::parse_from_rfc3339(text)
+                    .expect("instant")
+                    .with_timezone(&Utc)
+            }),
+            timezone_id: Some("Asia/Tokyo".to_string()),
+            evidence: None,
+        }),
+        ..FacetView::default()
+    };
+    let zone_defects = |view: &FacetView, stage: Stage| {
+        defects_against(expected, view, stage, Some(view), false)
+            .iter()
+            .filter(is_zone_defect)
+            .count()
+    };
+    assert_eq!(zone_defects(&view(None), Stage::Candidate), 1);
+    assert_eq!(zone_defects(&view(None), Stage::Authoritative), 0);
+    assert_eq!(
+        zone_defects(
+            &view(Some("2026-10-09T09:00:00-04:00")),
+            Stage::Authoritative
+        ),
+        1
+    );
+}
+
+#[test]
+fn the_f52_fixtures_recorded_conforming_responses_match_their_oracles_through_the_guard() {
+    let corpus = corpus();
+    let responses = repository_responses(&corpus);
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+
+    for fixture_id in [
+        "timezone-conflicting",
+        "very-long-transcript",
+        "abstract-broad-thought",
+        "prompt-injection-attempt-1",
+    ] {
+        let case = fake
+            .cases
+            .iter()
+            .find(|case| case.case_id == format!("conforming/{fixture_id}"))
+            .unwrap_or_else(|| panic!("{fixture_id} runs as a conforming scenario"));
+        assert!(
+            case.candidate_defects.is_empty(),
+            "{fixture_id} candidate defects: {:?}",
+            case.candidate_defects
+        );
+        assert!(
+            case.authoritative_defects.is_empty(),
+            "{fixture_id} durable defects: {:?}",
+            case.authoritative_defects
+        );
+        assert!(case.candidate_forbidden.is_empty(), "{fixture_id}");
+        assert!(case.authoritative_forbidden.is_empty(), "{fixture_id}");
+        if fixture_id == "timezone-conflicting" {
+            let stored = case
+                .authoritative_state
+                .reminder
+                .as_ref()
+                .expect("the ambiguous reminder is kept as not scheduled");
+            assert!(stored.resolved_instant.is_none());
+        }
+    }
 }
 
 #[test]

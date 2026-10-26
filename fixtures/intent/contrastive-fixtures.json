@@ -800,9 +800,7 @@
           }
         ],
         "reminder_proposal": {
-          "timezone_id": "Asia/Tokyo",
-          "quality": "explicit",
-          "instant": "2026-10-09T09:00:00+09:00",
+          "quality": "ambiguous",
           "source_span": {
             "start": 10,
             "end": 39,
@@ -816,7 +814,7 @@
         ]
       },
       "recoverable": true,
-      "notes": "Explicit timezone in source overrides device context. Source says 'Tokyo time', so instant is resolved in Asia/Tokyo (UTC+09:00), not device timezone. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
+      "notes": "M1 cannot schedule a reminder in a zone other than the device's (the apply guard rejects any timezone_id that differs from the capture's zone), so a zone that conflicts with the device zone is ambiguous: no instant and no zone, saved as not scheduled yet. Resolving 09:00 in the device zone (America/New_York) is still wrong and stays forbidden. Resolving it in Asia/Tokyo (2026-10-09T09:00:00+09:00) is a known gap for M2. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "asr-dropped-word-remind-me",
@@ -1072,7 +1070,7 @@
     },
     {
       "id": "abstract-broad-thought",
-      "category": "broad-intention",
+      "category": "design",
       "input": "Creativity is important",
       "provenance": "synthetic, abstract thought",
       "text_basis": "original",
@@ -1085,7 +1083,7 @@
         "notes": "general reflection"
       },
       "expected": {
-        "item_type": "idea",
+        "item_type": "note",
         "source_spans": [
           {
             "start": 0,
@@ -1101,7 +1099,7 @@
         "reminder": "any"
       },
       "recoverable": true,
-      "notes": "Abstract statements without action verbs or time references remain as ideas. Must not be converted to actions or reminders."
+      "notes": "A bare statement of value states no wish, step or possibility, so it is neither a broad intention nor an exploratory idea (DESIGN.md: an idea is an exploratory thought such as 'Maybe a roof garden would be nice'; a broad intention is a vague aspiration). It is information the user wants kept: a note. Must not be converted to an action or reminder."
     },
     {
       "id": "question-reflection",
