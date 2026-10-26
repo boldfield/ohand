@@ -67,6 +67,8 @@ final class StatusFailedNotesTests: XCTestCase {
     private var window: UIWindow?
     private var rendered: [String: String] = [:]
     private var actions: [String: () -> Void] = [:]
+    /// Counts hosted screens, so a report from a screen that has been replaced is ignored.
+    private var generation = 0
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -90,16 +92,21 @@ final class StatusFailedNotesTests: XCTestCase {
     }
 
     private func host(_ model: StatusModel, style: UIUserInterfaceStyle) {
+        window?.rootViewController = nil
+        window?.isHidden = true
+        window = nil
         rendered = [:]
         actions = [:]
+        generation += 1
+        let current = generation
         let screen = StatusView(
             model: model, makeProviderSettings: { AnyView(Text("Processing")) },
-            renderReporter: { [unowned self] in rendered = $0 }, actionReporter: { [unowned self] in actions = $0 })
+            renderReporter: { [unowned self] in if current == generation { rendered = $0 } },
+            actionReporter: { [unowned self] in if current == generation { actions = $0 } })
         let shown = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         shown.overrideUserInterfaceStyle = style
         shown.rootViewController = UIHostingController(rootView: NavigationStack { screen })
         shown.makeKeyAndVisible()
-        window?.isHidden = true
         window = shown
     }
 

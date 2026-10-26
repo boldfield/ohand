@@ -65,6 +65,7 @@ final class SourceDetailSortingTests: XCTestCase {
     private static let itemID = "item-sorting-1"
     private var window: UIWindow?
     private var shown: Set<String> = []
+    private var generation = 0
 
     override func tearDownWithError() throws {
         window?.isHidden = true
@@ -79,16 +80,21 @@ final class SourceDetailSortingTests: XCTestCase {
     }
 
     private func host(_ model: SourceDetailModel, style: UIUserInterfaceStyle) {
+        window?.rootViewController = nil
+        window?.isHidden = true
+        window = nil
         shown = []
+        generation += 1
+        let current = generation
         let screen = SourceDetailView(
             model: model, renderReporter: { [unowned self] identifier, isShown in
+                guard current == generation else { return }
                 if isShown { shown.insert(identifier) } else { shown.remove(identifier) }
             })
         let hosted = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         hosted.overrideUserInterfaceStyle = style
         hosted.rootViewController = UIHostingController(rootView: NavigationStack { screen })
         hosted.makeKeyAndVisible()
-        window?.isHidden = true
         window = hosted
     }
 
