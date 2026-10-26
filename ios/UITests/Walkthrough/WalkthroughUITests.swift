@@ -213,6 +213,10 @@ final class WalkthroughUITests: XCTestCase {
     /// finish a transition under load.
     private func tapWhenHittable(_ element: XCUIElement, step: String, elementName: String) {
         waitUntilHittable(element, step: step, elementName: elementName)
+        // A screen still sliding in answers "hittable" and then has no activation point by the time the tap resolves it
+        // ("Activation point invalid"). Hittable again half a second later means the element has stopped moving.
+        Thread.sleep(forTimeInterval: 0.5)
+        waitUntilHittable(element, step: step, elementName: elementName)
         element.tap()
     }
 
