@@ -78,6 +78,15 @@ final class UITestFixtureSeeder {
     }
 
     func seed() async throws {
+        // Provider setup is a private operation, so the locked fixture is unlocked while it is filled and locked again
+        // before the test sees it.
+        if fixture == .locked {
+            let outcome = await withCheckedContinuation { continuation in
+                root.authenticateReads(reason: "Prepare the locked fixture") { continuation.resume(returning: $0) }
+            }
+            guard outcome == .authenticated else { throw UITestFixtureError.seedingFailed("unlock: \(outcome)") }
+        }
+        defer { if fixture == .locked { root.relockReads() } }
         switch fixture {
         case .emptyFirstRun:
             return
