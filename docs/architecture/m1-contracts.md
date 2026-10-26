@@ -19,6 +19,7 @@ Rust owns authoritative domain state. Swift owns platform effects and protected 
 ### Capture ID
 
 - A random UUID generated exactly once by the native entry point when a capture begins. It is never derived from content, so two intentional captures with identical text receive different IDs.
+- Legacy voice form: builds before the F42 fix minted voice capture IDs as `voice-` followed by a lowercase hyphenated UUID. Those stored IDs are immutable idempotency keys and are never rewritten, so core accepts exactly that form (one shared check, used by interpretation requests, comparison sources and proposal identifier validation) in addition to a UUID. Nothing else is accepted, and the rule for new IDs remains a random UUID with no prefix.
 - Persisted durably in the ingress record before any acknowledgment is shown to the user.
 - Every retry or replay of the same capture (cold relaunch, re-delivery, interrupted import) reuses the persisted ID; this makes the ID the idempotency key.
 - Importing an ID that already exists returns the existing item and creates nothing. If the same ID arrives with different source content, the import is rejected with a conflicting-reuse error and the original record is retained untouched.

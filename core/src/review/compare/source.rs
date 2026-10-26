@@ -6,7 +6,8 @@ use super::arm::{ArmError, ArmLabel};
 use super::pair::RequestMismatch;
 use crate::interpretation::instructions::{content_version, OUTPUT_CONTRACT_VERSION};
 use crate::providers::contracts::{
-    DiagnosticRequestError, RequestValidationError, RequestedSettings, TextBasis,
+    DiagnosticRequestError, InterpretationRequest, RequestValidationError, RequestedSettings,
+    TextBasis,
 };
 use crate::time::{TimeContext, TimeResolver};
 
@@ -76,7 +77,7 @@ impl FrozenComparisonSource {
         let instructions = instructions.into();
         let instruction_version = instruction_version.into();
 
-        if Uuid::parse_str(&capture_id).is_err() {
+        if !InterpretationRequest::is_valid_capture_id(&capture_id) {
             return Err(ComparisonError::InvalidIdentifier("capture_id"));
         }
         if Uuid::parse_str(&request_version).is_err() {

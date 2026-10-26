@@ -110,7 +110,7 @@ final class VoiceRecordingController {
     }
 
     static func generateCaptureID() -> String {
-        "voice-" + UUID().uuidString.lowercased()
+        UUID().uuidString.lowercased()
     }
 
     // MARK: Start
