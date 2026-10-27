@@ -68,6 +68,9 @@ struct UpgradeReport: Codable, Equatable {
     struct ProviderEntry: Codable, Equatable {
         let profileVersion: String
         let providerProtocol: String
+        let model: String
+        /// Destination classes (`cloud`, `private_server`, `unknown`) of the grants that cover this version, sorted.
+        let destinationClasses: [String]
         let hasEndpoint: Bool
         let credentialBound: Bool
         /// `present`, `absent` or `invalidated`; `unreadable` when the Keychain could not be asked.
@@ -80,6 +83,8 @@ struct UpgradeReport: Codable, Equatable {
         enum CodingKeys: String, CodingKey {
             case profileVersion = "profile_version"
             case providerProtocol = "protocol"
+            case model
+            case destinationClasses = "destination_classes"
             case hasEndpoint = "has_endpoint"
             case credentialBound = "credential_bound"
             case credentialStatus = "credential_status"
@@ -233,7 +238,8 @@ final class UpgradeReportWriter: @unchecked Sendable {
         }
         let listing = try await root.providerConfiguration.listProfiles()
         let routes = try await root.providerConfiguration.listRoutePolicy()
-        let covered = Set(routes.flatMap(\.grantedCapabilities).flatMap(\.coveredProfileVersions))
+        let grants = routes.flatMap(\.grantedCapabilities)
+        let covered = Set(grants.flatMap(\.coveredProfileVersions))
         var providers: [UpgradeReport.ProviderEntry] = []
         for version in listing.profiles.flatMap(\.versions) {
             let status = (try? await root.providerCredentials.credentialStatus(profileVersion: version.profileVersion))
@@ -241,6 +247,11 @@ final class UpgradeReportWriter: @unchecked Sendable {
             providers.append(
                 .init(
                     profileVersion: version.profileVersion, providerProtocol: version.providerProtocol,
+                    model: version.model,
+                    destinationClasses: Set(
+                        grants.filter { $0.coveredProfileVersions.contains(version.profileVersion) }
+                            .flatMap(\.destinationClasses)
+                    ).sorted(),
                     hasEndpoint: version.endpoint != nil, credentialBound: version.credentialBound,
                     credentialStatus: status, revoked: version.revoked, defaultFor: version.defaultFor,
                     routeCovered: covered.contains(version.profileVersion)))

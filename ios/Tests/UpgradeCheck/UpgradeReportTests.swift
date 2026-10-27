@@ -21,7 +21,8 @@ final class UpgradeReportTests: XCTestCase {
             probes: [UpgradeReport.ProbeEntry(itemID: "item-2", state: "not_found")],
             providers: [
                 UpgradeReport.ProviderEntry(
-                    profileVersion: "v1", providerProtocol: "open_ai", hasEndpoint: false, credentialBound: true,
+                    profileVersion: "v1", providerProtocol: "open_ai", model: "synthetic-model", destinationClasses: ["cloud"],
+                    hasEndpoint: false, credentialBound: true,
                     credentialStatus: "present", revoked: false, defaultFor: ["text_interpretation"], routeCovered: true)
             ],
             pendingReminderRequests: [UpgradeReport.PendingReminderRequest(reminderID: "reminder-1", scheduleGeneration: 1)],
@@ -58,7 +59,7 @@ final class UpgradeReportTests: XCTestCase {
                 "items", "item_id", "revision", "item_type", "lifecycle_state", "text_basis", "text_length",
                 "original_text_length", "corrected_text_length", "reminder", "reminder_id", "request_state",
                 "schedule_state", "schedule_generation", "resolved_instant", "probes", "state", "providers",
-                "profile_version", "protocol", "has_endpoint", "credential_bound", "credential_status", "revoked",
+                "profile_version", "protocol", "model", "destination_classes", "has_endpoint", "credential_bound", "credential_status", "revoked",
                 "default_for", "route_covered", "pending_reminder_requests", "other_pending_request_count",
             ])
     }

@@ -63,7 +63,7 @@ final class MetricsService: MetricsRecording, @unchecked Sendable {
     init(
         core: MetricsCore,
         session: ReadAuthenticationSession,
-        build: CoreMetricsBuild? = nil,
+        build: CoreMetricsBuild? = CoreMetricsBuild.current(),
         monotonicNanoseconds: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         self.core = core

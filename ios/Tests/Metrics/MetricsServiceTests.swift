@@ -227,7 +227,7 @@ final class MetricsServiceTests: XCTestCase {
         authenticate()
         let core = FakeMetricsCore()
         core.answer = .success(CoreMetricsAnswer(outcome: "report", report: sampleReport()))
-        let service = MetricsService(core: core, session: session)
+        let service = MetricsService(core: core, session: session, build: nil)
         let export = try await service.exportReport()
         XCTAssertEqual(core.requests, [.export(readAuthentication: .authenticated)])
         XCTAssertEqual(export.report, sampleReport())
@@ -235,6 +235,17 @@ final class MetricsServiceTests: XCTestCase {
         XCTAssertEqual(decoded, sampleReport())
         let text = try XCTUnwrap(String(data: export.json, encoding: .utf8))
         XCTAssertTrue(text.contains("\"occurrences\" : 2"))
+    }
+
+    func testTheProductionConstructionNamesTheRunningAppsBuild() async throws {
+        authenticate()
+        let core = FakeMetricsCore()
+        core.answer = .success(CoreMetricsAnswer(outcome: "report", report: sampleReport()))
+        // No build argument: the default is the app's own Info.plist identity.
+        let service = MetricsService(core: core, session: session)
+        _ = try await service.exportReport()
+        XCTAssertEqual(
+            core.requests, [.export(readAuthentication: .authenticated, build: CoreMetricsBuild.current())])
     }
 
     func testTheExportNamesTheBuildTheAppSupplies() async throws {

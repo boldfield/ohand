@@ -42,7 +42,8 @@ def report(build_number="40"):
              "reminder": {**REMINDER, "request_state": "resolved", "schedule_state": "scheduled"}},
         ],
         "probes": [{"item_id": "item-deleted", "state": "not_found"}],
-        "providers": [{"profile_version": "v1", "protocol": "open_ai", "has_endpoint": False, "credential_bound": True,
+        "providers": [{"profile_version": "v1", "protocol": "open_ai", "model": "synthetic-model",
+                       "destination_classes": ["cloud"], "has_endpoint": False, "credential_bound": True,
                        "credential_status": "present", "revoked": False, "default_for": ["text_interpretation"],
                        "route_covered": True}],
         "pending_reminder_requests": [{"reminder_id": "rem-1", "schedule_generation": 2}],
@@ -152,6 +153,23 @@ class LossTests(unittest.TestCase):
         before = report("7")
         before["items"][2]["reminder"]["reminder_id"] = "other"
         self.assert_fails("prior report: reminder", before=before)
+
+    def test_a_changed_provider_model_or_destination_across_the_upgrade_fails(self):
+        for key, value in (("model", "other-model"), ("destination_classes", ["private_server"]), ("protocol", "anthropic")):
+            before = report("7")
+            before["providers"][0][key] = value
+            self.assert_fails("provider profile version, type, model", before=before)
+
+    def test_an_older_prior_report_without_model_fields_still_compares_what_it_has(self):
+        before = report("7")
+        del before["providers"][0]["model"], before["providers"][0]["destination_classes"]
+        checks, _ = run(before=before)
+        self.assertEqual(failed(checks), [])
+
+    def test_the_provider_must_name_a_model_and_destinations(self):
+        after = report()
+        after["providers"][0]["destination_classes"] = []
+        self.assert_fails("names its model", after=after)
 
     def test_the_same_build_number_is_not_an_upgrade(self):
         changed = facts()

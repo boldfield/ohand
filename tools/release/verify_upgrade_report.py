@@ -115,6 +115,24 @@ def check_report(checks: Checks, label: str, report: Dict[str, Any], expectation
                  len(configured) == 1 and configured[0]["credential_bound"] and configured[0]["credential_status"] == "present")
     checks.check(f"{label}: processing routes to the provider",
                  len(configured) == 1 and configured[0]["route_covered"])
+    checks.check(f"{label}: the provider names its model and the destination classes its route allows",
+                 len(configured) == 1 and bool(configured[0].get("model")) and bool(configured[0].get("destination_classes")))
+
+
+def provider_summary(report: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    configured = [provider for provider in report.get("providers", [])
+                  if CAPABILITY in provider.get("default_for", []) and not provider.get("revoked")]
+    if len(configured) != 1:
+        return None
+    return {key: configured[0].get(key) for key in
+            ("profile_version", "protocol", "model", "destination_classes", "credential_bound", "credential_status")
+            if key in configured[0]}
+
+
+def provider_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    """Every field the prior revision's report carried is the same after the upgrade (an older report has fewer)."""
+    prior, now = provider_summary(before), provider_summary(after)
+    return prior is not None and now is not None and all(now.get(key) == value for key, value in prior.items())
 
 
 def evaluate(facts: Dict[str, Any], expectations: Dict[str, Any], report_after: Dict[str, Any],
@@ -151,6 +169,8 @@ def evaluate(facts: Dict[str, Any], expectations: Dict[str, Any], report_after: 
 
     prior_report = "absent"
     if report_before is not None:
+        checks.check("the provider profile version, type, model, destinations and credential are unchanged by the upgrade",
+                     provider_unchanged(report_before, report_after))
         prior_report = "present"
         checks.check("prior report: reminder identifier and fire time equal after the upgrade",
                      reminder_summary(report_before, reminder_id) is not None
