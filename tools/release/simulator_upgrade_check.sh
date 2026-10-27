@@ -73,8 +73,7 @@ prior_is_ancestor=false
 if git -C "${repo_root}" merge-base --is-ancestor "${prior_revision}" "${candidate_revision}"; then prior_is_ancestor=true; fi
 git -C "${repo_root}" worktree add --detach "${prior_tree}" "${prior_revision}" >/dev/null
 candidate_build="$(python3 "${repo_root}/tools/release/build_info.py" --repo "${repo_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_number"])')"
-prior_build="$(python3 "${repo_root}/tools/release/build_info.py" --repo "${prior_tree}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_number"])')"
-log "prior ${prior_revision} (first-parent count ${prior_build}); candidate ${candidate_revision} (first-parent count ${candidate_build})"
+log "prior ${prior_revision}; candidate ${candidate_revision} (first-parent count ${candidate_build})"
 
 # ---- builds (before any simulator boots, so the compiler and a booted simulator never run together) --------------------
 
@@ -98,6 +97,12 @@ build_app "${repo_root}" candidate
 build_app "${prior_tree}" prior
 prior_app="${work_dir}/derived-prior/Build/Products/Debug-iphonesimulator/OhAnd.app"
 candidate_app="${work_dir}/derived-candidate/Build/Products/Debug-iphonesimulator/OhAnd.app"
+# The build numbers are the ones the built apps carry (a prior revision from before the build identity existed keeps the
+# number in its source plist), and the candidate's must be the first-parent count build_info.py derives.
+prior_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${prior_app}/Info.plist")"
+built_candidate_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${candidate_app}/Info.plist")"
+[ "${built_candidate_build}" = "${candidate_build}" ] || { echo "the candidate app carries build ${built_candidate_build}, not the derived ${candidate_build}" >&2; exit 1; }
+log "prior app carries build ${prior_build}; candidate app carries build ${built_candidate_build}"
 
 log "building the upgrade UI tests"
 (
@@ -186,6 +191,11 @@ deleted_item="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[
 kept_item="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kept"]["itemID"])' "${evidence_dir}/seed-expectations.json")"
 xcrun simctl terminate "${udid}" "${bundle_identifier}" 2>/dev/null || true
 container_before="$(container)"
+# A marker file in the prior container: the simulator's installd may give the installed app a new container directory
+# (the identifier in the path), so what proves the data carried over is that the marker, and the app's own data, arrive.
+marker_token="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+mkdir -p "${container_before}/Library"
+printf '%s' "${marker_token}" > "${container_before}/Library/upgrade-check-marker"
 log "data container before the upgrade recorded"
 
 # The prior revision may already carry the upgrade report; when it does, its reminder identifiers are compared afterwards.
@@ -199,6 +209,8 @@ log "installing the candidate over the prior build"
 xcrun simctl install "${udid}" "${candidate_app}"
 appinfo after-upgrade
 container_after_upgrade="$(container)"
+marker_carried=false
+if [ "$(cat "${container_after_upgrade}/Library/upgrade-check-marker" 2>/dev/null || true)" = "${marker_token}" ]; then marker_carried=true; fi
 log "candidate build number: $(build_number_of after-upgrade)"
 
 collect_report after-upgrade "${deleted_item},${kept_item}" || { echo "FAILURE: the upgraded app wrote no upgrade report within ${report_timeout_seconds} s of launch" >&2; exit 1; }
@@ -217,7 +229,7 @@ BUILD_NUMBER_BEFORE="$(build_number_of before-seeding)" BUILD_NUMBER_AFTER="$(bu
 BUILD_NUMBER_RELAUNCH="$(build_number_of after-relaunch)" \
 PRIOR_REVISION="${prior_revision}" PRIOR_BUILD="${prior_build}" CANDIDATE_REVISION="${candidate_revision}" CANDIDATE_BUILD="${candidate_build}" \
 PRIOR_IS_ANCESTOR="${prior_is_ancestor}" CONTAINER_BEFORE="${container_before}" CONTAINER_AFTER="${container_after_upgrade}" \
-CONTAINER_RELAUNCH="${container_after_relaunch}" SEED_STATUS="${seed_status}" VERIFY_STATUS="${verify_status}" \
+CONTAINER_RELAUNCH="${container_after_relaunch}" MARKER_CARRIED="${marker_carried}" SEED_STATUS="${seed_status}" VERIFY_STATUS="${verify_status}" \
 SIMULATOR_NAME="${simulator_name}" SIMULATOR_RUNTIME="${simulator_runtime}" RUN_URL="${run_url}" \
 python3 - "${evidence_dir}/facts.json" <<'PY'
 import datetime, json, os, sys
@@ -235,7 +247,8 @@ facts = {
         "after_relaunch": {"build_number": env["BUILD_NUMBER_RELAUNCH"]},
     },
     "data_container": {"before_upgrade": env["CONTAINER_BEFORE"], "after_upgrade": env["CONTAINER_AFTER"],
-                       "after_relaunch": env["CONTAINER_RELAUNCH"]},
+                       "after_relaunch": env["CONTAINER_RELAUNCH"],
+                       "marker_carried": env["MARKER_CARRIED"] == "true"},
     "simulator": {"name": env["SIMULATOR_NAME"], "runtime": env["SIMULATOR_RUNTIME"]},
     "ui_checks": {"seed_exit_status": int(env["SEED_STATUS"]), "verify_exit_status": int(env["VERIFY_STATUS"])},
 }

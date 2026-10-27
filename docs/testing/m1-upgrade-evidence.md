@@ -42,7 +42,11 @@ and fails if the binary contains any of the report's strings.
 What the check requires (each is a named check in the record):
 
 * the installed build number rose from the prior build's to the candidate's, and the same candidate number holds after the
-  relaunch; the data container path is the same before and after the upgrade and after the relaunch;
+  relaunch; the data container is the same after the upgrade and after the relaunch, and its contents carried over the upgrade:
+  the script writes a marker file into the prior container before the upgrade and finds it in the container afterwards. The
+  record also says whether the container's path changed. On the simulator `simctl install` over an installed app can give the
+  data a new container directory (the identifier in the path) while keeping its contents, so the path is recorded, not required
+  to be equal; on a device the container does not move;
 * every seeded source is present, active and has the length it was typed with; the corrected capture's authoritative text is the
   correction and its original is kept;
 * the deleted item is not found and not in the recents;

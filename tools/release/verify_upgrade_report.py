@@ -134,8 +134,8 @@ def evaluate(facts: Dict[str, Any], expectations: Dict[str, Any], report_after: 
                  before.isdigit() and after.isdigit() and int(after) > int(before), f"{before} -> {after}")
     checks.check("build number after relaunch is unchanged", relaunch == after, relaunch)
     containers = facts["data_container"]
-    checks.check("data container is the same before and after the upgrade",
-                 bool(containers["before_upgrade"]) and containers["before_upgrade"] == containers["after_upgrade"])
+    checks.check("the data container's contents carried over the upgrade (marker file written before it)",
+                 containers.get("marker_carried") is True)
     checks.check("data container is the same after relaunch", containers["after_upgrade"] == containers["after_relaunch"])
     checks.check("the candidate was installed over the prior build, never uninstalled", facts.get("uninstalled") is False)
 
@@ -170,7 +170,10 @@ def evaluate(facts: Dict[str, Any], expectations: Dict[str, Any], report_after: 
         "prior": prior,
         "candidate": candidate,
         "installed_build_numbers": {"before_seeding": before, "after_upgrade": after, "after_relaunch": relaunch},
-        "data_container_unchanged": containers["before_upgrade"] == containers["after_upgrade"] == containers["after_relaunch"],
+        # The simulator's installer can move the app's data to a new container directory when it installs over an app; the
+        # contents (marker file, then everything the app reports) carry over. Recorded as it happened, not asserted.
+        "data_container_path_unchanged_by_install": containers["before_upgrade"] == containers["after_upgrade"],
+        "data_container_unchanged_after_relaunch": containers["after_upgrade"] == containers["after_relaunch"],
         "simulator": facts["simulator"],
         "prior_revision_has_upgrade_report": prior_report,
         "seeded": {"captures": 4, "corrections": 1, "deleted": 1, "provider_profiles": 1, "reminders": 1},

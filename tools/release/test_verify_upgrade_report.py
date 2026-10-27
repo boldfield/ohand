@@ -61,7 +61,7 @@ def facts():
         "installed": {"before_seeding": {"build_number": "7"}, "after_upgrade": {"build_number": "40"},
                       "after_relaunch": {"build_number": "40"}},
         "data_container": {"before_upgrade": "/synthetic/container", "after_upgrade": "/synthetic/container",
-                           "after_relaunch": "/synthetic/container"},
+                           "after_relaunch": "/synthetic/container", "marker_carried": True},
         "simulator": {"name": "iPhone Synthetic", "runtime": "iOS 26.0"},
         "ui_checks": {"seed_exit_status": 0, "verify_exit_status": 0},
     }
@@ -82,7 +82,8 @@ class GoodRunTests(unittest.TestCase):
         self.assertEqual(failed(checks), [])
         self.assertEqual(record["result"], "passed")
         self.assertEqual(record["installed_build_numbers"], {"before_seeding": "7", "after_upgrade": "40", "after_relaunch": "40"})
-        self.assertTrue(record["data_container_unchanged"])
+        self.assertTrue(record["data_container_path_unchanged_by_install"])
+        self.assertTrue(record["data_container_unchanged_after_relaunch"])
         self.assertEqual(record["prior_revision_has_upgrade_report"], "absent")
 
     def test_a_prior_report_with_the_same_reminder_is_accepted_and_recorded(self):
@@ -158,10 +159,23 @@ class LossTests(unittest.TestCase):
         changed["prior"]["build_number"] = 40
         self.assert_fails("raised the build number", facts_value=changed)
 
-    def test_a_different_data_container_fails(self):
+    def test_a_lost_marker_file_fails(self):
+        changed = facts()
+        changed["data_container"]["marker_carried"] = False
+        self.assert_fails("contents carried over", facts_value=changed)
+
+    def test_a_moved_container_directory_is_recorded_not_failed_when_the_contents_carried_over(self):
         changed = facts()
         changed["data_container"]["after_upgrade"] = "/synthetic/other"
-        self.assert_fails("data container", facts_value=changed)
+        changed["data_container"]["after_relaunch"] = "/synthetic/other"
+        checks, record = run(facts_value=changed)
+        self.assertEqual(failed(checks), [])
+        self.assertFalse(record["data_container_path_unchanged_by_install"])
+
+    def test_a_container_that_changes_again_on_relaunch_fails(self):
+        changed = facts()
+        changed["data_container"]["after_relaunch"] = "/synthetic/other"
+        self.assert_fails("after relaunch", facts_value=changed)
 
     def test_an_uninstall_fails(self):
         changed = facts()
