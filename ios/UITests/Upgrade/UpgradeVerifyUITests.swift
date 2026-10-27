@@ -8,15 +8,12 @@ final class UpgradeVerifyUITests: UpgradeUITestCase {
         let expectations = try readExpectations()
         launchApp()
 
-        let keptCard = card(containing: "alpha")
-        XCTAssertTrue(appears(keptCard, timeout: screenTimeout), "the kept capture is missing after the upgrade")
+        let keptCard = requireStableCard(containing: "alpha")
         XCTAssertEqual(itemID(ofCard: keptCard), expectations.kept.itemID)
-        let correctedCard = card(containing: "bravo corrected")
-        XCTAssertTrue(appears(correctedCard, timeout: screenTimeout), "the corrected capture is missing after the upgrade")
+        let correctedCard = requireStableCard(containing: "bravo corrected")
         XCTAssertEqual(itemID(ofCard: correctedCard), expectations.corrected.itemID)
         XCTAssertFalse(card(containing: "bravo: water").exists, "the original words of the corrected capture are still shown")
-        let reminderCard = card(containing: "delta")
-        XCTAssertTrue(appears(reminderCard, timeout: screenTimeout), "the reminder capture is missing after the upgrade")
+        let reminderCard = requireStableCard(containing: "delta")
         XCTAssertEqual(itemID(ofCard: reminderCard), expectations.reminder.itemID)
         XCTAssertFalse(card(containing: "charlie").exists, "the deleted capture is back in the recents")
         XCTAssertFalse(

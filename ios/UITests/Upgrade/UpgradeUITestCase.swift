@@ -221,6 +221,32 @@ class UpgradeUITestCase: XCTestCase {
         XCTFail("going back (\(step)): no back button was hittable")
     }
 
+    /// The home's recents read only after the device owner is authenticated. The launch attempt can miss the matching face, so
+    /// a locked list is unlocked with its own button, as a person would, and the list is given time to settle: a card that
+    /// shows for an instant while the list reloads does not count.
+    @discardableResult
+    func requireStableCard(containing phrase: String, timeout: TimeInterval? = nil) -> XCUIElement {
+        let cardElement = card(containing: phrase)
+        let unlock = element("home.recents.unlock")
+        let deadline = Date().addingTimeInterval(timeout ?? screenTimeout)
+        var lastUnlockTap = Date.distantPast
+        while Date() < deadline {
+            if cardElement.exists {
+                Thread.sleep(forTimeInterval: 2)
+                if cardElement.exists { return cardElement }
+            } else if unlock.exists, Date().timeIntervalSince(lastUnlockTap) > 20 {
+                lastUnlockTap = Date()
+                if isHittableNow(within: 2, unlock) { unlock.tap() }
+                waitForLaunchAuthentication()
+            } else {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        recordFailureScreen("card-\(slug(phrase))")
+        XCTFail("no stable home card containing \"\(phrase)\"")
+        return cardElement
+    }
+
     /// Opens the item behind a home card and waits for the source detail.
     func openItem(card: XCUIElement) {
         tap(card, step: "open the item")

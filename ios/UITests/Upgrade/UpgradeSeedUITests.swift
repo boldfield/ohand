@@ -12,14 +12,10 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         }
         dismissKeyboard()
 
-        let keptCard = card(containing: "alpha")
-        let correctedCard = card(containing: "bravo")
-        let deletedCard = card(containing: "charlie")
-        let reminderCard = card(containing: "delta")
-        for (name, cardElement) in [("alpha", keptCard), ("bravo", correctedCard), ("charlie", deletedCard), ("delta", reminderCard)] {
-            if !appears(cardElement, timeout: screenTimeout) { recordFailureScreen("card-\(name)") }
-            XCTAssertTrue(appears(cardElement, timeout: 1), "the \(name) capture did not appear in the recents")
-        }
+        let keptCard = requireStableCard(containing: "alpha")
+        let correctedCard = requireStableCard(containing: "bravo")
+        let deletedCard = requireStableCard(containing: "charlie")
+        let reminderCard = requireStableCard(containing: "delta")
         let keptID = itemID(ofCard: keptCard)
         let correctedID = itemID(ofCard: correctedCard)
         let deletedID = itemID(ofCard: deletedCard)
@@ -83,7 +79,7 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         XCTAssertTrue(outcome.label.hasPrefix("Saved"), "the correction was not saved: \(outcome.label)")
         dismissKeyboard()
         goBack(step: "from the corrected item")
-        XCTAssertTrue(appears(card(containing: "bravo corrected"), timeout: screenTimeout), "the recents do not show the correction")
+        requireStableCard(containing: "bravo corrected")
     }
 
     // MARK: Deletion
@@ -117,7 +113,7 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         var saveTime = element("reminder.save")
         if !appears(saveTime, timeout: 20) {
             goBack(step: "to reopen the action")
-            openItem(card: card(containing: "delta"))
+            openItem(card: requireStableCard(containing: "delta"))
             saveTime = element("reminder.save")
         }
         tap(saveTime, step: "save the reminder time")
