@@ -3974,6 +3974,24 @@ Acceptance:
 
 Contributes to original T10 criteria: 1 (simulator), 2, 3 (tooling), 4 (simulator records).
 
+
+**Amendment 1 (2026-10-27, coordinator).** Review round 1 of PR #372 raised four findings. Here is how each is resolved.
+
+1. **Metrics wiring (finding 1).** In scope and required. The production `MetricsService` supplies `CoreMetricsBuild.current()` by default. A test of the production construction path shows that an export names the build.
+2. **Container path (finding 2): criterion 4 is corrected, not relaxed.** "The data container path before and after must be the same" was the wrong property. iOS does not promise a stable absolute container path across an install. Two exact-head CI runs show the simulator moving it on install-over while the contents carry over. An app that depended on the path would be the bug. The check now proves the real property, and proves it more strongly:
+   - It records both paths, and does not require them to be equal.
+   - The prior build writes a marker file with random synthetic content into its own container. After the upgrade, that file is present with identical content (SHA-256 compared), proving the same container's contents were carried over rather than recreated.
+   - A test shows that the app never persists an absolute container path. The store, audio and evidence locations are resolved from the container at runtime. Grep-level evidence is not enough on its own.
+
+   All other parts of criterion 4 stand. The verifier fails if the marker is missing or changed. Its regression test covers both a moved path that passes and a missing or changed marker that fails.
+3. **Provider endpoint (finding 3): the seed matches M1's product.** Since F39, M1's provider setup offers only fixed hosted providers. Own-server, the only path with a user-chosen endpoint, is hidden until after the trial, so no endpoint can be seeded through the production path. Seed a fixed provider with a synthetic credential through the production setup path. If setup would make a network request, use F45's fixture mode, which writes through production services with a scripted sender. CI must make no provider network request. After the upgrade, require the same profile version, provider type, model, authorized destinations and credential presence, and that Processing still routes to that profile version. Endpoint persistence moves to the post-trial own-server work.
+4. **Ownership (finding 4).** T10a now also owns:
+   - in `Makefile`, the `release-test` target and its place in `test`;
+   - `core/src/ffi/metrics.rs` and its tests, `ios/OhAndCoreBridge/CoreHandle+Metrics.swift` and `ios/Tests/Metrics/`, additively, for the build field;
+   - `ios/Tests/UpgradeCheck/` (new).
+
+T10b's procedure follows the same rules: contents carried over, not path equality, and a fixed-provider profile.
+
 ### T10b
 
 Record the signed trial candidate and the maintainer's device upgrade
@@ -4348,6 +4366,14 @@ Acceptance:
 Validation: `make check` and `make test`, plus the exact-head macOS CI run. Keep fixtures synthetic.
 
 Device check (recorded by the maintainer or T05 after merge, not by this task): with the voice control, on cold and warm launch, unlocked and locked, record whether recording is under way when the app appears, and whether iOS asks for Face ID before opening. `simctl` cannot press a control, so only a device shows this.
+
+
+**Amendment 1 (2026-10-27, coordinator).** Review round 1 of PR #373 found that the auto-start gate reads microphone permission through a protocol-extension default (`SystemMicrophonePermission`). The app's real recorder, `VoiceRecorderFanOut` (`ios/AppAssembly/VoiceServiceAdapters.swift:105`), does not forward the permission provider that `VoiceRecordingController` is given. So the gate and the recorder read different sources, and no assembled-app test can drive auto-start.
+- **Ownership.** F53 now also owns `ios/AppAssembly/VoiceServiceAdapters.swift`, **only** to add `microphonePermission` to `VoiceRecorderFanOut`, forwarding `controller.microphonePermission`. No other edit to that file.
+- **Required.** Remove the protocol-extension default, so every `VoiceRecordingControlling` conformer must implement the permission. Add a test showing that the assembled voice services gate auto-start on the injected permission, not the system's.
+- **VoiceOver.** The announcement must not depend on `.onChange` firing after mount. On a cold launch, recording starts before the first render. Use a one-shot event owned by the model that the view consumes both on appear and on change, and add a test for the cold-launch order.
+
+Acceptance is otherwise unchanged.
 
 ### F54a
 
