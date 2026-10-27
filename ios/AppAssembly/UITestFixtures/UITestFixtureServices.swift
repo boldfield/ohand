@@ -287,7 +287,7 @@ final class UITestFixtureSeeder {
     private func saveTyped(_ text: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
         sender.script(phrase: text, reply: reply)
         let outcome = await withCheckedContinuation { continuation in
-            root.saveText(captureID: "fixture-\(UUID().uuidString.lowercased())", text: text, capturedAt: Date()) {
+            root.saveText(captureID: UUID().uuidString.lowercased(), text: text, capturedAt: Date()) {
                 continuation.resume(returning: $0)
             }
         }
@@ -300,7 +300,7 @@ final class UITestFixtureSeeder {
     /// Records a short synthetic clip and hands it off as a finished recording; the scripted recognizer attaches
     /// `transcript`, which the scripted provider then interprets.
     private func saveVoice(transcript: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
-        let captureID = "fixture-\(UUID().uuidString.lowercased())"
+        let captureID = UUID().uuidString.lowercased()
         let fileName = "\(captureID).wav"
         try Self.writeSyntheticClip(to: root.inProgressAudioDirectory.appendingPathComponent(fileName))
         recognizer.script(captureID: captureID, transcript: transcript)
