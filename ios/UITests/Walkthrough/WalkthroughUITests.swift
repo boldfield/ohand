@@ -50,7 +50,7 @@ final class WalkthroughUITests: XCTestCase {
 
     /// Status with one failed note, opened through F45's `failed-sorting` fixture (unlocked, one rejected note). The row
     /// assertion is what makes the picture evidence: a Status screen without the failed note would fail here.
-    func testStatusWithOneFailedNote() throws {
+    func testWalkthroughStatusWithOneFailedNote() throws {
         let environment = ProcessInfo.processInfo.environment
         let appearanceName = try XCTUnwrap(
             environment["WALKTHROUGH_APPEARANCE"], "WALKTHROUGH_APPEARANCE (light or dark) is not set")
