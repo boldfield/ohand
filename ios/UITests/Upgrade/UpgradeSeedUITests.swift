@@ -167,12 +167,13 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         goBack(step: "from Processing")
 
         openSettingsRow("Privacy", screen: "Privacy")
-        let offer = elements(withIdentifierPrefix: "privacy-settings.offer.").firstMatch
+        // The route's container identifier covers its rows, so the offer is found by its words.
+        let offer = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Allow sorting'")).firstMatch
         let offerStable = appearsStably(offer, timeout: screenTimeout)
         if !offerStable { recordFailureScreen("privacy-offer") }
         XCTAssertTrue(offerStable, "Privacy offered no allowance for the provider")
         tap(offer, step: "ask to allow processing through the provider")
-        tap(element("privacy-settings.allow"), step: "allow processing")
+        tap(app.buttons["Allow"].firstMatch, step: "allow processing")
         let actionState = element("privacy-settings.action-state")
         // The result line comes and goes; the steps after it (and the report) are what prove the outcome.
         _ = appears(actionState, timeout: 20)
