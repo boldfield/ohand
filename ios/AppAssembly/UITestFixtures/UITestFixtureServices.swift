@@ -3,6 +3,7 @@ import AVFoundation
 import Foundation
 import OhAndCoreBridge
 import OhAndServices
+import SQLite3
 import UserNotifications
 
 /// Why a fixture launch could not be built.
@@ -21,6 +22,7 @@ final class UITestFixtureLaunch {
 
     private let name: String
     private var pendingSeed: (fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer)?
+    private var storageRoot: URL?
     /// The fake notification center of this launch, for tests of the fixture itself.
     private(set) var notificationCenter: UITestFixtureNotificationCenter?
 
@@ -33,6 +35,7 @@ final class UITestFixtureLaunch {
         let storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-ui-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        self.storageRoot = storageRoot
 
         let sender = UITestFixtureSender()
         let recognizer = UITestFixtureRecognizer()
@@ -81,7 +84,7 @@ final class UITestFixtureLaunch {
         guard let pendingSeed else { throw UITestFixtureError.seedingFailed("services were not made") }
         let seeder = UITestFixtureSeeder(
             fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
-            recognizer: pendingSeed.recognizer)
+            recognizer: pendingSeed.recognizer, storageRoot: storageRoot)
         try await seeder.seed()
         return seeder
     }
@@ -131,13 +134,16 @@ final class UITestFixtureSeeder {
     private let services: AppServices
     private let sender: UITestFixtureSender
     private let recognizer: UITestFixtureRecognizer
+    private let storageRoot: URL?
     private var root: ServiceCompositionRoot { services.root }
     /// The notes saved so far, in order, with the status each had when the fixture was ready.
     private(set) var notes: [UITestFixtureSeededNote] = []
 
     init(
-        fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer
+        fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer,
+        storageRoot: URL? = nil
     ) {
+        self.storageRoot = storageRoot
         self.fixture = fixture
         self.services = services
         self.sender = sender
@@ -202,11 +208,35 @@ final class UITestFixtureSeeder {
                 }
                 guard Date() < deadline else {
                     throw UITestFixtureError.seedingFailed(
-                        "'\(note.text)' did not settle; processing \(lastReport?.processingState ?? "unread"), job \(lastReport?.processingJobStatus ?? "none"), reminder \(lastReport?.reminderRequestState ?? "none"); provider: \(sender.attemptSummary)")
+                        "'\(note.text)' did not settle; processing \(lastReport?.processingState ?? "unread"), job \(lastReport?.processingJobStatus ?? "none"), reminder \(lastReport?.reminderRequestState ?? "none"); provider: \(sender.attemptSummary); jobs: \(jobRows(of: note.itemID))")
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
+    }
+
+    /// The job rows of one item, read straight from the store file, for the message of a fixture that did not settle.
+    private func jobRows(of itemID: String) -> String {
+        guard let storageRoot,
+            let file = FileManager.default.enumerator(at: storageRoot, includingPropertiesForKeys: nil)?
+                .compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent == "core.sqlite" })
+        else { return "no store file" }
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(file.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return "unreadable" }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 2000)
+        var statement: OpaquePointer?
+        let query = "SELECT status, COALESCE(failure_reason, '-') FROM jobs WHERE item_id = ?1"
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return "no jobs table" }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, itemID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        var rows: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let status = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? "?"
+            let reason = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? "?"
+            rows.append("\(status)/\(reason)")
+        }
+        return rows.isEmpty ? "none" : rows.joined(separator: ",")
     }
 
     // MARK: Fixture content
@@ -251,7 +281,7 @@ final class UITestFixtureSeeder {
         let disposition = try await configuration.grant(
             routeID: AppConfiguration.universalRouteID, capability: "text_interpretation",
             profileVersion: created.profileVersion)
-        guard disposition == .granted else { throw UITestFixtureError.seedingFailed("grant: \(disposition)") }
+        guard disposition == .granted || disposition == .unchanged else { throw UITestFixtureError.seedingFailed("grant: \(disposition)") }
     }
 
     private func saveTyped(_ text: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
