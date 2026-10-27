@@ -279,7 +279,7 @@ final class UITestFixtureSeeder {
         let outcome = await withCheckedContinuation { continuation in
             root.saveRecording(handoff) { continuation.resume(returning: $0) }
         }
-        guard case .saved(_, let itemID, _) = outcome else {
+        guard case .saved(_, let itemID, _, _) = outcome else {
             throw UITestFixtureError.seedingFailed("recording not saved: \(outcome)")
         }
         notes.append(UITestFixtureSeededNote(text: transcript, itemID: itemID, expectation: expectation))
