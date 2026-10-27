@@ -57,6 +57,8 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(["light", "dark"].contains(appearanceName), "unknown appearance \(appearanceName)")
         expectsDark = appearanceName == "dark"
         let widthName = UIDevice.current.userInterfaceIdiom == .pad ? "regular" : "compact"
+        // The fixture app must not be running when the full walkthrough launches the real app next.
+        addTeardownBlock { [app] in app.terminate() }
         XCTAssertTrue(app.launch(fixture: .failedSorting), "the failed-sorting fixture did not reach home")
         XCTAssertTrue(app.waitForFixtureReady(), "the failed-sorting fixture did not finish seeding")
         dismissKeyboard()
@@ -69,9 +71,12 @@ final class WalkthroughUITests: XCTestCase {
         let failedNote = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).firstMatch
         XCTAssertTrue(appears(failedNote, timeout: screenTimeout), "Status shows no failed note")
-        let failedNoteRows = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).count
-        XCTAssertEqual(failedNoteRows, 1, "Status shows exactly one failed note")
+        // One row can expose several accessibility elements under its identifier; count the distinct identifiers.
+        let failedNoteIdentifiers = Set(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
+            ).allElementsBoundByIndex.map(\.identifier))
+        XCTAssertEqual(failedNoteIdentifiers.count, 1, "Status shows exactly one failed note: \(failedNoteIdentifiers)")
         capture("\(widthName)-\(appearanceName)", "status failed note")
     }
 
