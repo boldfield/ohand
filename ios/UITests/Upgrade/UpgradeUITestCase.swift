@@ -247,12 +247,35 @@ class UpgradeUITestCase: XCTestCase {
         return cardElement
     }
 
-    /// Opens the item behind a home card and waits for the source detail.
-    func openItem(card: XCUIElement) {
-        tap(card, step: "open the item")
+    /// True once `element` exists and still exists `stableFor` seconds later, within `timeout`. A screen that shows for an
+    /// instant and is dismissed again (a relock, a failed Face ID match) does not count.
+    func appearsStably(_ element: XCUIElement, timeout: TimeInterval, stableFor: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.exists {
+                Thread.sleep(forTimeInterval: stableFor)
+                if element.exists { return true }
+            } else {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        return false
+    }
+
+    /// Opens the item behind a home card and waits for the source detail. The first read of stored items asks the device
+    /// owner for Face ID, which the driving script answers; a failed or cancelled attempt leaves the person on the home,
+    /// and asking again is what a person does.
+    func openItem(card cardElement: XCUIElement) {
         let detail = element("source-detail.current-text")
-        if !appears(detail, timeout: screenTimeout) { recordFailureScreen("source-detail") }
-        XCTAssertTrue(appears(detail, timeout: 1), "the source detail did not open")
+        for attempt in 1...3 {
+            tap(cardElement, step: "open the item")
+            waitForLaunchAuthentication()
+            if appearsStably(detail, timeout: 40) { return }
+            recordFailureScreen("source-detail-attempt\(attempt)")
+            if !element("home.search").exists { goBack(step: "after the source detail did not stay open") }
+            _ = appears(cardElement, timeout: 30)
+        }
+        XCTFail("the source detail did not open")
     }
 
     /// Allows the system notification prompt if it shows (the reminder boundary asks once).
