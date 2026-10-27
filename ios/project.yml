@@ -333,6 +333,8 @@ targets:
     sources:
       - path: UITests/Walkthrough
         createIntermediateGroups: true
+      - path: UITests/Fixtures
+        createIntermediateGroups: true
     settings:
       PRODUCT_NAME: OhAndWalkthroughUITests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.walkthrough-uitests

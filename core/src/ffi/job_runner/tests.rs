@@ -1326,6 +1326,93 @@ mod voice_capture_transcription {
     }
 }
 
+/// A voice capture reaches the provider whatever its capture ID form: the plain UUID new builds
+/// mint and the `voice-` form earlier builds stored, which can never be rewritten.
+mod voice_capture_interpretation {
+    use super::*;
+
+    const PLAIN_UUID: &str = "5a1c0000-0000-4000-8000-0000000000d1";
+    const LEGACY_VOICE_ID: &str = "voice-5a1c0000-0000-4000-8000-0000000000d2";
+    const TRANSCRIPT_TEXT: &str = "remind me to water the ferns tomorrow";
+
+    /// Turns the seeded typed capture into an imported voice capture with its transcript attached:
+    /// an audio reference, no typed text, and the transcript the dispatcher interprets.
+    fn seed_voice_capture(path: &str, capture_id: &str) {
+        seed(path, false, NOTE_TEXT);
+        let database =
+            Database::open(path, std::sync::Arc::new(crate::store::schema::SystemClock)).unwrap();
+        let connection = database.conn();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE captures SET capture_id = ?, text = NULL, \
+                 audio_reference = 'staging/2026-10-08/clip-d.wav' WHERE capture_id = ?",
+                rusqlite::params![capture_id, CAPTURE_ID],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE items SET capture_id = ?, transcription_state = 'transcribed' \
+                 WHERE item_id = ?",
+                rusqlite::params![capture_id, ITEM_ID],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO transcript_attachments (item_id, source_job_id, \
+                 transcript_record_id, text, attached_revision, audio_reference, audio_sha256, \
+                 recognizer, detected_language, confidence, transcribed_at) VALUES (?, \
+                 'job-synthetic-transcription', '5a1c0000-0000-4000-8000-0000000000f1', ?, 0, \
+                 'staging/2026-10-08/clip-d.wav', ?, 'fake-recognizer/1', 'en-US', 0.9, \
+                 '2026-10-08T09:30:02Z')",
+                rusqlite::params![ITEM_ID, TRANSCRIPT_TEXT, "0".repeat(64)],
+            )
+            .unwrap();
+    }
+
+    fn drain_sends_and_completes(name: &str, capture_id: &'static str) {
+        let _guard = serial();
+        let session = Session::open_seeded(name, |path| seed_voice_capture(path, capture_id));
+        assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+
+        assert_eq!(session.start(41).status, OHAND_CORE_STATUS_OK);
+        let command = session.command();
+        assert_eq!(command.command, OHAND_JOB_HOST_COMMAND_SEND, "{capture_id}");
+        let send: Value = serde_json::from_slice(&command.data).unwrap();
+        assert_eq!(send["url"], "https://api.anthropic.com/v1/messages");
+        assert!(send["body"].as_str().unwrap().contains(TRANSCRIPT_TEXT));
+
+        assert_eq!(
+            session
+                .complete(command.request_id, 200, &anthropic_reply())
+                .status,
+            OHAND_CORE_STATUS_OK
+        );
+        let summary = payload_of(&session.event(41));
+        let job = only_job(&summary);
+        assert_eq!(job["job_id"], JOB_ID);
+        assert_eq!(job["settlement"], "completed", "{summary}");
+        assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+        wait_until_idle(session.handle);
+        session.close();
+    }
+
+    #[test]
+    fn a_voice_capture_with_a_legacy_prefixed_id_is_sent_and_completes() {
+        drain_sends_and_completes("voice-legacy-id", LEGACY_VOICE_ID);
+    }
+
+    #[test]
+    fn a_voice_capture_with_a_plain_uuid_is_sent_and_completes() {
+        drain_sends_and_completes("voice-plain-id", PLAIN_UUID);
+    }
+}
+
 const OTHER_PROFILE_VERSION: &str = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083";
 
 impl Session {

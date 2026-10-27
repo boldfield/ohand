@@ -3704,6 +3704,13 @@ Acceptance:
 3. **The note's detail screen**, when its sorting failed, shows one line with the same reason and a "Try again" for that one note. When the note is being sorted, it shows "Sorting…"; otherwise nothing.
 4. **Hosted view tests** cover Status in each case: locked, unlocked with 1 note, unlocked with more than 5, after a try-again that queued notes, and after one that could not queue because no provider was allowed. They also cover the detail line. Run them in both appearances. A walkthrough screenshot shows Status with one failed note. Exact-head macOS CI evidence is required.
 
+**Amendment 1 (2026-10-27, coordinator).** The first attempt (PR #369, head efecf41, exact-head macOS CI green) blocked on two seams outside its owned paths. Both are resolved here; acceptance is unchanged.
+
+1. **Production wiring.** Add `ios/AppAssembly/AppServices.swift` to the owned paths, **only** for the `StatusModel` construction (around line 134). Pass the new arguments the PR already defines: `failedWork:` from `root.jobConfiguration`, `noteText:` as `ItemDetailFirstLineReader(reader: root.itemDetails)`, and `requestUnlock:` through `root.authenticateReads`, the same way the home does. No other edit to that file. A test under `ios/Tests/Status/` or `ios/Tests/AppAssembly/AppServicesTests.swift` (additive only) proves the production services build a `StatusModel` that lists a failed note. Without this the feature is not live, and the task is not done.
+2. **Walkthrough screenshot.** F45 has merged (6d26d65) with a `failed-sorting` fixture. In `WalkthroughUITests.swift`, launch through the shared helper in `ios/UITests/Fixtures/` (use it, do not edit it) with `failed-sorting`, open Status, assert that one `status.failed-note.*` row exists, then take the screenshot. A screenshot without that assertion does not meet acceptance 4. Remove the fixture-less Status step the first attempt added to the settings loop if it duplicates this.
+
+Validation is unchanged: `make check` **and** `make test`, both run and reported, plus the exact-head macOS CI run for the submitted commit. Dependencies now include F45 (merged).
+
 ### F45
 
 Add a debug-only fixture launch mode for UI tests

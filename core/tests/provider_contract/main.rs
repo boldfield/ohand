@@ -639,6 +639,46 @@ fn deserialized_requests_are_validated_and_cannot_omit_the_route() {
 }
 
 #[test]
+fn capture_ids_are_a_uuid_or_the_legacy_voice_form_and_nothing_else() {
+    let profile = profile();
+    let uuid = Uuid::new_v4().to_string();
+    let build = |capture_id: &str| {
+        InterpretationRequest::new(
+            capture_id,
+            0,
+            TextBasis::Original { item_revision: 0 },
+            "call mom",
+            Uuid::new_v4().to_string(),
+            "instructions-v1",
+            &profile,
+            "route-secret-name",
+            time_context(),
+        )
+    };
+    assert!(build(&uuid).is_ok());
+    assert!(build(&format!("voice-{uuid}")).is_ok());
+
+    let rejected = [
+        "voice-".to_string(),
+        "voice".to_string(),
+        format!("voice-{}", uuid.to_uppercase()),
+        format!("VOICE-{uuid}"),
+        format!("audio-{uuid}"),
+        format!("voice-voice-{uuid}"),
+        format!("voice-{uuid}-x"),
+        format!(" voice-{uuid}"),
+        "voice-not-a-uuid".to_string(),
+    ];
+    for capture_id in rejected {
+        assert_eq!(
+            build(&capture_id).unwrap_err(),
+            RequestValidationError::InvalidIdentifier("capture_id"),
+            "{capture_id}"
+        );
+    }
+}
+
+#[test]
 fn route_is_never_disclosed_to_the_provider() {
     let harness = Harness::new();
     let (result, fake) = harness.run(

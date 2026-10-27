@@ -18,4 +18,15 @@ enum AppConfiguration {
     static func production(storageRoot: URL) -> CompositionConfiguration {
         CompositionConfiguration(storageRootPath: storageRoot.path, captureRouteID: universalRouteID)
     }
+
+    #if DEBUG
+    /// The settings of a UI-test fixture launch: a fresh temporary store and a credential service name made for this
+    /// launch, so nothing a fixture does can reach the production store or the Keychain items production uses.
+    static func uiTestFixture(storageRoot: URL) -> CompositionConfiguration {
+        CompositionConfiguration(
+            storageRootPath: storageRoot.path, captureRouteID: universalRouteID,
+            credentialServiceName: "com.boldfield.ohand.uitest-fixture.\(UUID().uuidString)",
+            jobRetryDelaySeconds: 3600)
+    }
+    #endif
 }
