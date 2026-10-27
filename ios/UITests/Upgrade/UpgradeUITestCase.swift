@@ -156,6 +156,14 @@ class UpgradeUITestCase: XCTestCase {
         app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
     }
 
+    /// The reminder section's own controls all read as `reminder.section` (the container's identifier covers them), so they
+    /// are found by their words.
+    var saveReminderTimeButton: XCUIElement { app.buttons["Save time"].firstMatch }
+
+    var storedReminderTime: XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Stored time:'")).firstMatch
+    }
+
     func card(containing phrase: String) -> XCUIElement {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'home.recents.card.' AND label CONTAINS %@", phrase))

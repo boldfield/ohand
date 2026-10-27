@@ -112,15 +112,15 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         dismissKeyboard()
 
         // The reminder section belongs to an action; open the item again if it did not appear on its own.
-        var saveTime = element("reminder.save")
+        var saveTime = saveReminderTimeButton
         if !appears(saveTime, timeout: 20) {
             goBack(step: "to reopen the action")
             openItem(card: requireStableCard(containing: "delta"))
-            saveTime = element("reminder.save")
+            saveTime = saveReminderTimeButton
         }
         tap(saveTime, step: "save the reminder time")
         allowNotificationsIfAsked()
-        let stored = element("reminder.stored-time")
+        let stored = storedReminderTime
         if !appears(stored, timeout: screenTimeout) { recordFailureScreen("reminder-stored-time") }
         XCTAssertTrue(appears(stored, timeout: 1), "the reminder showed no stored time")
         let label = stored.label
