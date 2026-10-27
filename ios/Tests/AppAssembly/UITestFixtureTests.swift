@@ -119,7 +119,7 @@ final class UITestFixtureTests: XCTestCase {
         for note in notes {
             XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "processed", note.text)
         }
-        let reminder = try XCTUnwrap(notes.first { $0.text.contains("call the roofer") }?.settledStatus)
+        let reminder = try XCTUnwrap(notes.first { $0.text.contains("call mom") }?.settledStatus)
         XCTAssertEqual(
             reminder.reminderRequestState, "resolved",
             "status \(reminder); reminders \(launch.diagnosticScalar("SELECT COUNT(*) FROM reminders")); "
