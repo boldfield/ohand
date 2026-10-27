@@ -132,6 +132,17 @@ struct UITestFixturePermissionAsker: NotificationPermissionAsking {
     }
 }
 
+/// The OS permission state the fixture fixes for the whole launch, read by the Permissions and Status screens instead of
+/// the real microphone, speech and notification settings, so a permission an earlier test asked for, granted or denied
+/// never shows through.
+struct UITestFixturePermissionReader: PermissionStatusReading {
+    let status: PermissionStatus
+
+    func status(of kind: PermissionKind) async -> PermissionStatus {
+        status
+    }
+}
+
 /// Network reachability the fixture fixes for the whole launch.
 final class UITestFixtureReachability: NetworkReachability, @unchecked Sendable {
     let isReachable: Bool

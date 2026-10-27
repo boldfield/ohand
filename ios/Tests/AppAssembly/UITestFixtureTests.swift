@@ -139,6 +139,60 @@ final class UITestFixtureTests: XCTestCase {
         XCTAssertEqual(emptyLaunch.notificationCenter?.chosenPermission, .notDetermined)
     }
 
+    // MARK: the permission state the screens show
+
+    private final class PermissionScreens: @unchecked Sendable {
+        var rows: [PermissionRow] = []
+        var notificationsFact: StatusFact?
+    }
+
+    /// Builds a fixture and reads the Permissions and Status screens' models the way the screens do on appearance.
+    private func permissionScreens(of name: String) throws -> PermissionScreens {
+        let services = try UITestFixtureLaunch(name: name).makeServices()
+        services.start(isActive: true)
+        defer { services.shutDown() }
+        let settings = try XCTUnwrap(services.managementContext.permissionsSettings)
+        let status = try XCTUnwrap(services.managementContext.statusModel)
+        let screens = PermissionScreens()
+        let finished = expectation(description: "the permission screens are read")
+        Task { @MainActor in
+            await settings.refresh()
+            screens.rows = settings.rows
+            await status.refresh()
+            screens.notificationsFact = status.facts.first { $0.kind == .notifications }
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 60)
+        return screens
+    }
+
+    func testEmptyFirstRunShowsEveryPermissionAsNotRequestedWhateverTheDeviceRemembers() throws {
+        // What production remembers from an earlier run, under the keys both screens use, must not show through.
+        let defaults = UserDefaults.standard
+        let rememberedKeys = PermissionKind.allCases.flatMap {
+            ["com.boldfield.ohand.permission.last-status.\($0.rawValue)", StatusPermissionMemory.keyPrefix + $0.rawValue]
+        }
+        let previous = rememberedKeys.map { defaults.object(forKey: $0) }
+        rememberedKeys.forEach { defaults.set("granted", forKey: $0) }
+        defer { zip(rememberedKeys, previous).forEach { defaults.set($1, forKey: $0) } }
+
+        let screens = try permissionScreens(of: "empty-first-run")
+        XCTAssertEqual(screens.rows.map(\.kind), PermissionKind.allCases)
+        for row in screens.rows {
+            XCTAssertEqual(row.status, .notRequested, "\(row.kind)")
+            XCTAssertEqual(row.change, .unchanged, "\(row.kind) is not reported as turned off")
+        }
+        XCTAssertEqual(screens.notificationsFact?.headline, StatusText.notificationsNotAskedHeadline)
+    }
+
+    func testOtherFixturesShowEveryPermissionGrantedFromTheFixtureNotTheDevice() throws {
+        // The test host never granted the microphone or speech recognition, so `granted` can only come from the fixture.
+        let screens = try permissionScreens(of: "offline")
+        XCTAssertEqual(screens.rows.map(\.kind), PermissionKind.allCases)
+        XCTAssertTrue(screens.rows.allSatisfy { $0.status == .granted }, "\(screens.rows)")
+        XCTAssertNotEqual(screens.notificationsFact?.headline, StatusText.notificationsNotAskedHeadline)
+    }
+
     // MARK: release builds have no path
 
     func testEveryFixtureFileIsEntirelyInsideADebugConditional() throws {

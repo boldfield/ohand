@@ -4,7 +4,7 @@ import Foundation
 /// The named states a UI test can open the app in. Debug builds only: this file and the rest of `UITestFixtures/` are
 /// compiled out of a release build, so a release app has no path to a fixture.
 enum UITestFixture: String, CaseIterable {
-    /// Notification permission not yet asked, nothing saved.
+    /// No permission asked yet (microphone, speech recognition and notifications all read as not requested), nothing saved.
     case emptyFirstRun = "empty-first-run"
     /// A populated store whose reads are locked until the person unlocks.
     case locked

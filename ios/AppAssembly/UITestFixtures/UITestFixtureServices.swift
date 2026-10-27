@@ -14,8 +14,9 @@ enum UITestFixtureError: Error {
 
 /// Builds the app over an isolated store for one named fixture. Nothing here opens the production store or the
 /// Keychain items production uses: the store is a fresh temporary directory, the credentials use a service name made for
-/// this launch, and the provider, recognizer, notification center and read session are scripted substitutes. The store
-/// is filled through the same operations the app runs (save, provider setup, grant, interpretation), never with SQL.
+/// this launch, and the provider, recognizer, notification center, read session and the permission state the Permissions
+/// and Status screens read are scripted substitutes. The store is filled through the same operations the app runs (save,
+/// provider setup, grant, interpretation), never with SQL.
 final class UITestFixtureLaunch {
     /// Placed far in the future so a reminder stays in the future on any real date.
     static let sortedReminderPhrase = "2099-01-15 11:00:00"
@@ -58,7 +59,11 @@ final class UITestFixtureLaunch {
             root: root, lifecycle: lifecycle, handoff: .live, retrieval: retrieval,
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationPermission: UITestFixturePermissionAsker(
-                state: permission == .authorized ? .usable : .notRequested))
+                state: permission == .authorized ? .usable : .notRequested),
+            permissionStatus: PermissionStatusSources(
+                reader: UITestFixturePermissionReader(status: fixture == .emptyFirstRun ? .notRequested : .granted),
+                settingsMemory: InMemoryPermissionMemory(),
+                statusMemory: InMemoryPermissionMemory()))
         pendingSeed = (fixture, services, sender, recognizer)
         return services
     }
