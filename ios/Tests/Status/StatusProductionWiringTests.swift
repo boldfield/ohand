@@ -9,7 +9,7 @@ final class StatusProductionWiringTests: XCTestCase {
     private final class Outcome: @unchecked Sendable {
         var failedNotes: [FailedNote] = []
         var firstLine: String?
-        var access: FailedNotesAccess = .notRead
+        var access: StatusModel.FailedNotesAccess = .notRead
         var failure: Error?
     }
 
