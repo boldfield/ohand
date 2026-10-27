@@ -18,6 +18,14 @@ enum UITestFixtureProviderReply {
 final class UITestFixtureSender: ProviderRequestSender, @unchecked Sendable {
     private let lock = NSLock()
     private var replies: [(phrase: String, reply: UITestFixtureProviderReply)] = []
+    private var attempts: [String] = []
+
+    /// One line per request the provider received and how it was answered, for the message of a fixture that did not settle.
+    var attemptSummary: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts.isEmpty ? "no provider request" : attempts.joined(separator: "; ")
+    }
 
     func script(phrase: String, reply: UITestFixtureProviderReply) {
         lock.lock()
@@ -29,6 +37,7 @@ final class UITestFixtureSender: ProviderRequestSender, @unchecked Sendable {
         let requestBody = String(decoding: request.body ?? Data(), as: UTF8.self)
         lock.lock()
         let matched = replies.first { requestBody.contains($0.phrase) }?.reply
+        attempts.append("\(request.url.host ?? "?") body \(requestBody.count) chars \(matched == nil ? "unmatched" : "matched")")
         lock.unlock()
         switch matched ?? .unreachable {
         case .proposal(let body):

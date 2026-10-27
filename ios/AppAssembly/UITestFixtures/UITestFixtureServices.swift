@@ -202,7 +202,7 @@ final class UITestFixtureSeeder {
                 }
                 guard Date() < deadline else {
                     throw UITestFixtureError.seedingFailed(
-                        "'\(note.text)' did not settle; processing \(lastReport?.processingState ?? "unread"), reminder \(lastReport?.reminderRequestState ?? "none")")
+                        "'\(note.text)' did not settle; processing \(lastReport?.processingState ?? "unread"), job \(lastReport?.processingJobStatus ?? "none"), reminder \(lastReport?.reminderRequestState ?? "none"); provider: \(sender.attemptSummary)")
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
@@ -248,9 +248,10 @@ final class UITestFixtureSeeder {
                 profileID: "profile-ui-fixture", providerProtocol: "anthropic", model: "synthetic-model",
                 credentialReference: reference, timeoutSeconds: 30))
         try await configuration.setDefault(capability: "text_interpretation", profileVersion: created.profileVersion)
-        _ = try await configuration.grant(
+        let disposition = try await configuration.grant(
             routeID: AppConfiguration.universalRouteID, capability: "text_interpretation",
             profileVersion: created.profileVersion)
+        guard disposition == .granted else { throw UITestFixtureError.seedingFailed("grant: \(disposition)") }
     }
 
     private func saveTyped(_ text: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
