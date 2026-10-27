@@ -46,6 +46,8 @@ final class UITestFixtureLaunch {
         let retrieval = RetrievalSearchModule()
         let root = try ServiceCompositionRoot(
             uiTestFixture: AppConfiguration.uiTestFixture(storageRoot: storageRoot),
+            environment: CompositionEnvironment(
+                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
             sender: sender,
             notificationCenter: notificationCenter,
             reachability: UITestFixtureReachability(isReachable: fixture != .offline),

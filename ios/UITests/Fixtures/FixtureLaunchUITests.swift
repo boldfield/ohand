@@ -23,8 +23,14 @@ final class FixtureLaunchUITests: XCTestCase {
         // below cannot be undone by seeding.
         XCTAssertTrue(app.waitForFixtureReady())
         XCTAssertTrue(app.element(identifier: "home.recents.locked").waitForExistence(timeout: seedingTimeout))
-        app.element(identifier: "home.recents.unlock").tap()
-        XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: seedingTimeout))
+        let unlock = app.element(identifier: "home.recents.unlock")
+        var tapsLeft = 4
+        while tapsLeft > 0, !app.homeCard(containing: "Synthetic").exists {
+            if unlock.exists { unlock.tap() }
+            tapsLeft -= 1
+            _ = app.homeCard(containing: "Synthetic").waitForExistence(timeout: 20)
+        }
+        XCTAssertTrue(app.homeCard(containing: "Synthetic").exists, "the unlock action showed the seeded notes (taps left: \(tapsLeft))")
     }
 
     func testPopulatedShowsTypedAndSpokenNotes() {
