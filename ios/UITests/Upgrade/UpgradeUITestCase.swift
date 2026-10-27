@@ -115,21 +115,7 @@ class UpgradeUITestCase: XCTestCase {
             if isHittableNow(within: 2, element) {
                 ready = true
             } else if element.exists {
-                // Scroll a little toward the element: it can be below the fold or under the keyboard, or have been
-                // scrolled past above the top. Small drags, so it is never carried past the other edge.
-                let frame = try? element.snapshot().frame
-                let keyboardTop = app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : app.frame.height
-                let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
-                let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
-                if let frame, frame.midY < 120 {
-                    top.press(forDuration: 0.05, thenDragTo: bottom)
-                } else {
-                    let startY = min(0.75, keyboardTop / app.frame.height - 0.05)
-                    let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY))
-                    let low = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY - 0.25))
-                    high.press(forDuration: 0.05, thenDragTo: low)
-                }
-                Thread.sleep(forTimeInterval: 0.5)
+                scrollToward(element)
             }
         }
         if !ready { recordFailureScreen(slug(step)) }
@@ -137,6 +123,25 @@ class UpgradeUITestCase: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertTrue(isHittableNow(within: screenTimeout, element), "step \"\(step)\": the element moved away")
         element.tap()
+    }
+
+    /// Scrolls so `element` sits in the upper middle of the screen, above any keyboard: small drags when they move the
+    /// content, a full swipe when they do not (a drag that starts on a control can be taken by it).
+    func scrollToward(_ element: XCUIElement) {
+        guard let before = try? element.snapshot().frame else { return }
+        let height = app.frame.height
+        let delta = height * 0.35 - before.midY  // positive: the content has to move down
+        let distance = min(abs(delta), height * 0.45)
+        let startFraction = delta > 0 ? 0.2 : 0.55
+        let endFraction = delta > 0 ? 0.2 + distance / height : 0.55 - distance / height
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: startFraction))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: endFraction))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        Thread.sleep(forTimeInterval: 0.7)
+        if let after = try? element.snapshot().frame, abs(after.midY - before.midY) < 1 {
+            if delta > 0 { app.swipeDown() } else { app.swipeUp() }
+            Thread.sleep(forTimeInterval: 0.7)
+        }
     }
 
     func slug(_ text: String) -> String {
