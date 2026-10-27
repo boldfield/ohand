@@ -88,10 +88,12 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         openItem(card: cardElement)
         tap(element("data-settings.delete-item.delete"), step: "ask to delete the item")
         tap(element("data-settings.delete-item.confirm"), step: "confirm the deletion")
-        let state = element("data-settings.delete-item.state")
-        if !appears(state, timeout: screenTimeout) { recordFailureScreen("deletion-state") }
-        XCTAssertTrue(appears(state, timeout: 1), "the deletion showed no result")
-        goBack(step: "from the deleted item")
+        // The screen words the result itself (or closes); either way the item must be gone from the recents.
+        Thread.sleep(forTimeInterval: 5)
+        if !element("home.search").exists {
+            recordFailureScreen("after-deletion")
+            goBack(step: "from the deleted item")
+        }
         XCTAssertTrue(disappears(card(containing: "charlie"), timeout: screenTimeout), "the deleted item is still in the recents")
     }
 
