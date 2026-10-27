@@ -114,21 +114,22 @@ class UpgradeUITestCase: XCTestCase {
         while !ready && Date() < deadline {
             if isHittableNow(within: 2, element) {
                 ready = true
-            } else if element.exists, let frame = try? element.snapshot().frame, frame.midY > 0,
-                frame.midY < (app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : .greatestFiniteMagnitude),
-                frame.midY < app.frame.height
-            {
-                // Its centre is on the screen above the keyboard, though XCTest calls it covered: tap the centre.
-                Thread.sleep(forTimeInterval: 0.5)
-                element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                return
             } else if element.exists {
-                // Scroll toward the element: it can be below the fold or have been scrolled past above the top.
-                if let frame = try? element.snapshot().frame, frame.midY < 0 {
-                    app.swipeDown()
+                // Scroll a little toward the element: it can be below the fold or under the keyboard, or have been
+                // scrolled past above the top. Small drags, so it is never carried past the other edge.
+                let frame = try? element.snapshot().frame
+                let keyboardTop = app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : app.frame.height
+                let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+                let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+                if let frame, frame.midY < 120 {
+                    top.press(forDuration: 0.05, thenDragTo: bottom)
                 } else {
-                    app.swipeUp()
+                    let startY = min(0.75, keyboardTop / app.frame.height - 0.05)
+                    let high = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY))
+                    let low = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY - 0.25))
+                    high.press(forDuration: 0.05, thenDragTo: low)
                 }
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
         if !ready { recordFailureScreen(slug(step)) }
