@@ -16,6 +16,22 @@ struct NotificationHooks {
         reconcile: { root in Task { await root.reconcileNotificationActions() } })
 }
 
+/// Where the Permissions and Status screens read the OS permission state, and where each remembers what it last saw.
+/// Production reads the OS and remembers in user defaults; a substitute reads a fixed state and remembers nothing, so an
+/// earlier run cannot change what the screens show.
+struct PermissionStatusSources {
+    var reader: PermissionStatusReading
+    var settingsMemory: PermissionMemory
+    var statusMemory: PermissionMemory
+
+    static var system: PermissionStatusSources {
+        PermissionStatusSources(
+            reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
+            settingsMemory: UserDefaultsPermissionMemory(),
+            statusMemory: StatusPermissionMemory())
+    }
+}
+
 /// The app's resolved production services and the models built on them. It owns the composition root and its
 /// lifecycle coordinator, and gives the capture surface and the management navigation their seams over the root. It
 /// does not rebuild the root's wiring: launch and foreground reconciliation (ingress recovery, the job runner,
@@ -77,6 +93,7 @@ final class AppServices {
         captureNow: @escaping () -> Date = Date.init,
         notificationPermission: NotificationPermissionAsking = NotificationPermissionAsker(
             center: SystemNotificationCenter(), requester: SystemNotificationAuthorizationRequester()),
+        permissionStatus: PermissionStatusSources = .system,
         isForeground: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
         isProtectedDataAvailable: @escaping () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     ) {
@@ -128,14 +145,12 @@ final class AppServices {
             privacySettings: .assembled(root: root),
             permissionsSettings: PermissionsSettingsModel(
                 overview: PermissionsOverview(
-                    reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
-                    memory: UserDefaultsPermissionMemory()),
+                    reader: permissionStatus.reader, memory: permissionStatus.settingsMemory),
                 openSystemSettings: Self.openSystemSettings),
             statusModel: StatusModel(
                 health: LifecycleHealthReader(lifecycle: lifecycle),
                 permissions: PermissionsOverview(
-                    reader: SystemPermissionStatusReader(notifications: SystemNotificationCenter()),
-                    memory: StatusPermissionMemory()),
+                    reader: permissionStatus.reader, memory: permissionStatus.statusMemory),
                 retrier: root.jobRunner, scheduling: RootReminderSchedulingReader(root: root),
                 openSystemSettings: Self.openSystemSettings))
         let homeRecents = HomeRecentsModel(
