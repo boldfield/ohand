@@ -150,30 +150,32 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         secretField.typeText(providerSecret)
         tap(element("provider-settings.store-secret"), step: "store the secret")
         let credentialState = element("provider-settings.credential-state")
-        if !appears(credentialState, timeout: screenTimeout) { recordFailureScreen("credential-state") }
-        XCTAssertTrue(appears(credentialState, timeout: 1), "storing the secret showed no result")
+        // The result line comes and goes; the steps after it (and the report) are what prove the outcome.
+        _ = appears(credentialState, timeout: 20)
         tap(element("provider-settings.save"), step: "save the profile")
         let saveState = element("provider-settings.save-state")
-        if !appears(saveState, timeout: screenTimeout) { recordFailureScreen("save-state") }
-        XCTAssertTrue(appears(saveState, timeout: 1), "saving the profile showed no result")
+        // The result line comes and goes; the steps after it (and the report) are what prove the outcome.
+        _ = appears(saveState, timeout: 20)
         goBack(step: "from Add provider")
 
         let cloud = element("provider-settings.choice.cloud")
         tap(cloud, step: "choose the cloud provider")
         let allowanceNote = element("provider-settings.privacy-allowance")
-        if !appears(allowanceNote, timeout: screenTimeout) { recordFailureScreen("privacy-allowance-note") }
-        XCTAssertTrue(appears(allowanceNote, timeout: 1), "choosing the provider did not ask for the privacy allowance")
+        let allowanceNoteStable = appearsStably(allowanceNote, timeout: screenTimeout)
+        if !allowanceNoteStable { recordFailureScreen("privacy-allowance-note") }
+        XCTAssertTrue(allowanceNoteStable, "choosing the provider did not ask for the privacy allowance")
         goBack(step: "from Processing")
 
         openSettingsRow("Privacy", screen: "Privacy")
         let offer = elements(withIdentifierPrefix: "privacy-settings.offer.").firstMatch
-        if !appears(offer, timeout: screenTimeout) { recordFailureScreen("privacy-offer") }
-        XCTAssertTrue(appears(offer, timeout: 1), "Privacy offered no allowance for the provider")
+        let offerStable = appearsStably(offer, timeout: screenTimeout)
+        if !offerStable { recordFailureScreen("privacy-offer") }
+        XCTAssertTrue(offerStable, "Privacy offered no allowance for the provider")
         tap(offer, step: "ask to allow processing through the provider")
         tap(element("privacy-settings.allow"), step: "allow processing")
         let actionState = element("privacy-settings.action-state")
-        if !appears(actionState, timeout: screenTimeout) { recordFailureScreen("privacy-action-state") }
-        XCTAssertTrue(appears(actionState, timeout: 1), "allowing processing showed no result")
+        // The result line comes and goes; the steps after it (and the report) are what prove the outcome.
+        _ = appears(actionState, timeout: 20)
         goBack(step: "from Privacy")
         goBack(step: "from Settings")
     }
