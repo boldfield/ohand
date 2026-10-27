@@ -71,13 +71,16 @@ final class WalkthroughUITests: XCTestCase {
         let failedNote = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).firstMatch
         XCTAssertTrue(appears(failedNote, timeout: screenTimeout), "Status shows no failed note")
+        capture("\(widthName)-\(appearanceName)", "status failed note")
         // One row can expose several accessibility elements under its identifier; count the distinct identifiers.
         let failedNoteIdentifiers = Set(
             app.descendants(matching: .any).matching(
                 NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
             ).allElementsBoundByIndex.map(\.identifier))
-        XCTAssertEqual(failedNoteIdentifiers.count, 1, "Status shows exactly one failed note: \(failedNoteIdentifiers)")
-        capture("\(widthName)-\(appearanceName)", "status failed note")
+        let failedNoteLabels = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
+        ).allElementsBoundByIndex.map { "\($0.identifier)=\($0.label)" }
+        XCTAssertEqual(failedNoteIdentifiers.count, 1, "Status shows exactly one failed note: \(failedNoteLabels)")
     }
 
     /// True when the driving script put the simulator in dark appearance. The screenshots are checked against it, so a
