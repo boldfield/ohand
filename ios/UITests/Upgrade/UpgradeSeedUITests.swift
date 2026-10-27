@@ -121,8 +121,9 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
         tap(saveTime, step: "save the reminder time")
         allowNotificationsIfAsked()
         let stored = storedReminderTime
-        if !appears(stored, timeout: screenTimeout) { recordFailureScreen("reminder-stored-time") }
-        XCTAssertTrue(appears(stored, timeout: 1), "the reminder showed no stored time")
+        let stable = appearsStably(stored, timeout: screenTimeout)
+        if !stable { recordFailureScreen("reminder-stored-time") }
+        XCTAssertTrue(stable, "the reminder showed no stored time")
         let label = stored.label
         XCTAssertFalse(label.isEmpty, "the stored time was empty")
         // Give the reminder pass a moment to hand the request to the system.

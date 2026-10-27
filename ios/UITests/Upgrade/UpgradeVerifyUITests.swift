@@ -26,8 +26,9 @@ final class UpgradeVerifyUITests: UpgradeUITestCase {
         // The reminder shows the time it was set for before the upgrade.
         openItem(card: reminderCard)
         let stored = storedReminderTime
-        if !appears(stored, timeout: screenTimeout) { recordFailureScreen("reminder-stored-time") }
-        XCTAssertTrue(appears(stored, timeout: 1), "the reminder shows no stored time after the upgrade")
+        let stable = appearsStably(stored, timeout: screenTimeout)
+        if !stable { recordFailureScreen("reminder-stored-time") }
+        XCTAssertTrue(stable, "the reminder shows no stored time after the upgrade")
         XCTAssertEqual(stored.label, expectations.reminder.storedTimeLabel, "the reminder's time changed in the upgrade")
     }
 
