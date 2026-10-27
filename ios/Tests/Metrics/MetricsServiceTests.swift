@@ -237,6 +237,50 @@ final class MetricsServiceTests: XCTestCase {
         XCTAssertTrue(text.contains("\"occurrences\" : 2"))
     }
 
+    func testTheExportNamesTheBuildTheAppSupplies() async throws {
+        authenticate()
+        let core = FakeMetricsCore()
+        let build = CoreMetricsBuild(
+            version: "0.1.0", buildNumber: "412", revision: String(repeating: "ab", count: 20), dirty: false)
+        var report = sampleReport()
+        report = CoreMetricsReport(
+            schema: report.schema, generatedAt: report.generatedAt, recordingEnabled: report.recordingEnabled,
+            sampleLimitPerSeries: report.sampleLimitPerSeries, build: build, timings: report.timings,
+            failures: report.failures)
+        core.answer = .success(CoreMetricsAnswer(outcome: "report", report: report))
+        let service = MetricsService(core: core, session: session, build: build)
+        let export = try await service.exportReport()
+        XCTAssertEqual(core.requests, [.export(readAuthentication: .authenticated, build: build)])
+        XCTAssertEqual(export.report.build, build)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: export.json) as? [String: Any])
+        XCTAssertEqual(
+            object["build"] as? NSDictionary,
+            [
+                "version": "0.1.0", "build_number": "412", "revision": String(repeating: "ab", count: 20),
+                "dirty": false,
+            ] as NSDictionary)
+    }
+
+    func testTheBuildIsReadFromTheInfoPlistKeysTheBuildScriptWrites() throws {
+        let revision = String(repeating: "cd", count: 20)
+        let build = try XCTUnwrap(
+            CoreMetricsBuild(infoDictionary: [
+                "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "7", "OhAndBuildRevision": revision,
+                "OhAndBuildDirty": true,
+            ]))
+        XCTAssertEqual(build, CoreMetricsBuild(version: "0.1.0", buildNumber: "7", revision: revision, dirty: true))
+        XCTAssertNil(
+            CoreMetricsBuild(infoDictionary: ["CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "7"]),
+            "an unstamped app names no build")
+        let encoded = try CoreMetricsRequest.export(readAuthentication: .authenticated, build: build).encoded()
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: encoded) as? NSDictionary,
+            [
+                "op": "export", "read_authentication": "authenticated",
+                "build": ["version": "0.1.0", "build_number": "7", "revision": revision, "dirty": true],
+            ] as NSDictionary)
+    }
+
     func testARelockWhileTheCoreIsAnsweringDiscardsTheReport() async {
         authenticate()
         let core = FakeMetricsCore()

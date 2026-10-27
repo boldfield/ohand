@@ -82,6 +82,7 @@ targets:
       INFOPLIST_FILE: AppAssembly/Info.plist
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       CODE_SIGN_ENTITLEMENTS: Config/OhAndApp.entitlements
+      ENABLE_USER_SCRIPT_SANDBOXING: NO
       OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
       HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
       SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge/CoreC
@@ -89,6 +90,10 @@ targets:
       - target: OhAndServices
       - target: OhAndCoreBridge
       - target: OhAndCaptureControl
+    postBuildScripts:
+      - name: Stamp build identity
+        script: '"${SRCROOT}/scripts/generate_build_info.sh"'
+        basedOnDependencyAnalysis: false
 
   OhAndTests:
     type: bundle.unit-test
@@ -132,6 +137,11 @@ targets:
       PRODUCT_NAME: OhAndCaptureControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.capture-control
       INFOPLIST_FILE: Capture/Entry/Control/Info.plist
+      ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postBuildScripts:
+      - name: Stamp build identity
+        script: '"${SRCROOT}/scripts/generate_build_info.sh"'
+        basedOnDependencyAnalysis: false
 
   BridgeProbe:
     type: application
@@ -343,6 +353,19 @@ targets:
     dependencies:
       - target: OhAndApp
 
+  # T10a: drives the installed OhAndApp by bundle identifier. It has no target application, so xcodebuild never
+  # installs or replaces the app: what it finds is what `simctl install` left (tools/release/simulator_upgrade_check.sh).
+  OhAndUpgradeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/Upgrade
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndUpgradeUITests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.upgrade-uitests
+      GENERATE_INFOPLIST_FILE: YES
+
   ManagementHandoffUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -375,6 +398,13 @@ targets:
       INFOPLIST_FILE: CaptureProbe/Control/Info.plist
 
 schemes:
+  OhAndUpgradeUITests:
+    build:
+      targets:
+        OhAndUpgradeUITests: all
+    test:
+      targets:
+        - OhAndUpgradeUITests
   OhAndApp:
     build:
       targets:

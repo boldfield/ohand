@@ -226,3 +226,34 @@ fn an_implausible_duration_is_refused_by_the_worker_and_stores_nothing() {
     assert!(report["report"]["timings"].as_array().unwrap().is_empty());
     session.close();
 }
+
+#[test]
+fn an_export_names_the_build_the_app_supplies() {
+    let _guard = serial();
+    let mut session = Session::open();
+    let revision = "0123456789abcdef0123456789abcdef01234567";
+    let exported = session.succeed(&json!({
+        "op": "export", "read_authentication": "authenticated",
+        "build": {"version": "0.1.0", "build_number": "412", "revision": revision, "dirty": true}
+    }));
+    assert_eq!(
+        exported["report"]["build"],
+        json!({"version": "0.1.0", "build_number": "412", "revision": revision, "dirty": true})
+    );
+    let unnamed = export(&mut session);
+    assert!(unnamed["report"].get("build").is_none());
+    session.close();
+
+    let handle = open_memory();
+    for build in [
+        json!({"version": "a note", "build_number": "412", "revision": revision, "dirty": true}),
+        json!({"version": "0.1.0", "build_number": "1", "revision": revision, "dirty": false, "note": "x"}),
+    ] {
+        let request =
+            json!({"op": "export", "read_authentication": "authenticated", "build": build});
+        let outcome = start(handle, 1, &request);
+        assert_ne!(outcome.status, OHAND_CORE_STATUS_OK, "{request}");
+        assert_eq!(outcome.code(), "invalid_request", "{request}");
+    }
+    assert_eq!(consume(ohand_core_close(handle)).status, 0);
+}

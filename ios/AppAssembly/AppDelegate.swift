@@ -22,9 +22,24 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                     fixtureLaunch.seedInBackground()
                 })
         }
+        // The upgrade check asks a debug build for a content-free report of its own data once the app's own authentication
+        // succeeds (`-OhAndUpgradeReport`); a release build never reads the argument.
+        if let upgradeReport = UpgradeReportRequest.requested() {
+            return AppLauncher(startServices: { services, isActive in
+                services.start(isActive: isActive)
+                let writer = UpgradeReportWriter(root: services.root, request: upgradeReport)
+                writer.begin()
+                AppDelegate.upgradeReportWriter = writer
+            })
+        }
         #endif
         return AppLauncher()
     }()
+
+    #if DEBUG
+    /// Keeps the debug upgrade report writer alive for the process.
+    static var upgradeReportWriter: UpgradeReportWriter?
+    #endif
 
     func application(
         _ application: UIApplication,
