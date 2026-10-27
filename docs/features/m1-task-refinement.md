@@ -4348,3 +4348,94 @@ Acceptance:
 Validation: `make check` and `make test`, plus the exact-head macOS CI run. Keep fixtures synthetic.
 
 Device check (recorded by the maintainer or T05 after merge, not by this task): with the voice control, on cold and warm launch, unlocked and locked, record whether recording is under way when the app appears, and whether iOS asks for Face ID before opening. `simctl` cannot press a control, so only a device shows this.
+
+### F54a
+
+Keep the reason a model gives for not sorting a note, and let one such note be run again
+
+On 2026-10-27 a voice note on the maintainer's phone came back `abstained`. The provider request succeeded and the model chose not to sort the note. The app could not say why. The model returns a reason (`AbstentionReason`, `core/src/interpretation/contracts/mod.rs:211`: `UncertainTarget`, `Negated`, `Ambiguous`, `UnsupportedOperation` or `Other` with a short detail), and apply validates it. But `insert_proposal_row` (`core/src/interpretation/apply/mod.rs:520`) stores only `abstained = 1`, so the reason is discarded. An abstention is not a failure, so F43's failed-work read and rerun do not cover it either. The note looks unsorted, with no explanation and no way to try again.
+
+F54a stores the reason, exposes it as a fixed label, and adds a rerun for one abstained note. F54b shows it.
+
+Owned paths:
+- `core/src/store/schema/mod.rs` (one new migration step, v14);
+- `core/src/interpretation/apply/mod.rs` (the abstention branch and `insert_proposal_row` only);
+- `core/src/domain/status/` and `core/src/ffi/capture.rs` (the item status read);
+- `ios/OhAndCoreBridge/CaptureModels.swift`;
+- `core/src/jobs/configuration/failed_work.rs`, `core/src/ffi/job_configuration.rs`, `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift` and `ios/Services/JobConfiguration/`, additively, for the rerun;
+- tests in `core/tests/migrations/`, `core/tests/status/`, `core/tests/job_configuration/`, `ios/Tests/JobConfiguration/` and the apply module's own tests.
+
+Dependencies: none (F43 has merged).
+
+Acceptance:
+
+1. **Stored.** Migration v14 adds two nullable columns to `proposals`:
+   - `abstention_reason`, a fixed machine label: `uncertain_target`, `negated`, `ambiguous`, `unsupported_operation` or `other`;
+   - `abstention_detail`, the `Other` detail only, truncated to 200 Unicode scalars.
+
+   Apply writes both for every abstention and leaves them null otherwise. Rows that already exist keep null, and nothing is backfilled or guessed. The migration test opens a v13 store holding an abstained proposal, migrates it, and shows the old row with a null reason and a new abstention with its reason. Reset, deletion and export behave as before. A deleted item's proposal rows, including the detail, go with it.
+2. **Exposed as a label.** The item status read (`StatusReadout`, `core/src/ffi/capture.rs:129`) gains `abstention_reason: Option<&'static str>`. It is the label of the item's current abstained proposal when `processing_state` is `abstained`, and null otherwise, the same way `unschedulable_reason` works. The detail text is never exposed through any FFI read: it is model output, kept on the device for diagnosis. `CaptureModels.swift` decodes the new field, and absence decodes as nil.
+3. **Run one abstained note again.** Add an operation beside `rerun_failed_interpretations` that takes one item ID whose current interpretation is `abstained`. It makes a new `interpret` job at the item's current revision, pinned by `resolve_profile_pin`, through the same code path. Do not write a second pinning path. It returns `queued`, `no_provider_allowed` or `not_abstained`, and repeating it before the new job runs creates nothing. The failed-work list and "all listed" never include abstentions. It is exposed through the job-configuration FFI and the Swift service like the existing rerun.
+4. **Tests** cover each reason label, the 200-scalar truncation, a non-abstained item's null reason, the rerun's three outcomes and its idempotence, and the Swift decoding. Native edits need exact-head macOS CI evidence.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F54b
+
+Say on a note's detail screen why it was not sorted, and offer to try again or set the type yourself
+
+The screen for F54a. Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths: `app/source-detail/` and `ios/Tests/SourceDetail/`.
+
+Dependencies: F54a (the label and the rerun), and F44, which edits `app/source-detail/` first.
+
+Acceptance:
+
+1. **One line on the detail screen** when the item's `processing_state` is `abstained`. It sits where F44's failure line would, and the two never show together. The line maps the label to fixed copy:
+   - `uncertain_target`: "Not sorted: it wasn't clear what this note is about";
+   - `negated`: "Not sorted: the note says not to do something";
+   - `ambiguous`: "Not sorted: it was too unclear to sort";
+   - `unsupported_operation`: "Not sorted: changing an existing note this way isn't supported yet";
+   - `other` or null (older notes): "Not sorted: it couldn't tell how to sort this".
+
+   The model's detail text is never shown.
+2. **Two actions under the line:**
+   - "Try again" calls F54a's rerun. It then shows "Sorting…" when queued, or "Choose a provider in Processing first" with a link to Processing when no provider is allowed.
+   - A control that opens the existing item-type correction (`app/item-controls/`), reused, not rebuilt.
+3. **Hosted view tests** cover each label, the null label, both rerun outcomes, and that a processed or failed item shows no abstention line. Run them in both appearances. Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F55
+
+Tell the model how to sort a question the user asks themselves
+
+On 2026-10-27, a spoken question to self came back `abstained` on the phone. It was of the form "What are the next steps for <project> I forgot where I was". The coordinator replayed it privately through the live harness on main 4501f2e (raw exchanges outside the repository).
+
+| Backend | Input | Result |
+|---|---|---|
+| Haiku 5.5 and gpt-5.5 | as typed, with a comma | `idea` |
+| Sonnet 5.5 | as typed, with a comma | `note` |
+| Haiku 5.5 and Sonnet 5.5, 3 runs each | three transcript variants: no comma, lower case, and a misrecognised project word | 11 of 18 calls abstained |
+
+The abstentions were `Ambiguous` 10 times and once `Other` ("question seeking information"). The same text gets `note`, `idea` or an abstention by chance.
+
+The cause is an instruction gap. `core/src/interpretation/instructions/text.rs` says nothing about questions. Its `idea` is "an exploratory thought or possibility". Its abstention reasons cover "missing words or no usable content" and "too incomplete to resolve", and its hard limits say "When unsure, abstain rather than guess". Yet the fixture oracle files every open question to self as `idea`: `question-reflection`, `comparison-no-preference` and `hypothetical-question`. `question-reflection` is one of the remaining live misses after F52. A note with clear words always has a type, and abstaining loses it from the sorted views. DESIGN.md: "Broad intentions remain findable even without a well-formed next step."
+
+Owned paths: as F52. `core/src/interpretation/instructions/`, `core/tests/interpretation_instructions/`, `fixtures/intent/contrastive-fixtures.json`, `core/tests/fixture_validation/`, `docs/validation/intent-fixtures.md` and `tools/evaluation/fixtures/recorded-responses.json`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Instructions.** The `item_type` definitions say that a question the user asks themselves (reflective, open, or about what to do next, including one that trails off or says they lost their place) is an `idea`. They also say that being a question, being lower case, or lacking punctuation is never by itself a reason to abstain. Abstention stays for notes with no usable content, negation, unsupported operations, and text whose words cannot be resolved, as `asr-dropped-word-remind-me` shows. Every forbidden rule and the prompt-injection guidance stay word for word, and the tests that pin them keep passing.
+2. **Fixtures.** Add at least three synthetic fixtures, each expecting `idea` with a full span. Use no real project or person names:
+   - a next-steps question to self with no punctuation, such as "what are the next steps for the garden project I lost my place";
+   - the same idea in lower case with a trailing "um";
+   - a "where was I with …" question.
+
+   Add a control fixture that still abstains: a question with its object dropped by recognition, such as "what are the next steps for the I forgot". Document all four in `docs/validation/intent-fixtures.md`. Recorded responses for the new fixtures are added so the offline evaluation stays green.
+3. **Tests.** The instruction tests assert the new guidance is present and the forbidden-rule text is unchanged. `make check` and `make test` pass.
+
+Live evidence (the coordinator runs it after merge, not this task): the live harness over all fixtures with Haiku 5.5, Sonnet 5.5 and gpt-5.5, plus the private replay variants. A question-to-self fixture that still abstains in more than 1 of 9 calls per backend means F55 is not done, and is reopened.

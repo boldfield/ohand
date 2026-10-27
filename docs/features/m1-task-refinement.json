@@ -4197,6 +4197,84 @@
         "ios/Capture/Voice/VoiceCaptureEngine.swift:31",
         "ios/AppAssembly/AppServices.swift:116"
       ]
+    },
+    {
+      "key": "F54a",
+      "parent": null,
+      "title": "Keep the reason a model gives for not sorting a note, and let one such note be run again",
+      "file_scope": [
+        "core/src/store/schema/mod.rs (migration v14 only)",
+        "core/src/interpretation/apply/mod.rs (abstention branch and insert_proposal_row only)",
+        "core/src/domain/status/",
+        "core/src/ffi/capture.rs",
+        "ios/OhAndCoreBridge/CaptureModels.swift",
+        "core/src/jobs/configuration/failed_work.rs (additive)",
+        "core/src/ffi/job_configuration.rs (additive)",
+        "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift (additive)",
+        "ios/Services/JobConfiguration/ (additive)",
+        "core/tests/migrations/",
+        "core/tests/status/",
+        "core/tests/job_configuration/",
+        "ios/Tests/JobConfiguration/"
+      ],
+      "intent": "Store the abstention reason label and Other detail on proposals, expose the label (never the detail) on the item status read, and add a one-item rerun for abstained notes through the existing pinning path.",
+      "acceptance": [
+        "See the F54a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/apply/mod.rs:520",
+        "core/src/interpretation/contracts/mod.rs:211",
+        "core/src/ffi/capture.rs:129",
+        "core/src/jobs/configuration/failed_work.rs:280"
+      ]
+    },
+    {
+      "key": "F54b",
+      "parent": null,
+      "title": "Say on a note's detail screen why it was not sorted, and offer to try again or set the type yourself",
+      "file_scope": [
+        "app/source-detail/",
+        "ios/Tests/SourceDetail/"
+      ],
+      "intent": "An abstained note's detail screen shows a fixed-copy reason line, a Try again that runs F54a's rerun, and the existing type correction.",
+      "acceptance": [
+        "See the F54b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F54a",
+        "F44"
+      ],
+      "source_pointers": [
+        "app/source-detail/SourceDetailView.swift",
+        "app/item-controls/ItemControlsModel.swift"
+      ]
+    },
+    {
+      "key": "F55",
+      "parent": null,
+      "title": "Tell the model how to sort a question the user asks themselves",
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/tests/interpretation_instructions/",
+        "fixtures/intent/contrastive-fixtures.json",
+        "core/tests/fixture_validation/",
+        "docs/validation/intent-fixtures.md",
+        "tools/evaluation/fixtures/recorded-responses.json"
+      ],
+      "intent": "Questions to self are ideas, and question form or missing punctuation is never alone a reason to abstain; add synthetic fixtures including one control that still abstains.",
+      "acceptance": [
+        "See the F55 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/instructions/text.rs:27",
+        "core/src/interpretation/instructions/text.rs:31",
+        "fixtures/intent/contrastive-fixtures.json"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5018,7 +5096,13 @@
     "E02b": [],
     "F51": [],
     "F52": [],
-    "F53": []
+    "F53": [],
+    "F54a": [],
+    "F54b": [
+      "F54a",
+      "F44"
+    ],
+    "F55": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5276,6 +5360,10 @@
     {
       "date": "2026-10-27",
       "change": "F44 amendment 1: owns the StatusModel call site in AppServices.swift, and the walkthrough uses F45's failed-sorting fixture; depends on F45. F53 added: a Control Center voice button that starts recording on the explicit tap, and a typing button."
+    },
+    {
+      "date": "2026-10-27",
+      "change": "F54a/F54b: keep and show the model's abstention reason, with a one-item rerun. F55: instructions treat questions to self as ideas (a device note abstained 11 of 18 replay calls)."
     }
   ]
 }
