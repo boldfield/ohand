@@ -1,6 +1,7 @@
 import XCTest
 @testable import OhAnd
 @testable import OhAndCoreBridge
+@testable import OhAndServices
 
 final class CaptureEntryVoiceAutoStartTests: XCTestCase {
     private var voice: FakeVoiceController!
