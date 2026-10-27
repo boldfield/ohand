@@ -11,6 +11,14 @@ protocol VoiceRecordingControlling: AnyObject {
     func start(completion: @escaping (Result<VoiceRecordingStarted, VoiceStartFailure>) -> Void)
     func stop()
     func cancel()
+    /// The microphone permission right now, read without asking.
+    var microphonePermission: MicrophonePermissionStatus { get }
+}
+
+extension VoiceRecordingControlling {
+    /// Conformers that wrap the system recorder (the app's fan-out) report the system's answer, which is the one the
+    /// recorder itself consults in the app.
+    var microphonePermission: MicrophonePermissionStatus { SystemMicrophonePermission().status }
 }
 
 extension VoiceRecordingController: VoiceRecordingControlling {}
@@ -129,6 +137,11 @@ final class CaptureEntryModel: ObservableObject {
             : "The device has not been unlocked since it restarted, so saving may fail. What you type or record is kept."
     }
 
+    var isRecording: Bool {
+        if case .recording = recorderState { return true }
+        return false
+    }
+
     /// Nothing is being typed, recorded or saved, so a new entry may reset the surface.
     var isIdle: Bool {
         recorderState == .idle && textModel.text.isEmpty && !textModel.isSaving && !(acknowledgment?.isSaving ?? false)
@@ -143,6 +156,14 @@ final class CaptureEntryModel: ObservableObject {
         mode = newPresentation.mode
         clearAcknowledgment()
         voiceNotice = nil
+        startRecordingIfExplicitlyRequested(newPresentation)
+    }
+
+    /// An explicit voice request is the user's own action, so it starts the recording a mic tap would. It never asks
+    /// for permission: unless the microphone is already allowed, the voice surface is shown and the mic tap decides.
+    private func startRecordingIfExplicitlyRequested(_ presentation: CaptureEntryPresentation) {
+        guard presentation.startsRecording, voice.microphonePermission == .granted else { return }
+        startRecording()
     }
 
     /// The capture surface is on screen and can take input. Measures the wait since the system trigger of the current

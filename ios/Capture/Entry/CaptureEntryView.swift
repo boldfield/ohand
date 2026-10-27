@@ -53,6 +53,11 @@ struct CaptureEntryView: View {
                 if phase == .active { model.refreshProgress() }
             }
             .onChange(of: model.mode) { _ in focusComposerIfSilent() }
+            .onChange(of: model.isRecording) { isRecording in
+                if isRecording {
+                    UIAccessibility.post(notification: .announcement, argument: "Recording started.")
+                }
+            }
             .onReceive(model.$acknowledgment) { acknowledgment in
                 updateSavedPill(for: acknowledgment?.save)
                 guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
