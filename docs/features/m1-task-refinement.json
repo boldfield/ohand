@@ -3905,7 +3905,9 @@
         "app/source-detail/",
         "ios/Tests/Status/",
         "ios/Tests/SourceDetail/",
-        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift",
+        "ios/AppAssembly/AppServices.swift (StatusModel construction only)",
+        "ios/Tests/AppAssembly/AppServicesTests.swift (additive)"
       ],
       "intent": "Status and item detail name failed notes, give the reason, and offer a try-again that actually reruns terminal failures.",
       "acceptance": [
@@ -3914,11 +3916,14 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F43",
-        "F47"
+        "F47",
+        "F45"
       ],
       "source_pointers": [
         "app/status/StatusText.swift:30",
-        "app/source-detail/SourceDetailView.swift"
+        "app/source-detail/SourceDetailView.swift",
+        "ios/AppAssembly/AppServices.swift:134",
+        "ios/AppAssembly/UITestFixtures/UITestFixture.swift:16"
       ]
     },
     {
