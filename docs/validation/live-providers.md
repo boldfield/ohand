@@ -34,11 +34,11 @@ Private raw evidence SHA-256: `cc85d6bd…0aa5` (942,211 bytes).
 
 Oracle misses: haiku and gpt-5.5 missed `question-reflection`; gpt-6-luna missed `split-clock-task-day`.
 
-Latency, tokens and cost (summed over provider calls; 3 of the 35 fixtures per backend made no provider call):
+Latency, tokens and cost (summed over provider calls). Of the 35 fixtures, 3 made no provider call on haiku and gpt-6-luna and 2 made none on gpt-5.5:
 
 | Backend | Provider calls | Latency sum (ms) | Reported tokens in / out | Cost estimate |
 |---|---|---|---|---|
-| anthropic:claude-haiku-5-5 | 32 | 83,118 | 107,725 / 15,993 | $0.0004711 per record shown; total $0.018769 over 32 records |
+| anthropic:claude-haiku-5-5 | 32 | 83,118 | 107,725 / 15,993 | total $0.018769 over 32 records (estimate from the supplied rates file) |
 | openai:gpt-6-luna | 32 | 120,387 | 52,609 / 10,284 | not computed (no OpenAI rates supplied) |
 | openai:gpt-5.5 | 33 | 123,080 | 52,460 / 9,264 | not computed (no OpenAI rates supplied) |
 
@@ -57,9 +57,9 @@ Each scenario ran on exactly one backend:
 | unreachable_endpoint | `self-hosted:claude-haiku-5-5` (a loopback endpoint with no listener; the label reuses the model name, a harness labelling quirk) | backed_off, reason `unavailable`, retriable, capture durable, 1 call, 0 applied |
 | invalid_hosted_credential | anthropic:claude-haiku-5-5 | failed, reason `unauthorized`, not retriable, capture durable, 1 call, 0 applied |
 | revoked_profile_version | anthropic:claude-haiku-5-5 | not_run, reason `profile_revoked`, 0 provider calls, capture durable |
-| malformed_response | n/a | **not exercised live** in this run |
+| malformed_response | n/a | **not exercised live** in this run (malformed transport bodies are covered only by the no-network proof) |
 
-Earlier OpenAI-only runs (`…20261025T054428997Z-71e0091b…json`, `…20261025T135141329Z-2e110bf7…json`) show the
+Earlier runs that include OpenAI legs (`…20261025T054428997Z-71e0091b…json`, `…20261025T135141329Z-2e110bf7…json`) show the
 same invalid-credential and profile-revocation outcomes on `openai:gpt-5.5` and `openai:gpt-6-luna`. The
 `openai:gpt-5.5` leg of the first run failed 32 of 35 fixtures with HTTP 400 `rejected`, with zero forbidden
 mutations (fail-safe, but not a working backend at that revision).
