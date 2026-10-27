@@ -1,0 +1,53 @@
+{
+  "backend": "anthropic:claude-haiku-5-5",
+  "build_revision": {
+    "commit": "9931e61a12b1497a9b7c4e89ad85bd2db12ed993",
+    "dirty": false
+  },
+  "collected_at": "2026-10-27T21:19:47.818Z",
+  "collection_context": "revocation-after",
+  "outcome": {
+    "reason": "unauthorized",
+    "result": "failed",
+    "retriable": false,
+    "route": null
+  },
+  "private_raw_evidence": {
+    "bytes": 9624,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "live-providers-revocation-after-20261027T211947818Z-9931e61a12b1497a9b7c4e89ad85bd2db12ed993.raw.json",
+    "location": "private evidence directory (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "live-providers-revocation-after-20261027T211947818Z-9931e61a12b1497a9b7c4e89ad85bd2db12ed993",
+    "sha256": "ce7bd2d1573eb328f7c6c0b5bfeae93d80e8379dafbae07f41b9eb9dc2120977"
+  },
+  "revocation": {
+    "label": "e02b-throwaway-2026-10-27",
+    "phase": "after"
+  },
+  "run_id": "live-providers-revocation-after-20261027T211947818Z-9931e61a12b1497a9b7c4e89ad85bd2db12ed993",
+  "scenario": {
+    "applied_proposals": 0,
+    "backend": "anthropic:claude-haiku-5-5",
+    "capture_durable": true,
+    "failed_checks": [],
+    "forbidden_mutations": {
+      "correction_changed": 0,
+      "lifecycle_left_active": 0,
+      "raw_capture_changed": 0,
+      "scope_changed": 0
+    },
+    "job_failure_reason": "unauthorized",
+    "job_status": "failed",
+    "label": "e02b-throwaway-2026-10-27",
+    "outcome": {
+      "reason": "unauthorized",
+      "result": "failed",
+      "retriable": false,
+      "route": null
+    },
+    "passed": true,
+    "phase": "after",
+    "provider_calls": 1
+  },
+  "schema_version": 1
+}
