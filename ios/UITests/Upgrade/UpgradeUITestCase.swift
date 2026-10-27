@@ -114,6 +114,14 @@ class UpgradeUITestCase: XCTestCase {
         while !ready && Date() < deadline {
             if isHittableNow(within: 2, element) {
                 ready = true
+            } else if element.exists, let frame = try? element.snapshot().frame, frame.midY > 0,
+                frame.midY < (app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : .greatestFiniteMagnitude),
+                frame.midY < app.frame.height
+            {
+                // Its centre is on the screen above the keyboard, though XCTest calls it covered: tap the centre.
+                Thread.sleep(forTimeInterval: 0.5)
+                element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                return
             } else if element.exists {
                 // Scroll toward the element: it can be below the fold or have been scrolled past above the top.
                 if let frame = try? element.snapshot().frame, frame.midY < 0 {
