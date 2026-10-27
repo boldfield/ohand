@@ -5,6 +5,10 @@ use uuid::Uuid;
 use super::profile::ProviderProfile;
 use crate::time::TimeContext;
 
+/// Prefix of capture IDs minted by voice captures in builds before the contract fix. Stored IDs are
+/// immutable idempotency keys, so the legacy form stays accepted; new IDs are plain UUIDs.
+const LEGACY_VOICE_CAPTURE_ID_PREFIX: &str = "voice-";
+
 /// Immutable identification of the exact text a request carries. Source spans in the
 /// response refer to this text, never to the original when a correction was supplied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,9 +131,22 @@ impl InterpretationRequest {
         Ok(request)
     }
 
+    /// Decides whether a capture ID may be sent in a request: a UUID, or exactly `voice-` followed by a
+    /// lowercase hyphenated UUID. Nothing else is accepted.
+    pub(crate) fn is_valid_capture_id(capture_id: &str) -> bool {
+        if Uuid::parse_str(capture_id).is_ok() {
+            return true;
+        }
+        capture_id
+            .strip_prefix(LEGACY_VOICE_CAPTURE_ID_PREFIX)
+            .is_some_and(|rest| {
+                Uuid::parse_str(rest).is_ok_and(|parsed| parsed.hyphenated().to_string() == rest)
+            })
+    }
+
     fn validate(&self) -> Result<(), RequestValidationError> {
         use RequestValidationError as E;
-        if Uuid::parse_str(&self.capture_id).is_err() {
+        if !Self::is_valid_capture_id(&self.capture_id) {
             return Err(E::InvalidIdentifier("capture_id"));
         }
         if Uuid::parse_str(&self.request_version).is_err() {

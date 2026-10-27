@@ -133,6 +133,15 @@ final class VoiceRecordingStartTests: VoiceCaptureTestCase {
         XCTAssertEqual(engine.startCount, 0)
     }
 
+    func testGeneratedCaptureIDsAreUnprefixedLowercaseUUIDs() throws {
+        let captureID = VoiceRecordingController.generateCaptureID()
+
+        let parsed = try XCTUnwrap(UUID(uuidString: captureID))
+        XCTAssertEqual(captureID, parsed.uuidString.lowercased())
+        XCTAssertFalse(captureID.hasPrefix("voice-"))
+        XCTAssertNotEqual(captureID, VoiceRecordingController.generateCaptureID())
+    }
+
     func testCaptureIDsCannotNameAPath() {
         XCTAssertTrue(VoiceRecordingController.isSafeCaptureID(VoiceRecordingController.generateCaptureID()))
         XCTAssertFalse(VoiceRecordingController.isSafeCaptureID("../escape"))
