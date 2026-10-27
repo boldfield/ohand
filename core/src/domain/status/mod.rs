@@ -585,7 +585,8 @@ impl ItemStatus {
             let stored: Option<Option<String>> = tx
                 .query_row(
                     "SELECT abstention_reason FROM proposals \
-                      WHERE item_id = ? AND abstained = 1 \
+                      WHERE item_id = ?1 AND abstained = 1 \
+                        AND source_revision = (SELECT revision FROM items WHERE item_id = ?1) \
                       ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     [item_id],
                     |row| row.get(0),

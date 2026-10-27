@@ -1129,3 +1129,40 @@ fn test_abstention_reason_is_the_label_of_the_current_abstained_proposal() -> Re
     }
     Ok(())
 }
+
+#[test]
+fn test_abstention_reason_ignores_a_proposal_from_an_older_revision() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "abstention_stale");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+    let tx = db.transaction()?;
+    insert_test_item_with_status(
+        &tx,
+        "stale",
+        "text",
+        "saved_local",
+        "not_configured",
+        "abstained",
+        Some("transcribed"),
+    )?;
+    tx.commit()?;
+    insert_abstained_proposal(
+        &db,
+        "p-stale",
+        "stale",
+        "2026-01-15T10:30:00Z",
+        true,
+        Some("ambiguous"),
+        None,
+    )?;
+    let tx = db.transaction()?;
+    let current = ItemStatus::load(&tx, "stale")?.expect("item exists");
+    assert_eq!(current.abstention_reason.as_deref(), Some("ambiguous"));
+
+    // A user correction advances the item revision; the revision-0 proposal is now stale.
+    tx.execute("UPDATE items SET revision = 1 WHERE item_id = 'stale'", [])?;
+    let advanced = ItemStatus::load(&tx, "stale")?.expect("item exists");
+    assert_eq!(advanced.abstention_reason, None);
+    Ok(())
+}

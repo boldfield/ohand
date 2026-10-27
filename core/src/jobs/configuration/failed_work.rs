@@ -385,7 +385,7 @@ fn enqueue_rerun(
 /// What running one abstained note again did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbstainedRerun {
-    /// A new `interpret` job was created (or already exists and has not run yet).
+    /// A new `interpret` job was created.
     Queued,
     /// No provider is allowed for the item now, so there is nothing to pin the new job to.
     NoProviderAllowed,
