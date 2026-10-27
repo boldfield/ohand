@@ -491,7 +491,20 @@ pub struct ItemStatus {
     pub reminder_delivery_state: Option<ReminderDeliveryState>,
     pub reminder_acknowledgment_state: Option<ReminderAcknowledgmentState>,
     pub unschedulable_reason: Option<UnschedulableReason>,
+    /// Fixed machine label of the reason the item's current abstained proposal gave. `None`
+    /// unless `processing_state` is `abstained` and the proposal recorded a reason (rows stored
+    /// before the reason was kept have none). The free-text detail is never part of the status.
+    pub abstention_reason: Option<String>,
 }
+
+/// The closed set of stored abstention labels.
+const ABSTENTION_LABELS: [&str; 5] = [
+    "uncertain_target",
+    "negated",
+    "ambiguous",
+    "unsupported_operation",
+    "other",
+];
 
 impl ItemStatus {
     /// Load item status from the database.
@@ -568,6 +581,23 @@ impl ItemStatus {
             (None, None, None, None, None)
         };
 
+        let abstention_reason = if processing_state == ProcessingState::Abstained {
+            let stored: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT abstention_reason FROM proposals \
+                      WHERE item_id = ? AND abstained = 1 \
+                      ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [item_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            stored
+                .flatten()
+                .filter(|label| ABSTENTION_LABELS.contains(&label.as_str()))
+        } else {
+            None
+        };
+
         match (reminder_request_state, unschedulable_reason) {
             (Some(ReminderRequestState::Unschedulable), None) => {
                 anyhow::bail!("Unschedulable reminder for item {item_id} has no recorded reason")
@@ -594,6 +624,7 @@ impl ItemStatus {
             reminder_delivery_state,
             reminder_acknowledgment_state,
             unschedulable_reason,
+            abstention_reason,
         }))
     }
 

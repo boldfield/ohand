@@ -24,7 +24,7 @@ use crate::store::events::ItemScope;
 use crate::store::schema::Database;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -323,40 +323,152 @@ pub fn rerun_failed_interpretations_in_tx(
             skipped.push((row.item_id, RerunSkipReason::NoProviderAllowed));
             continue;
         };
-        let plan = InterpretationPlan {
-            job_id: rerun_uuid(
-                RERUN_JOB_ID_DOMAIN,
-                &row.failed_job_id,
-                &profile_version,
-                row.revision,
-            ),
-            profile_version: Some(profile_version.clone()),
-            // The queue refuses a second job with the same item, revision, profile and request
-            // version, so a rerun pinned to the failed job's own profile needs its own.
-            request_version: rerun_uuid(
-                RERUN_REQUEST_VERSION_DOMAIN,
-                &row.failed_job_id,
-                &profile_version,
-                row.revision,
-            ),
-        };
-        enqueue_planned_interpretation(tx, &row.item_id, row.revision, &plan, now)?;
-        tx.execute(
-            "INSERT INTO job_requeues (
-                new_job_id, old_job_id, from_profile_version, to_profile_version, requeued_at
-            ) VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
-                &plan.job_id,
-                &row.failed_job_id,
-                &row.pinned_profile_version,
-                &profile_version,
-                now.to_rfc3339()
-            ],
-        )
-        .context("linking the failed job to its replacement")?;
+        enqueue_rerun(
+            tx,
+            &row.item_id,
+            row.revision,
+            &row.failed_job_id,
+            row.pinned_profile_version.as_deref(),
+            &profile_version,
+            now,
+        )?;
         moved += 1;
     }
     Ok(RerunOutcome { moved, skipped })
+}
+
+/// Give `item_id` a new `interpret` job at `revision` pinned to `profile_version`, and link it to
+/// the job it replaces. Both reruns use this one path.
+fn enqueue_rerun(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    revision: i32,
+    replaced_job_id: &str,
+    replaced_profile_version: Option<&str>,
+    profile_version: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let plan = InterpretationPlan {
+        job_id: rerun_uuid(
+            RERUN_JOB_ID_DOMAIN,
+            replaced_job_id,
+            profile_version,
+            revision,
+        ),
+        profile_version: Some(profile_version.to_string()),
+        // The queue refuses a second job with the same item, revision, profile and request
+        // version, so a rerun pinned to the replaced job's own profile needs its own.
+        request_version: rerun_uuid(
+            RERUN_REQUEST_VERSION_DOMAIN,
+            replaced_job_id,
+            profile_version,
+            revision,
+        ),
+    };
+    enqueue_planned_interpretation(tx, item_id, revision, &plan, now)?;
+    tx.execute(
+        "INSERT INTO job_requeues (
+            new_job_id, old_job_id, from_profile_version, to_profile_version, requeued_at
+        ) VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &plan.job_id,
+            replaced_job_id,
+            replaced_profile_version,
+            profile_version,
+            now.to_rfc3339()
+        ],
+    )
+    .context("linking the replaced job to its replacement")?;
+    Ok(())
+}
+
+/// What running one abstained note again did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbstainedRerun {
+    /// A new `interpret` job was created (or already exists and has not run yet).
+    Queued,
+    /// No provider is allowed for the item now, so there is nothing to pin the new job to.
+    NoProviderAllowed,
+    /// The item is unknown, deleted, out of scope, or its current interpretation is not
+    /// `abstained`.
+    NotAbstained,
+}
+
+impl AbstainedRerun {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AbstainedRerun::Queued => "queued",
+            AbstainedRerun::NoProviderAllowed => "no_provider_allowed",
+            AbstainedRerun::NotAbstained => "not_abstained",
+        }
+    }
+}
+
+/// Run one abstained note again: a new `interpret` job at the item's current revision, pinned by
+/// [`resolve_profile_pin`] and linked to the completed job that produced the abstention. Abstained
+/// items are never listed by [`list_failed_interpretations`] and never part of
+/// [`RerunSelection::AllListed`]. Repeating the call before the new job runs finds the item's
+/// newest `interpret` job already replaced and answers `not_abstained`, creating nothing.
+pub fn rerun_abstained_interpretation(
+    db: &mut Database,
+    read_scopes: &[ItemScope],
+    item_id: &str,
+    now: DateTime<Utc>,
+) -> Result<AbstainedRerun> {
+    let tx = db.immediate_transaction()?;
+    let outcome = rerun_abstained_interpretation_in_tx(&tx, read_scopes, item_id, now)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// See [`rerun_abstained_interpretation`].
+pub fn rerun_abstained_interpretation_in_tx(
+    tx: &Transaction<'_>,
+    read_scopes: &[ItemScope],
+    item_id: &str,
+    now: DateTime<Utc>,
+) -> Result<AbstainedRerun> {
+    if read_scopes.is_empty() {
+        return Ok(AbstainedRerun::NotAbstained);
+    }
+    let scope_placeholders = vec!["?"; read_scopes.len()].join(", ");
+    let sql = format!(
+        "SELECT i.revision, j.job_id, j.profile_version \
+           FROM items i \
+           JOIN captures c ON c.capture_id = i.capture_id \
+           JOIN jobs j ON j.job_id = ( \
+                SELECT n.job_id FROM jobs n WHERE n.item_id = i.item_id AND n.job_type = ? \
+                ORDER BY n.created_at DESC, n.rowid DESC LIMIT 1) \
+          WHERE i.item_id = ? AND i.lifecycle_state = 'active' \
+            AND i.processing_state = 'abstained' \
+            AND COALESCE(i.current_scope, c.item_scope) IN ({scope_placeholders}) \
+            AND j.status = 'completed' \
+            AND NOT EXISTS (SELECT 1 FROM job_requeues r WHERE r.old_job_id = j.job_id)"
+    );
+    let mut parameters: Vec<String> = vec![JOB_TYPE_INTERPRET.to_string(), item_id.to_string()];
+    parameters.extend(read_scopes.iter().map(|scope| scope.as_str().to_string()));
+    let found: Option<(i32, String, Option<String>)> = tx
+        .query_row(&sql, rusqlite::params_from_iter(parameters.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .context("reading the abstained interpretation")?;
+    let Some((revision, abstained_job_id, pinned_profile_version)) = found else {
+        return Ok(AbstainedRerun::NotAbstained);
+    };
+    let Some(profile_version) = resolve_profile_pin(tx, item_id)? else {
+        return Ok(AbstainedRerun::NoProviderAllowed);
+    };
+    enqueue_rerun(
+        tx,
+        item_id,
+        revision,
+        &abstained_job_id,
+        pinned_profile_version.as_deref(),
+        &profile_version,
+        now,
+    )?;
+    Ok(AbstainedRerun::Queued)
 }
 
 /// A UUID derived from the failed job, so repeating a rerun names the same replacement.

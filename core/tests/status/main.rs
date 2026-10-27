@@ -970,3 +970,162 @@ fn test_attention_predicate_only_acknowledged_claims_attention() -> Result<()> {
 
     Ok(())
 }
+
+fn insert_abstained_proposal(
+    db: &Database,
+    proposal_id: &str,
+    item_id: &str,
+    created_at: &str,
+    abstained: bool,
+    reason: Option<&str>,
+    detail: Option<&str>,
+) -> Result<()> {
+    db.conn().execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, applied_state, abstained, created_at, abstention_reason, abstention_detail)
+         VALUES (?, ?, ?, 0, 1, 'original', ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            proposal_id,
+            item_id,
+            format!("cap-{item_id}"),
+            if abstained { "abstained" } else { "applied" },
+            i32::from(abstained),
+            created_at,
+            reason,
+            detail
+        ],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn test_abstention_reason_is_the_label_of_the_current_abstained_proposal() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "abstention_reason");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let labels = [
+        "uncertain_target",
+        "negated",
+        "ambiguous",
+        "unsupported_operation",
+        "other",
+    ];
+    let tx = db.transaction()?;
+    for label in labels {
+        insert_test_item_with_status(
+            &tx,
+            label,
+            "text",
+            "saved_local",
+            "not_configured",
+            "abstained",
+            Some("transcribed"),
+        )?;
+    }
+    insert_test_item_with_status(
+        &tx,
+        "legacy",
+        "text",
+        "saved_local",
+        "not_configured",
+        "abstained",
+        Some("transcribed"),
+    )?;
+    insert_test_item_with_status(
+        &tx,
+        "processed",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("transcribed"),
+    )?;
+    insert_test_item_with_status(
+        &tx,
+        "unprocessed",
+        "text",
+        "saved_local",
+        "not_configured",
+        "unprocessed",
+        Some("transcribed"),
+    )?;
+    insert_test_item_with_status(
+        &tx,
+        "rerun",
+        "text",
+        "saved_local",
+        "not_configured",
+        "abstained",
+        Some("transcribed"),
+    )?;
+    tx.commit()?;
+
+    for label in labels {
+        let detail = (label == "other").then_some("private model words");
+        insert_abstained_proposal(
+            &db,
+            &format!("p-{label}"),
+            label,
+            "2026-01-15T10:30:00Z",
+            true,
+            Some(label),
+            detail,
+        )?;
+    }
+    // An abstention stored before the reason was kept has none.
+    insert_abstained_proposal(
+        &db,
+        "p-legacy",
+        "legacy",
+        "2026-01-15T10:30:00Z",
+        true,
+        None,
+        None,
+    )?;
+    // A stale abstention on an item that is no longer abstained is not reported.
+    insert_abstained_proposal(
+        &db,
+        "p-processed",
+        "processed",
+        "2026-01-15T10:30:00Z",
+        true,
+        Some("negated"),
+        None,
+    )?;
+    // The newest abstained proposal is the current one.
+    insert_abstained_proposal(
+        &db,
+        "p-rerun-1",
+        "rerun",
+        "2026-01-15T10:30:00Z",
+        true,
+        Some("negated"),
+        None,
+    )?;
+    insert_abstained_proposal(
+        &db,
+        "p-rerun-2",
+        "rerun",
+        "2026-01-15T10:40:00Z",
+        true,
+        Some("ambiguous"),
+        None,
+    )?;
+
+    let tx = db.transaction()?;
+    for label in labels {
+        let status = ItemStatus::load(&tx, label)?.expect("item exists");
+        assert_eq!(status.abstention_reason.as_deref(), Some(label));
+    }
+    for (item_id, expected) in [
+        ("legacy", None),
+        ("processed", None),
+        ("unprocessed", None),
+        ("rerun", Some("ambiguous")),
+    ] {
+        let status = ItemStatus::load(&tx, item_id)?.expect("item exists");
+        assert_eq!(status.abstention_reason.as_deref(), expected, "{item_id}");
+    }
+    Ok(())
+}

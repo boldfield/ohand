@@ -535,6 +535,90 @@ final class FailedInterpretationControlsTests: XCTestCase {
     }
 }
 
+/// Running one abstained note again, and reading why it was not sorted (F54a).
+final class AbstainedInterpretationTests: XCTestCase {
+    private let boundary = FakeReadAuthenticationBoundary()
+
+    private func makeSession() -> ReadAuthenticationSession {
+        let session = ReadAuthenticationSession(boundary: boundary)
+        session.authenticate(reason: "test") { _ in }
+        XCTAssertEqual(session.scope, .authenticated)
+        return session
+    }
+
+    func testTheServiceRerunsOneAbstainedItemWithATypedOutcome() async throws {
+        let core = ScriptedJobConfigurationCore([
+            .success(.abstainedRerun(JobConfigurationAbstainedRerunResult(outcome: .queued))),
+            .success(.abstainedRerun(JobConfigurationAbstainedRerunResult(outcome: .notAbstained))),
+        ])
+        let service = JobConfigurationService(core: core, session: makeSession())
+
+        let first = try await service.rerunAbstainedInterpretation(itemID: "item-1")
+        let second = try await service.rerunAbstainedInterpretation(itemID: "item-1")
+
+        XCTAssertEqual(first, .queued)
+        XCTAssertEqual(second, .notAbstained)
+        XCTAssertEqual(
+            core.commands,
+            Array(repeating: .rerunAbstainedInterpretation(readScopes: [], itemID: "item-1"), count: 2))
+    }
+
+    func testAnEmptyItemIdentifierNeverReachesTheCore() async {
+        let core = ScriptedJobConfigurationCore([])
+        let service = JobConfigurationService(core: core, session: makeSession())
+        do {
+            _ = try await service.rerunAbstainedInterpretation(itemID: "")
+            XCTFail("expected invalidRequest")
+        } catch {
+            XCTAssertEqual(error as? JobConfigurationError, .invalidRequest)
+        }
+        XCTAssertTrue(core.commands.isEmpty)
+    }
+
+    func testEachOutcomeDecodesFromTheCoresJSON() throws {
+        let command = JobConfigurationCommand.rerunAbstainedInterpretation(readScopes: [.personal], itemID: "item-1")
+        let expected: [(String, JobConfigurationAbstainedRerunOutcome)] = [
+            ("queued", .queued), ("no_provider_allowed", .noProviderAllowed), ("not_abstained", .notAbstained),
+        ]
+        for (label, outcome) in expected {
+            let answer = try JobConfigurationAnswer.decode(
+                Data(#"{"operation_id":1,"outcome":"\#(label)"}"#.utf8), for: command)
+            XCTAssertEqual(answer, .abstainedRerun(JobConfigurationAbstainedRerunResult(outcome: outcome)))
+        }
+        XCTAssertThrowsError(
+            try JobConfigurationAnswer.decode(Data(#"{"operation_id":1,"outcome":"surprise"}"#.utf8), for: command))
+    }
+
+    func testTheScopesAreReplaceable() {
+        XCTAssertEqual(
+            JobConfigurationCommand.rerunAbstainedInterpretation(readScopes: [], itemID: "item-1")
+                .withReadScopes([.personal, .work]),
+            .rerunAbstainedInterpretation(readScopes: [.personal, .work], itemID: "item-1"))
+    }
+
+    private func statusJSON(_ extra: String) -> Data {
+        Data(
+            ("{\"operation_id\":1,\"item_id\":\"item-1\",\"save_state\":\"saved_local\",\"sync_state\":\"local_only\","
+                + "\"processing_state\":\"abstained\",\"transcription_state\":\"not_applicable\",\"processing_job_status\":null,"
+                + "\"reminder_request_state\":null,\"reminder_schedule_state\":null,\"reminder_delivery_state\":null,"
+                + "\"reminder_acknowledgment_state\":null,\"unschedulable_reason\":null" + extra + "}").utf8)
+    }
+
+    func testTheStatusReportDecodesTheAbstentionReasonAndItsAbsence() throws {
+        let labels = ["uncertain_target", "negated", "ambiguous", "unsupported_operation", "other"]
+        for label in labels {
+            let report = try JSONDecoder().decode(
+                ItemStatusReport.self, from: statusJSON(#","abstention_reason":"\#(label)""#))
+            XCTAssertEqual(report.abstentionReason, label)
+        }
+        let explicitNull = try JSONDecoder().decode(
+            ItemStatusReport.self, from: statusJSON(#","abstention_reason":null"#))
+        XCTAssertNil(explicitNull.abstentionReason)
+        let absent = try JSONDecoder().decode(ItemStatusReport.self, from: statusJSON(""))
+        XCTAssertNil(absent.abstentionReason)
+    }
+}
+
 /// The failed-work read reaches the core only through the private read gate, which supplies the session's scopes.
 final class FailedInterpretationGateTests: XCTestCase {
     private var directory: URL!

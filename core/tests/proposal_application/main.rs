@@ -810,6 +810,78 @@ fn explicit_first_abstention_is_recorded_searchable_and_unsuggested() {
     assert_eq!(fixture.eligibility(), EligibilityReason::Uninterpreted);
 }
 
+fn stored_abstention(fixture: &Fixture, proposal_id: &str) -> (Option<String>, Option<String>) {
+    fixture
+        .db
+        .conn()
+        .query_row(
+            "SELECT abstention_reason, abstention_detail FROM proposals WHERE proposal_id = ?",
+            [proposal_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+#[test]
+fn every_abstention_reason_is_stored_as_a_fixed_label_and_only_other_keeps_a_detail() {
+    let cases = [
+        (AbstentionReason::UncertainTarget, "uncertain_target", None),
+        (AbstentionReason::Negated, "negated", None),
+        (AbstentionReason::Ambiguous, "ambiguous", None),
+        (
+            AbstentionReason::UnsupportedOperation,
+            "unsupported_operation",
+            None,
+        ),
+        (
+            AbstentionReason::Other("not a task".to_string()),
+            "other",
+            Some("not a task"),
+        ),
+    ];
+    for (reason, label, detail) in cases {
+        let mut fixture = Fixture::new("maybe look into that thing");
+        let lease = fixture.claim_job(0, capture_instant());
+        let proposal = fixture
+            .proposal_for(&lease, 0)
+            .with_abstention(Some(reason));
+        fixture.apply(&lease, &proposal).unwrap();
+        assert_eq!(
+            stored_abstention(&fixture, &proposal.proposal_id),
+            (Some(label.to_string()), detail.map(str::to_string))
+        );
+    }
+}
+
+#[test]
+fn an_other_detail_is_truncated_to_200_unicode_scalars() {
+    let mut fixture = Fixture::new("maybe look into that thing");
+    let lease = fixture.claim_job(0, capture_instant());
+    let detail = "é".repeat(250);
+    let proposal = fixture
+        .proposal_for(&lease, 0)
+        .with_abstention(Some(AbstentionReason::Other(detail)));
+    fixture.apply(&lease, &proposal).unwrap();
+
+    let (label, stored) = stored_abstention(&fixture, &proposal.proposal_id);
+    assert_eq!(label.as_deref(), Some("other"));
+    assert_eq!(stored.unwrap().chars().count(), 200);
+}
+
+#[test]
+fn an_applied_proposal_stores_no_abstention_reason() {
+    let text = "call the roofer";
+    let mut fixture = Fixture::new(text);
+    let lease = fixture.claim_job(0, capture_instant());
+    let proposal = fixture.action_proposal(&lease, text, "call the roofer");
+    fixture.apply(&lease, &proposal).unwrap();
+
+    assert_eq!(
+        stored_abstention(&fixture, &proposal.proposal_id),
+        (None, None)
+    );
+}
+
 #[test]
 fn permanent_failure_first_is_uninterpreted_and_transient_failure_changes_nothing() {
     let text = "call the roofer";
