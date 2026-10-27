@@ -123,7 +123,8 @@ final class UITestFixtureTests: XCTestCase {
         XCTAssertEqual(
             reminder.reminderRequestState, "resolved",
             "status \(reminder); reminders \(launch.diagnosticScalar("SELECT COUNT(*) FROM reminders")); "
-                + "capture \(launch.diagnosticScalar("SELECT captured_at FROM captures WHERE text LIKE '%roofer%'"))")
+                + "item type \(launch.diagnosticScalar("SELECT item_type FROM items WHERE item_id = '\(reminder.itemID)'")); "
+                + "tables \(launch.diagnosticScalar("SELECT group_concat(name) FROM sqlite_master WHERE type = 'table'"))")
         let voiceStatuses = notes.filter { $0.text.contains("spoken") }.compactMap(\.settledStatus)
         XCTAssertTrue(voiceStatuses.allSatisfy { $0.transcriptionState == "transcribed" })
     }

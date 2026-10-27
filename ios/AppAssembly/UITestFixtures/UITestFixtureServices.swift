@@ -269,7 +269,7 @@ final class UITestFixtureSeeder {
         let typedNote = "Synthetic typed note about the garden hose"
         let typedIdea = "Synthetic typed idea about a herb planter"
         let typedAction = "Synthetic typed action to sweep the porch"
-        let reminderText = "Remind me \(UITestFixtureLaunch.sortedReminderPhrase) to call the roofer about the estimate"
+        let reminderText = "Remind me \(UITestFixtureLaunch.sortedReminderPhrase) to call the roofer about the quarterly estimate"
         try await saveTyped(typedNote, expecting: .processed, reply: .proposal(try Self.proposal(text: typedNote, itemType: "note")))
         try await saveTyped(typedIdea, expecting: .processed, reply: .proposal(try Self.proposal(text: typedIdea, itemType: "idea")))
         try await saveTyped(typedAction, expecting: .processed, reply: .proposal(try Self.proposal(text: typedAction, itemType: "action")))
