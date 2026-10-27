@@ -1,4 +1,5 @@
 import XCTest
+@testable import OhAndCoreBridge
 @testable import OhAndServices
 @testable import OhAnd
 
@@ -56,6 +57,73 @@ final class UITestFixtureTests: XCTestCase {
         var unlockedQuiet: ReadAuthenticationOutcome?
         UITestFixtureReadBoundary(startsUnlocked: true).authenticateQuietly(reason: "test") { unlockedQuiet = $0 }
         XCTAssertEqual(unlockedQuiet, .succeeded)
+    }
+
+    // MARK: each fixture reaches the state it is named for
+
+    /// Builds a fixture the way the app does, fills it, and returns what the core reported for each note.
+    @MainActor
+    private func seededFixture(_ name: String) async throws -> (launch: UITestFixtureLaunch, notes: [UITestFixtureSeededNote]) {
+        let launch = UITestFixtureLaunch(name: name)
+        let services = try launch.makeServices()
+        services.start(isActive: true)
+        defer { services.shutDown() }
+        let seeder = try await launch.seedAndWait()
+        return (launch, seeder.notes)
+    }
+
+    @MainActor
+    func testFailedSortingEndsUninterpretedWithARejectedJobNotAConfigurationWait() async throws {
+        let (_, notes) = try await seededFixture("failed-sorting")
+        let note = try XCTUnwrap(notes.first)
+        let status = try XCTUnwrap(note.settledStatus)
+        XCTAssertEqual(note.expectation, .rejected)
+        XCTAssertEqual(status.processingState, "uninterpreted", "a rejection is permanent; an unauthorized one would wait as unprocessed")
+    }
+
+    @MainActor
+    func testOfflineLeavesTheNotesWaitingWithoutAFailure() async throws {
+        let (_, notes) = try await seededFixture("offline")
+        XCTAssertEqual(notes.count, 2)
+        for note in notes {
+            XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "unprocessed")
+        }
+    }
+
+    @MainActor
+    func testNeedsCorrectionHoldsAReminderThatIsNotScheduled() async throws {
+        let (launch, notes) = try await seededFixture("needs-correction")
+        let status = try XCTUnwrap(try XCTUnwrap(notes.first).settledStatus)
+        XCTAssertEqual(status.processingState, "processed")
+        XCTAssertEqual(status.reminderRequestState, "not_scheduled_yet")
+        XCTAssertNotEqual(status.reminderScheduleState, "scheduled")
+        XCTAssertEqual(launch.notificationCenter?.pendingDueInstants.count, 0)
+    }
+
+    @MainActor
+    func testPopulatedHoldsTypedAndSpokenNotesOfEachTypeAndOneResolvedReminder() async throws {
+        let (_, notes) = try await seededFixture("populated")
+        XCTAssertEqual(notes.count, 7)
+        XCTAssertEqual(notes.filter { $0.text.contains("typed") }.count, 3)
+        XCTAssertEqual(notes.filter { $0.text.contains("spoken") }.count, 3)
+        for note in notes {
+            XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "processed", note.text)
+        }
+        let reminder = try XCTUnwrap(notes.first { $0.text.contains("call the roofer") }?.settledStatus)
+        XCTAssertEqual(reminder.reminderRequestState, "resolved")
+        let voiceStatuses = notes.filter { $0.text.contains("spoken") }.compactMap(\.settledStatus)
+        XCTAssertTrue(voiceStatuses.allSatisfy { $0.transcriptionState == "transcribed" })
+    }
+
+    @MainActor
+    func testLockedSeedsTheStoreAndEmptyFirstRunLeavesPermissionUnasked() async throws {
+        let (_, lockedNotes) = try await seededFixture("locked")
+        XCTAssertEqual(lockedNotes.count, 7)
+        XCTAssertTrue(lockedNotes.allSatisfy { $0.settledStatus != nil })
+
+        let (emptyLaunch, emptyNotes) = try await seededFixture("empty-first-run")
+        XCTAssertTrue(emptyNotes.isEmpty)
+        XCTAssertEqual(emptyLaunch.notificationCenter?.chosenPermission, .notDetermined)
     }
 
     // MARK: release builds have no path

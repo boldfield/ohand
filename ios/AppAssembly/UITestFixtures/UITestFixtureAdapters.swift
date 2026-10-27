@@ -6,7 +6,8 @@ import OhAndServices
 enum UITestFixtureProviderReply {
     /// A finished interpretation (a provider message body).
     case proposal(Data)
-    /// The provider refuses the request: the job ends for want of authorization.
+    /// The provider refuses the request outright. It reaches the core as a permanent `rejected` failure, so the note ends
+    /// uninterpreted rather than waiting for a credential or the network.
     case rejected
     /// The provider cannot be reached: the job waits for a later attempt.
     case unreachable
@@ -33,7 +34,7 @@ final class UITestFixtureSender: ProviderRequestSender, @unchecked Sendable {
         case .proposal(let body):
             return ProviderHTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: body)
         case .rejected:
-            throw ProviderTransportError.credentialUnavailable
+            throw ProviderTransportError.invalidRequest(.invalidLimits)
         case .unreachable:
             throw ProviderTransportError.connectionFailed
         }
@@ -74,6 +75,16 @@ final class UITestFixtureNotificationCenter: NotificationCenterProviding, @unche
 
     func authorization() async -> NotificationAuthorization {
         permission
+    }
+
+    /// The permission state the fixture chose, for tests of the fixture itself.
+    var chosenPermission: NotificationAuthorization { permission }
+
+    /// The due instants of the requests added so far.
+    var pendingDueInstants: [Date] {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending.values.map(\.dueInstant)
     }
 
     func add(_ request: NotificationCenterRequest) async throws {

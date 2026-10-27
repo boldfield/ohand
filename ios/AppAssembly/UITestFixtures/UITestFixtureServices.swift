@@ -21,6 +21,8 @@ final class UITestFixtureLaunch {
 
     private let name: String
     private var pendingSeed: (fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer)?
+    /// The fake notification center of this launch, for tests of the fixture itself.
+    private(set) var notificationCenter: UITestFixtureNotificationCenter?
 
     init(name: String) {
         self.name = name
@@ -35,12 +37,14 @@ final class UITestFixtureLaunch {
         let sender = UITestFixtureSender()
         let recognizer = UITestFixtureRecognizer()
         let permission: NotificationAuthorization = fixture == .emptyFirstRun ? .notDetermined : .authorized
+        let notificationCenter = UITestFixtureNotificationCenter(permission: permission)
+        self.notificationCenter = notificationCenter
         let lifecycle = LifecycleCoordinator()
         let retrieval = RetrievalSearchModule()
         let root = try ServiceCompositionRoot(
             uiTestFixture: AppConfiguration.uiTestFixture(storageRoot: storageRoot),
             sender: sender,
-            notificationCenter: UITestFixtureNotificationCenter(permission: permission),
+            notificationCenter: notificationCenter,
             reachability: UITestFixtureReachability(isReachable: fixture != .offline),
             recognizer: recognizer,
             readsStartUnlocked: fixture != .locked,
@@ -55,21 +59,69 @@ final class UITestFixtureLaunch {
     }
 
     /// Fills the store once the services have started. It runs on the main actor after launch returns, so the first
-    /// screen can appear before the fixture is complete; a test waits for the content it checks.
+    /// screen can appear before the fixture is complete. The status marker (`ui-fixture.status`) reads `seeding` until
+    /// the store is filled and every note has settled, then `ready`; a seeding failure reads `failed: <reason>`.
     func seedInBackground() {
-        guard let pendingSeed else { return }
-        let fixtureName = name
         Task { @MainActor in
-            let seeder = UITestFixtureSeeder(
-                fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
-                recognizer: pendingSeed.recognizer)
+            let marker = UITestFixtureStatusMarker()
+            marker.show("seeding")
             do {
-                try await seeder.seed()
+                _ = try await seedAndWait()
+                marker.show("ready")
             } catch {
-                NSLog("UITestFixture \(fixtureName) seeding failed: \(error)")
+                NSLog("UITestFixture \(name) seeding failed: \(error)")
+                marker.show("failed: \(error)")
             }
         }
     }
+
+    /// Fills the store and returns once every seeded note has reached the state the fixture names.
+    @MainActor
+    func seedAndWait() async throws -> UITestFixtureSeeder {
+        guard let pendingSeed else { throw UITestFixtureError.seedingFailed("services were not made") }
+        let seeder = UITestFixtureSeeder(
+            fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
+            recognizer: pendingSeed.recognizer)
+        try await seeder.seed()
+        return seeder
+    }
+}
+
+/// The state a seeded note is expected to reach before the fixture is ready.
+enum UITestFixtureExpectation {
+    /// Interpreted by the scripted provider.
+    case processed
+    /// Interpreted, with a reminder request whose time is not resolved (needs correction).
+    case needsCorrection
+    /// The provider rejected the request: a permanent failure, the note stays uninterpreted.
+    case rejected
+    /// Waiting for a later attempt: not interpreted and not failed.
+    case waiting
+
+    func isReached(by report: ItemStatusReport) -> Bool {
+        switch self {
+        case .processed:
+            return report.processingState == "processed" && Self.hasTranscript(report)
+        case .needsCorrection:
+            return report.processingState == "processed" && report.reminderRequestState == "not_scheduled_yet"
+        case .rejected:
+            return report.processingState == "uninterpreted"
+        case .waiting:
+            return report.processingState == "unprocessed"
+        }
+    }
+
+    private static func hasTranscript(_ report: ItemStatusReport) -> Bool {
+        report.transcriptionState == "not_applicable" || report.transcriptionState == "transcribed"
+    }
+}
+
+/// One note a fixture saved, with the status the core reported once it settled.
+struct UITestFixtureSeededNote {
+    let text: String
+    let itemID: String
+    let expectation: UITestFixtureExpectation
+    var settledStatus: ItemStatusReport?
 }
 
 /// Fills the store of one fixture through the root's own operations.
@@ -80,6 +132,8 @@ final class UITestFixtureSeeder {
     private let sender: UITestFixtureSender
     private let recognizer: UITestFixtureRecognizer
     private var root: ServiceCompositionRoot { services.root }
+    /// The notes saved so far, in order, with the status each had when the fixture was ready.
+    private(set) var notes: [UITestFixtureSeededNote] = []
 
     init(
         fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer
@@ -109,20 +163,50 @@ final class UITestFixtureSeeder {
         case .needsCorrection:
             try await configureProvider()
             try await saveTyped(
-                "Remind me soon to call the plumber about the leaking tap",
+                "Remind me soon to call the plumber about the leaking tap", expecting: .needsCorrection,
                 reply: .proposal(
                     try Self.proposal(
                         text: "Remind me soon to call the plumber about the leaking tap", itemType: "action",
                         reminder: .ambiguous(phrase: "soon"))))
         case .failedSorting:
             try await configureProvider()
-            try await saveTyped("Compare the synthetic rejected quotes for the shed roof", reply: .rejected)
+            try await saveTyped("Compare the synthetic rejected quotes for the shed roof", expecting: .rejected, reply: .rejected)
         case .offline:
             try await configureProvider()
-            try await saveTyped("Synthetic waiting note about the garden gate", reply: .unreachable)
-            try await saveTyped("Synthetic waiting idea about a compost bin", reply: .unreachable)
+            try await saveTyped("Synthetic waiting note about the garden gate", expecting: .waiting, reply: .unreachable)
+            try await saveTyped("Synthetic waiting idea about a compost bin", expecting: .waiting, reply: .unreachable)
         }
+        try await settleNotes()
         services.homeRecents.loadFirstPage()
+    }
+
+    // MARK: Settling
+
+    /// Waits until every saved note shows the state its fixture names, reading the status the way the app does. The
+    /// locked fixture is still unlocked here, so the reads are allowed.
+    private func settleNotes() async throws {
+        let deadline = Date().addingTimeInterval(120)
+        for index in notes.indices {
+            let note = notes[index]
+            var lastReport: ItemStatusReport?
+            while true {
+                let result = await withCheckedContinuation { continuation in
+                    root.itemStatus(itemID: note.itemID) { continuation.resume(returning: $0) }
+                }
+                if case .success(let report) = result {
+                    lastReport = report
+                    if note.expectation.isReached(by: report) {
+                        notes[index].settledStatus = report
+                        break
+                    }
+                }
+                guard Date() < deadline else {
+                    throw UITestFixtureError.seedingFailed(
+                        "'\(note.text)' did not settle; processing \(lastReport?.processingState ?? "unread"), reminder \(lastReport?.reminderRequestState ?? "none")")
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
     }
 
     // MARK: Fixture content
@@ -132,11 +216,11 @@ final class UITestFixtureSeeder {
         let typedIdea = "Synthetic typed idea about a herb planter"
         let typedAction = "Synthetic typed action to sweep the porch"
         let reminderText = "Remind me \(UITestFixtureLaunch.sortedReminderPhrase) to call the roofer about the estimate"
-        try await saveTyped(typedNote, reply: .proposal(try Self.proposal(text: typedNote, itemType: "note")))
-        try await saveTyped(typedIdea, reply: .proposal(try Self.proposal(text: typedIdea, itemType: "idea")))
-        try await saveTyped(typedAction, reply: .proposal(try Self.proposal(text: typedAction, itemType: "action")))
+        try await saveTyped(typedNote, expecting: .processed, reply: .proposal(try Self.proposal(text: typedNote, itemType: "note")))
+        try await saveTyped(typedIdea, expecting: .processed, reply: .proposal(try Self.proposal(text: typedIdea, itemType: "idea")))
+        try await saveTyped(typedAction, expecting: .processed, reply: .proposal(try Self.proposal(text: typedAction, itemType: "action")))
         try await saveTyped(
-            reminderText,
+            reminderText, expecting: .processed,
             reply: .proposal(
                 try Self.proposal(
                     text: reminderText, itemType: "action",
@@ -148,7 +232,7 @@ final class UITestFixtureSeeder {
         ]
         for (itemType, transcript) in spokenTexts {
             try await saveVoice(
-                transcript: transcript, reply: .proposal(try Self.proposal(text: transcript, itemType: itemType)))
+                transcript: transcript, expecting: .processed, reply: .proposal(try Self.proposal(text: transcript, itemType: itemType)))
         }
     }
 
@@ -169,19 +253,22 @@ final class UITestFixtureSeeder {
             profileVersion: created.profileVersion)
     }
 
-    private func saveTyped(_ text: String, reply: UITestFixtureProviderReply) async throws {
+    private func saveTyped(_ text: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
         sender.script(phrase: text, reply: reply)
         let outcome = await withCheckedContinuation { continuation in
             root.saveText(captureID: "fixture-\(UUID().uuidString.lowercased())", text: text, capturedAt: Date()) {
                 continuation.resume(returning: $0)
             }
         }
-        guard case .saved = outcome else { throw UITestFixtureError.seedingFailed("typed capture not saved: \(outcome)") }
+        guard case .saved(_, let itemID, _) = outcome else {
+            throw UITestFixtureError.seedingFailed("typed capture not saved: \(outcome)")
+        }
+        notes.append(UITestFixtureSeededNote(text: text, itemID: itemID, expectation: expectation))
     }
 
     /// Records a short synthetic clip and hands it off as a finished recording; the scripted recognizer attaches
     /// `transcript`, which the scripted provider then interprets.
-    private func saveVoice(transcript: String, reply: UITestFixtureProviderReply) async throws {
+    private func saveVoice(transcript: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
         let captureID = "fixture-\(UUID().uuidString.lowercased())"
         let fileName = "\(captureID).wav"
         try Self.writeSyntheticClip(to: root.inProgressAudioDirectory.appendingPathComponent(fileName))
@@ -192,7 +279,10 @@ final class UITestFixtureSeeder {
         let outcome = await withCheckedContinuation { continuation in
             root.saveRecording(handoff) { continuation.resume(returning: $0) }
         }
-        guard case .saved = outcome else { throw UITestFixtureError.seedingFailed("recording not saved: \(outcome)") }
+        guard case .saved(_, let itemID, _) = outcome else {
+            throw UITestFixtureError.seedingFailed("recording not saved: \(outcome)")
+        }
+        notes.append(UITestFixtureSeededNote(text: transcript, itemID: itemID, expectation: expectation))
     }
 
     // MARK: Synthetic content

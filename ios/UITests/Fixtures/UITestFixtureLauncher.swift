@@ -23,6 +23,27 @@ extension XCUIApplication {
         return element(identifier: "home.composer.field").waitForExistence(timeout: timeout)
     }
 
+    /// Waits until the fixture is fully seeded: the app's `ui-fixture.status` marker reads `ready`. Fails with the marker's
+    /// text (`failed: <reason>`) when seeding broke, so a half-filled store never reaches the test body.
+    @discardableResult
+    func waitForFixtureReady(timeout: TimeInterval = 150) -> Bool {
+        let marker = element(identifier: "ui-fixture.status")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if marker.exists {
+                let status = marker.label
+                if status == "ready" { return true }
+                if status.hasPrefix("failed") {
+                    XCTFail("The fixture did not seed: \(status)")
+                    return false
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTFail("The fixture was not ready within \(timeout) seconds (status: \(marker.exists ? marker.label : "no marker"))")
+        return false
+    }
+
     /// Any element carrying an accessibility identifier.
     func element(identifier: String) -> XCUIElement {
         descendants(matching: .any).matching(identifier: identifier).firstMatch
