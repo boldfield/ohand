@@ -4311,3 +4311,40 @@ Ownership amendment (2026-10-25): F52 also owns `tools/evaluation/tests/evaluati
 
 Item 1 removes the zone from `timezone-conflicting`'s oracle, so the old test cannot pass unchanged. That does not weaken it: the scorer's zone-claim logic stays covered, on a fixture that still has a zone. No other edit to that file and no scorer source change is allowed. PR #367 (head 757c397) may continue under this amendment.
 
+### F53
+
+Two Control Center buttons: one that starts recording as soon as the app opens, and one that opens typing
+
+The maintainer asked on 2026-10-27 that the Control Center shortcut open straight into recording. Today it cannot. The only control (`OhAndCaptureControl`, `ios/Capture/Entry/Control/CaptureControlBundle.swift`) sends `OpenCaptureIntent(target: .capture)`, which means "the default mode", and that default is hard-coded to typing (`ios/AppAssembly/AppServices.swift:116`, `{ .silent }`). Even an explicit voice request (Shortcuts with Destination "Voice capture", or `ohand-capture://capture?mode=voice`) only shows the voice surface; recording waits for a tap on the mic (`ios/Capture/Voice/VoiceRecordingController.swift:118`).
+
+Tapping a Control Center button labelled "Voice" is itself the explicit user action, so starting the recording on it keeps DESIGN.md's rule that there is no always-listening behaviour. A plain app launch, a notification, or any other path still never records on its own.
+
+Owned paths: `ios/Capture/Entry/` (including `Control/` and `Shared/`), `ios/Capture/Voice/` (only to expose the existing microphone permission state to the entry model, `VoiceCaptureEngine.swift:31-50`), `ios/Tests/CaptureEntry/`, and additive tests in `ios/Tests/VoiceCapture/`. Do not edit `ios/AppAssembly/` (F44 owns its `StatusModel` call site); the session and model already carry what is needed. If a seam is missing, block and name it.
+
+Dependencies: none (F47 has merged).
+
+Acceptance:
+
+1. **Two controls.** The control bundle offers:
+   - **"Oh And Voice"** (`mic` symbol), sending `OpenCaptureIntent(target: .voice)`. It **keeps the existing kind** `com.boldfield.ohand.app.capture-control.entry`, so a control the maintainer already placed becomes the voice control without being re-added.
+   - **"Oh And Note"** (a text symbol such as `square.and.pencil`), with a new kind `com.boldfield.ohand.app.capture-control.note`, sending `OpenCaptureIntent(target: .silent)`.
+
+   Each button's own label names its mode, so the accessibility label differs too. `ios/scripts/check_project_config.py` keeps passing.
+2. **Recording starts on an explicit voice request only.** A presentation made from a request whose requested mode is explicitly `.voice` (the control, the intent from Shortcuts or the Action button, or the shortcut URL with `mode=voice`) starts recording once, as if the mic had been tapped, when all of these hold:
+   - the capture surface is idle: nothing is being typed, recorded or saved. Otherwise the existing rule applies: the presentation changes nothing, and no input is lost;
+   - microphone permission is already granted. When it is undetermined or denied, the voice surface is shown and nothing starts. The existing mic tap then asks or explains as it does today. Auto-start never triggers the system permission prompt;
+   - the presentation came from a trigger in this foreground entry. A presentation is consumed once (`CaptureEntrySession.presentPending`), so returning to the app later, rotating, or redrawing the view never starts a second recording.
+
+   A request with no mode, or `.silent`, behaves exactly as today.
+3. **Honest state.** While recording, the existing recording state, Stop and Discard are shown, as after a tap. VoiceOver announces that recording started. A start failure (for example, the engine is unavailable) shows the existing start-failure notice and leaves the surface usable. Trigger-to-ready latency is measured as it is now, and the recording start is not counted as input.
+4. **Tests.** Unit tests in `ios/Tests/CaptureEntry/` drive the session and model with the fake recorder:
+   - the voice control's intent `perform()` registers a `.voice` request (the existing way controls are tested, `docs/validation/capture-entry.md`);
+   - an explicit voice request with permission granted starts exactly one recording;
+   - each of these starts none: permission undetermined, permission denied, typing in progress, recording in progress, saving in progress, a request without a mode, a `.silent` request, and a second foreground entry with nothing pending;
+   - a start failure shows the notice.
+
+   Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run. Keep fixtures synthetic.
+
+Device check (recorded by the maintainer or T05 after merge, not by this task): with the voice control, on cold and warm launch, unlocked and locked, record whether recording is under way when the app appears, and whether iOS asks for Face ID before opening. `simctl` cannot press a control, so only a device shows this.

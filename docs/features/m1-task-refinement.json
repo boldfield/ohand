@@ -4172,6 +4172,31 @@
         "core/src/interpretation/apply/mod.rs:972",
         "fixtures/intent/contrastive-fixtures.json"
       ]
+    },
+    {
+      "key": "F53",
+      "parent": null,
+      "title": "Two Control Center buttons: one that starts recording as soon as the app opens, and one that opens typing",
+      "file_scope": [
+        "ios/Capture/Entry/",
+        "ios/Capture/Voice/ (microphone permission state exposure only)",
+        "ios/Tests/CaptureEntry/",
+        "ios/Tests/VoiceCapture/ (additive)"
+      ],
+      "intent": "The Control Center voice button opens the app already recording, on that explicit tap only, with microphone permission already granted and nothing in progress; a second button opens typing.",
+      "acceptance": [
+        "See the F53 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Capture/Entry/Control/CaptureControlBundle.swift",
+        "ios/Capture/Entry/Shared/OpenCaptureIntent.swift",
+        "ios/Capture/Entry/CaptureEntrySession.swift",
+        "ios/Capture/Entry/CaptureEntryModel.swift:139",
+        "ios/Capture/Voice/VoiceCaptureEngine.swift:31",
+        "ios/AppAssembly/AppServices.swift:116"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4964,7 +4989,8 @@
     "F43": [],
     "F44": [
       "F43",
-      "F47"
+      "F47",
+      "F45"
     ],
     "F45": [
       "F37",
@@ -4991,7 +5017,8 @@
     ],
     "E02b": [],
     "F51": [],
-    "F52": []
+    "F52": [],
+    "F53": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5245,6 +5272,10 @@
     {
       "date": "2026-10-25",
       "change": "F52 owns tools/evaluation/tests/evaluation.rs for re-pointing the zone-claim test only. F47 amendment 4: Intel hosts are CPU-bound (0 swapouts); measure host-service shutdown, diagnosticd reduction and an arm64 comparison per job."
+    },
+    {
+      "date": "2026-10-27",
+      "change": "F44 amendment 1: owns the StatusModel call site in AppServices.swift, and the walkthrough uses F45's failed-sorting fixture; depends on F45. F53 added: a Control Center voice button that starts recording on the explicit tap, and a typing button."
     }
   ]
 }
