@@ -24,7 +24,6 @@ final class WalkthroughUITests: XCTestCase {
         ("Unfinished recordings", "Unfinished recordings"),
         ("Processing", "Processing"),
         ("Privacy", "Privacy"),
-        ("Status", "Status"),
         ("Audio", "Audio"),
         ("Export", "Export"),
     ]
@@ -47,6 +46,33 @@ final class WalkthroughUITests: XCTestCase {
         let widthName = UIDevice.current.userInterfaceIdiom == .pad ? "regular" : "compact"
         app.launch()
         try walk(prefix: "\(widthName)-\(appearanceName)")
+    }
+
+    /// Status with one failed note, opened through F45's `failed-sorting` fixture (unlocked, one rejected note). The row
+    /// assertion is what makes the picture evidence: a Status screen without the failed note would fail here.
+    func testStatusWithOneFailedNote() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let appearanceName = try XCTUnwrap(
+            environment["WALKTHROUGH_APPEARANCE"], "WALKTHROUGH_APPEARANCE (light or dark) is not set")
+        XCTAssertTrue(["light", "dark"].contains(appearanceName), "unknown appearance \(appearanceName)")
+        expectsDark = appearanceName == "dark"
+        let widthName = UIDevice.current.userInterfaceIdiom == .pad ? "regular" : "compact"
+        XCTAssertTrue(app.launch(fixture: .failedSorting), "the failed-sorting fixture did not reach home")
+        XCTAssertTrue(app.waitForFixtureReady(), "the failed-sorting fixture did not finish seeding")
+        dismissKeyboard()
+        openFromHome(homeSettings, name: "Settings", shows: settingsHeader)
+        let row = app.buttons.matching(
+            NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Status", "Status, ")
+        ).firstMatch
+        XCTAssertTrue(appears(row, timeout: screenTimeout), "settings row Status not found")
+        tapWhenHittable(row, step: "settings row Status", elementName: "the Status row")
+        let failedNote = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).firstMatch
+        XCTAssertTrue(appears(failedNote, timeout: screenTimeout), "Status shows no failed note")
+        let failedNoteRows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).count
+        XCTAssertEqual(failedNoteRows, 1, "Status shows exactly one failed note")
+        capture("\(widthName)-\(appearanceName)", "status failed note")
     }
 
     /// True when the driving script put the simulator in dark appearance. The screenshots are checked against it, so a

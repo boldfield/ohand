@@ -152,6 +152,13 @@ final class AppServices {
                 permissions: PermissionsOverview(
                     reader: permissionStatus.reader, memory: permissionStatus.statusMemory),
                 retrier: root.jobRunner, scheduling: RootReminderSchedulingReader(root: root),
+                failedWork: root.jobConfiguration,
+                noteText: ItemDetailFirstLineReader(reader: root.itemDetails),
+                requestUnlock: { [weak root, weak captureEntry] in
+                    root?.authenticateReads(reason: "Show the notes that failed to sort.") { _ in
+                        captureEntry?.refreshAccess()
+                    }
+                },
                 openSystemSettings: Self.openSystemSettings))
         let homeRecents = HomeRecentsModel(
             source: RootHomeRecentsSource(
