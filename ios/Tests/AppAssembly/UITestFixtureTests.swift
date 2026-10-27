@@ -112,7 +112,7 @@ final class UITestFixtureTests: XCTestCase {
     }
 
     func testPopulatedHoldsTypedAndSpokenNotesOfEachTypeAndOneResolvedReminder() throws {
-        let (_, notes) = try seededFixture("populated")
+        let (launch, notes) = try seededFixture("populated")
         XCTAssertEqual(notes.count, 7)
         XCTAssertEqual(notes.filter { $0.text.contains("typed") }.count, 3)
         XCTAssertEqual(notes.filter { $0.text.contains("spoken") }.count, 3)
@@ -120,7 +120,10 @@ final class UITestFixtureTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "processed", note.text)
         }
         let reminder = try XCTUnwrap(notes.first { $0.text.contains("call the roofer") }?.settledStatus)
-        XCTAssertEqual(reminder.reminderRequestState, "resolved")
+        XCTAssertEqual(
+            reminder.reminderRequestState, "resolved",
+            "status \(reminder); reminders \(launch.diagnosticScalar("SELECT COUNT(*) FROM reminders")); "
+                + "capture \(launch.diagnosticScalar("SELECT captured_at FROM captures WHERE text LIKE '%roofer%'"))")
         let voiceStatuses = notes.filter { $0.text.contains("spoken") }.compactMap(\.settledStatus)
         XCTAssertTrue(voiceStatuses.allSatisfy { $0.transcriptionState == "transcribed" })
     }

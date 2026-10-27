@@ -63,6 +63,22 @@ final class UITestFixtureLaunch {
         return services
     }
 
+    /// One value read straight from the store file, for the message of a failing fixture test.
+    func diagnosticScalar(_ sql: String) -> String {
+        guard let storageRoot,
+            let file = FileManager.default.enumerator(at: storageRoot, includingPropertiesForKeys: nil)?
+                .compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent == "core.sqlite" })
+        else { return "no store file" }
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(file.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return "unreadable" }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return "bad query" }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "no row" }
+        return String(cString: text)
+    }
+
     /// Fills the store once the services have started. It runs on the main actor after launch returns, so the first
     /// screen can appear before the fixture is complete. The status marker (`ui-fixture.status`) reads `seeding` until
     /// the store is filled and every note has settled, then `ready`; a seeding failure reads `failed: <reason>`.
@@ -153,14 +169,9 @@ final class UITestFixtureSeeder {
     }
 
     func seed() async throws {
-        // Provider setup is a private operation, so the locked fixture is unlocked while it is filled and locked again
-        // before the test sees it.
-        if fixture == .locked {
-            let outcome = await withCheckedContinuation { continuation in
-                root.authenticateReads(reason: "Prepare the locked fixture") { continuation.resume(returning: $0) }
-            }
-            guard outcome == .authenticated else { throw UITestFixtureError.seedingFailed("unlock: \(outcome)") }
-        }
+        // Provider setup and the status reads are private operations, so every fixture is unlocked while it is filled,
+        // and the locked one is locked again before the test sees it.
+        try await unlockForSeeding()
         defer { if fixture == .locked { root.relockReads() } }
         switch fixture {
         case .emptyFirstRun:
@@ -188,6 +199,16 @@ final class UITestFixtureSeeder {
         services.homeRecents.loadFirstPage()
     }
 
+    /// Authenticates the read session unless it already is. The scene's own foreground event can relock the session
+    /// while the fixture is still filling, so this runs before every private step that can wait.
+    private func unlockForSeeding() async throws {
+        guard root.readScope != .authenticated else { return }
+        let outcome = await withCheckedContinuation { continuation in
+            root.authenticateReads(reason: "Prepare the fixture") { continuation.resume(returning: $0) }
+        }
+        guard outcome == .authenticated else { throw UITestFixtureError.seedingFailed("unlock: \(outcome)") }
+    }
+
     // MARK: Settling
 
     /// Waits until every saved note shows the state its fixture names, reading the status the way the app does. The
@@ -198,6 +219,7 @@ final class UITestFixtureSeeder {
             let note = notes[index]
             var lastReport: ItemStatusReport?
             while true {
+                try await unlockForSeeding()
                 let result = await withCheckedContinuation { continuation in
                     root.itemStatus(itemID: note.itemID) { continuation.resume(returning: $0) }
                 }
@@ -273,6 +295,7 @@ final class UITestFixtureSeeder {
     /// Stores a synthetic key, creates a text-interpretation profile, makes it the default and grants it to the capture
     /// route, the way provider settings do.
     private func configureProvider() async throws {
+        try await unlockForSeeding()
         let reference = try root.providerCredentials.addCredential(Data("synthetic-fixture-key".utf8))
         let configuration = root.providerConfiguration
         let created = try await configuration.createProfile(
