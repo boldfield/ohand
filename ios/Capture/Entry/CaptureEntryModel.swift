@@ -15,12 +15,6 @@ protocol VoiceRecordingControlling: AnyObject {
     var microphonePermission: MicrophonePermissionStatus { get }
 }
 
-extension VoiceRecordingControlling {
-    /// Conformers that wrap the system recorder (the app's fan-out) report the system's answer, which is the one the
-    /// recorder itself consults in the app.
-    var microphonePermission: MicrophonePermissionStatus { SystemMicrophonePermission().status }
-}
-
 extension VoiceRecordingController: VoiceRecordingControlling {}
 
 /// Lets the model see each text outcome (it needs the saved item's ID) while the text model still receives it
@@ -66,6 +60,9 @@ final class CaptureEntryModel: ObservableObject {
     @Published private(set) var recorderState: VoiceRecorderState = .idle
     @Published private(set) var voiceNotice: String?
     @Published private(set) var access: CaptureEntryAccess
+    /// True from the moment a recording starts until the view has spoken the start. It is model state, not a view
+    /// change, because a cold-launch entry starts recording before the first render.
+    @Published private(set) var recordingStartAnnouncementPending = false
 
     let textModel: TextCaptureModel
 
@@ -231,6 +228,13 @@ final class CaptureEntryModel: ObservableObject {
 
     // MARK: Voice capture
 
+    /// Hands the pending "recording started" announcement to the view, once. The view calls it on appear and on change.
+    func consumeRecordingStartAnnouncement() -> Bool {
+        guard recordingStartAnnouncementPending else { return false }
+        recordingStartAnnouncementPending = false
+        return true
+    }
+
     func startRecording() {
         guard recorderState == .idle, !textModel.isSaving else { return }
         voiceNotice = nil
@@ -258,6 +262,8 @@ final class CaptureEntryModel: ObservableObject {
 
     private func recorderStateChanged(to state: VoiceRecorderState) {
         if case .finishing = state { voiceInputEndedAt = voiceInputEndedAt ?? uptimeNanoseconds() }
+        if case .recording = state, !isRecording { recordingStartAnnouncementPending = true }
+        if case .idle = state { recordingStartAnnouncementPending = false }
         recorderState = state
     }
 

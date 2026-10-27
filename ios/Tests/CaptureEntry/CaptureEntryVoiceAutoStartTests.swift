@@ -131,4 +131,46 @@ final class CaptureEntryVoiceAutoStartTests: XCTestCase {
         XCTAssertEqual(model.voiceNotice, CaptureEntryModel.startFailureMessage(.recorderUnavailable))
         XCTAssertTrue(model.isIdle)
     }
+
+    func testAnAutoStartedRecordingKeepsItsAnnouncementPendingUntilTheViewAsksOnce() {
+        // The cold-launch order: recording starts before any view exists to observe a change.
+        presentRequest(.voice)
+
+        XCTAssertTrue(model.recordingStartAnnouncementPending)
+        XCTAssertTrue(model.consumeRecordingStartAnnouncement())
+        XCTAssertFalse(model.consumeRecordingStartAnnouncement())
+    }
+
+    func testNoAnnouncementIsPendingWhenNothingStarted() {
+        voice.microphonePermission = .denied
+        presentRequest(.voice)
+
+        XCTAssertFalse(model.recordingStartAnnouncementPending)
+        XCTAssertFalse(model.consumeRecordingStartAnnouncement())
+    }
+
+    func testAMicTapStartAlsoRaisesTheAnnouncement() {
+        model.startRecording()
+
+        XCTAssertTrue(model.consumeRecordingStartAnnouncement())
+    }
+
+    func testTheAssembledVoiceServicesReportTheInjectedPermission() throws {
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-start-permission-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+        let lifecycle = LifecycleCoordinator()
+        let root = try ServiceCompositionRoot(
+            configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
+        defer { root.shutDown() }
+        let permission = FakeMicrophonePermission(status: .denied)
+        let voice = VoiceCaptureServices(
+            root: root, engine: SyntheticVoiceEngine(), permission: permission,
+            notificationCenter: NotificationCenter())
+
+        XCTAssertEqual(voice.recorder.microphonePermission, .denied)
+        permission.status = .granted
+        XCTAssertEqual(voice.recorder.microphonePermission, .granted)
+    }
 }

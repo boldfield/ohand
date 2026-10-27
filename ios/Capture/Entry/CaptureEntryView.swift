@@ -46,6 +46,7 @@ struct CaptureEntryView: View {
                 model.refreshProgress()
                 focusComposerIfSilent()
                 reportReady()
+                announceRecordingStartIfPending()
             }
             .onPreferenceChange(HomeLayoutKey.self) { frames in layoutReporter?(frames) }
             .onChange(of: model.presentation) { _ in reportReady() }
@@ -53,11 +54,7 @@ struct CaptureEntryView: View {
                 if phase == .active { model.refreshProgress() }
             }
             .onChange(of: model.mode) { _ in focusComposerIfSilent() }
-            .onChange(of: model.isRecording) { isRecording in
-                if isRecording {
-                    UIAccessibility.post(notification: .announcement, argument: "Recording started.")
-                }
-            }
+            .onChange(of: model.recordingStartAnnouncementPending) { _ in announceRecordingStartIfPending() }
             .onReceive(model.$acknowledgment) { acknowledgment in
                 updateSavedPill(for: acknowledgment?.save)
                 guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
@@ -74,6 +71,12 @@ struct CaptureEntryView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
                 keyboardIsVisible = false
             }
+    }
+
+    private func announceRecordingStartIfPending() {
+        if model.consumeRecordingStartAnnouncement() {
+            UIAccessibility.post(notification: .announcement, argument: "Recording started.")
+        }
     }
 
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
