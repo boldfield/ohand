@@ -220,6 +220,9 @@ class UpgradeUITestCase: XCTestCase {
     /// driving script answers; a failed attempt is asked again, as a person would.
     func openFromHome(_ identifier: String, name: String, shows marker: XCUIElement) {
         for _ in 1...3 {
+            // The home focuses its composer when it appears, and its header shows Done in place of Settings while the
+            // keyboard is up, so the keyboard goes away first.
+            if !app.buttons[identifier].exists { dismissKeyboard() }
             let link = app.buttons[identifier]
             XCTAssertTrue(appears(link, timeout: screenTimeout), "\(identifier) is not on the home")
             tap(link, step: "open \(name)")
