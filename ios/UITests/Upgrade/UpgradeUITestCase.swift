@@ -115,7 +115,12 @@ class UpgradeUITestCase: XCTestCase {
             if isHittableNow(within: 2, element) {
                 ready = true
             } else if element.exists {
-                app.swipeUp()
+                // Scroll toward the element: it can be below the fold or have been scrolled past above the top.
+                if let frame = try? element.snapshot().frame, frame.midY < 0 {
+                    app.swipeDown()
+                } else {
+                    app.swipeUp()
+                }
             }
         }
         if !ready { recordFailureScreen(slug(step)) }
