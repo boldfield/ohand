@@ -172,6 +172,7 @@ final class CaptureStatusTests: XCTestCase {
         XCTAssertEqual(status.processingState, "uninterpreted")
         XCTAssertEqual(status.transcriptionState, "not_applicable")
         XCTAssertNil(status.processingJobStatus)
+        XCTAssertNil(status.rerunState, "no Try again is waiting, and the core sends null")
         XCTAssertEqual(status.reminderRequestState, "unschedulable")
         XCTAssertEqual(status.reminderScheduleState, "not_scheduled")
         XCTAssertEqual(status.reminderDeliveryState, "unknown")
@@ -182,6 +183,19 @@ final class CaptureStatusTests: XCTestCase {
         XCTAssertEqual(audio.transcriptionState, "audio_pending")
         XCTAssertNil(audio.reminderRequestState, "no reminder exists, so no reminder status is invented")
         XCTAssertNil(audio.reminderScheduleState)
+    }
+
+    func testRerunStateDecodesWhenPresentAndIsNilWhenAbsent() throws {
+        func report(rerunField: String) throws -> ItemStatusReport {
+            let json = """
+            {"operation_id":1,"item_id":"item-1","save_state":"saved_local","sync_state":"not_configured",
+            "processing_state":"uninterpreted","transcription_state":"not_applicable"\(rerunField)}
+            """
+            return try JSONDecoder().decode(ItemStatusReport.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try report(rerunField: ",\"rerun_state\":\"running\"").rerunState, "running")
+        XCTAssertNil(try report(rerunField: ",\"rerun_state\":null").rerunState)
+        XCTAssertNil(try report(rerunField: "").rerunState, "a core that does not send the field decodes as nil")
     }
 
     func testUnicodeTextWithInteriorNulRoundTripsUnchanged() throws {

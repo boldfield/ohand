@@ -113,6 +113,9 @@ public struct ItemStatusReport: Decodable, Equatable, Sendable {
     /// `unsupported_operation` or `other`). `nil` when the item is not abstained or the reason was not kept; the core never
     /// sends the free-text detail.
     public let abstentionReason: String?
+    /// Set while a "Try again" is waiting or running for an `uninterpreted` or `abstained` item: `queued`, `running`,
+    /// `retrying_after_transient` or `awaiting_configuration`. `nil` otherwise, and when the core does not send it.
+    public let rerunState: String?
 
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
@@ -128,5 +131,6 @@ public struct ItemStatusReport: Decodable, Equatable, Sendable {
         case reminderAcknowledgmentState = "reminder_acknowledgment_state"
         case unschedulableReason = "unschedulable_reason"
         case abstentionReason = "abstention_reason"
+        case rerunState = "rerun_state"
     }
 }
