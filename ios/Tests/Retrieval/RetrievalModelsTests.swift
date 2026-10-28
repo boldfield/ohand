@@ -244,4 +244,22 @@ final class RetrievalModelsTests: XCTestCase {
             from: try answer(json), for: RetrievalSearchRequest(query: "t", offset: 25))
         XCTAssertTrue(middle.hasMore)
     }
+
+    // MARK: lifecycle
+
+    func testAHitDecodesItsLifecycleStateAndAbsenceIsNil() throws {
+        func hit(_ lifecycleField: String) throws -> CoreRetrievalHit {
+            let json = """
+                {"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "personal", \(lifecycleField)
+                "text": "t", "text_basis": "original", "original_text": null, "matched": "current",
+                "match_span": null, "captured_at": "2026-10-08T12:30:00Z"}
+                """
+            return try JSONDecoder().decode(CoreRetrievalHit.self, from: Data(json.utf8))
+        }
+        for state in ["active", "completed", "cancelled"] {
+            XCTAssertEqual(try hit(#""lifecycle_state": "\#(state)","#).lifecycleState, state)
+        }
+        XCTAssertNil(try hit("").lifecycleState)
+        XCTAssertNil(try hit(#""lifecycle_state": null,"#).lifecycleState)
+    }
 }
