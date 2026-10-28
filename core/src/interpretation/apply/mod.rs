@@ -33,7 +33,7 @@ use crate::domain::items::{
 };
 use crate::domain::status::{ProcessingState, ReminderRequestState};
 use crate::interpretation::contracts::{
-    Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
+    AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
 };
 use crate::jobs::queue::{complete_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{authorize_job, DenialReason, JOB_TYPE_INTERPRET};
@@ -592,6 +592,11 @@ fn insert_proposal_row(
             ..
         } => ("transcript", Some(transcript_record_id.as_str())),
     };
+    let (abstention_label, abstention_detail) = if abstained {
+        abstention_columns(proposal.abstention.as_ref())
+    } else {
+        (None, None)
+    };
     let reminder_json = proposal
         .reminder_proposal
         .as_ref()
@@ -608,8 +613,9 @@ fn insert_proposal_row(
         "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version,
                                 text_basis_kind, text_basis_id, applied_state, proposal_type,
                                 reminder_proposal, session_topic_proposal, source_spans, abstained,
-                                request_version, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                request_version, created_at, abstention_reason,
+                                abstention_detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             &proposal.proposal_id,
             &proposal.item_id,
@@ -629,10 +635,31 @@ fn insert_proposal_row(
             i32::from(abstained),
             &proposal.request_version,
             now.to_rfc3339(),
+            abstention_label,
+            abstention_detail,
         ],
     )
     .map_err(anyhow::Error::from)?;
     Ok(())
+}
+
+/// Most Unicode scalars of an `Other` abstention detail that are stored.
+const MAX_ABSTENTION_DETAIL_SCALARS: usize = 200;
+
+/// The fixed machine label of an abstention reason, and its stored detail (`Other` only,
+/// truncated to [`MAX_ABSTENTION_DETAIL_SCALARS`] scalars).
+fn abstention_columns(reason: Option<&AbstentionReason>) -> (Option<&'static str>, Option<String>) {
+    match reason {
+        None => (None, None),
+        Some(AbstentionReason::UncertainTarget) => (Some("uncertain_target"), None),
+        Some(AbstentionReason::Negated) => (Some("negated"), None),
+        Some(AbstentionReason::Ambiguous) => (Some("ambiguous"), None),
+        Some(AbstentionReason::UnsupportedOperation) => (Some("unsupported_operation"), None),
+        Some(AbstentionReason::Other(detail)) => (
+            Some("other"),
+            Some(detail.chars().take(MAX_ABSTENTION_DETAIL_SCALARS).collect()),
+        ),
+    }
 }
 
 /// Move the item to `wanted` unless a stronger prior result must be retained: `processed` is never

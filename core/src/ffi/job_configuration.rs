@@ -47,6 +47,11 @@
 //!   (`rerun_failed_interpretations`). At most `MAX_RERUN_BATCH` items per call. `skipped_items`
 //!   lists `{item_id, reason}` with reason `not_failed` or `no_provider_allowed`; `skipped` is its
 //!   length. It is idempotent and never modifies the failed job.
+//! * `rerun_abstained_interpretation` (`read_scopes`, `item_id`) -> `outcome`: a new `interpret`
+//!   job for one item whose current interpretation is `abstained`, pinned like the failed-work
+//!   rerun (`rerun_abstained_interpretation`). `outcome` is `queued`, `no_provider_allowed` or
+//!   `not_abstained`; repeating it before the new job runs creates nothing and answers
+//!   `not_abstained`. Abstained items are never listed as failed work.
 //!
 //! A refusal is a normalized failure: `not_found` for an unknown job or profile,
 //! `invalid_request` for a malformed command, `job_configuration_refused` when the core's rules
@@ -60,7 +65,7 @@ use super::core_handle::instance::{self, lock, JobFn};
 use crate::jobs::configuration::{
     get_jobs_pinned_to_profile, get_profile_id, get_requeue_record, jobs_retired_by_revocation,
     list_failed_interpretations, repin_waiting_interpretations, requeue_job_to_new_profile,
-    rerun_failed_interpretations, revoke_profile, RerunSelection, MAX_RERUN_BATCH,
+    rerun_failed_interpretations, revoke_profile, RerunOutcome, RerunSelection, MAX_RERUN_BATCH,
 };
 use crate::jobs::queue::get_job;
 use crate::providers::contracts::ErrorClass;
@@ -127,6 +132,11 @@ enum Command {
         item_ids: Option<Vec<String>>,
         #[serde(default)]
         all_listed: Option<bool>,
+    },
+    RerunAbstainedInterpretation {
+        #[serde(default)]
+        read_scopes: Vec<String>,
+        item_id: String,
     },
 }
 
@@ -204,6 +214,10 @@ impl Command {
                             && item_ids.iter().all(|id| acceptable(id))
                     })
             }
+            Command::RerunAbstainedInterpretation {
+                read_scopes,
+                item_id,
+            } => parse_scopes(read_scopes).is_ok() && acceptable(item_id),
         };
         if valid {
             Ok(())
@@ -418,6 +432,17 @@ fn rerun_failed(
     }))
 }
 
+fn rerun_abstained(
+    database: &mut Database,
+    read_scopes: &[String],
+    item_id: &str,
+) -> Result<Value, AbiFailure> {
+    let scopes = parse_scopes(read_scopes)?;
+    let outcome = RerunOutcome::rerun_abstained(database, &scopes, item_id, Utc::now())
+        .map_err(|error| store_failure(&error))?;
+    Ok(json!({ "outcome": outcome.as_str() }))
+}
+
 fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> {
     match command {
         Command::JobsPinnedToProfile {
@@ -451,6 +476,10 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
             read_scopes,
             &rerun_selection(item_ids, all_listed)?,
         ),
+        Command::RerunAbstainedInterpretation {
+            read_scopes,
+            item_id,
+        } => rerun_abstained(database, read_scopes, item_id),
     }
 }
 

@@ -7,14 +7,16 @@ use ohand_core::interpretation::enqueue::{enqueue_default_interpretation, plan_i
 use ohand_core::jobs::configuration::{
     get_item_jobs_for_profile, get_jobs_pinned_to_profile, get_requeue_record,
     is_job_profile_revoked, is_profile_available, jobs_retired_by_revocation,
-    requeue_job_to_new_profile, resolve_execution_target, revoke_profile,
-    revoke_profile_and_retire_jobs_in_tx, ExecutionResolution,
+    list_failed_interpretations, requeue_job_to_new_profile, rerun_failed_interpretations,
+    resolve_execution_target, revoke_profile, revoke_profile_and_retire_jobs_in_tx,
+    ExecutionResolution, RerunOutcome, RerunSelection,
 };
 use ohand_core::jobs::queue::{
     claim_job_with_lease, complete_job, complete_job_in_tx, enqueue_job, JobStatus,
 };
 use ohand_core::privacy::routing::{grant_route_capability, DenialReason, ProcessingCapability};
 use ohand_core::providers::profiles::set_default_profile;
+use ohand_core::store::events::ItemScope;
 use ohand_core::store::schema::{Clock, Database};
 use std::sync::{Arc, RwLock};
 
@@ -1588,5 +1590,158 @@ fn test_jobs_retired_by_revocation_is_durable_and_exact() -> Result<()> {
     drop(db);
     let reopened = Database::open(&path, clock.clone() as Arc<dyn Clock>)?;
     assert_eq!(read_all(&reopened)?, listed);
+    Ok(())
+}
+
+/// An item whose only interpret job completed with an abstention, readable in the personal scope.
+fn abstained_item(db: &mut Database, item_id: &str, now: chrono::DateTime<Utc>) -> Result<String> {
+    db.conn()
+        .execute("UPDATE captures SET item_scope = 'personal'", [])?;
+    db.conn().execute(
+        "UPDATE items SET processing_state = 'abstained' WHERE item_id = ?",
+        [item_id],
+    )?;
+    let job_id = "job-abstained-1";
+    enqueue_interpret(
+        db,
+        job_id,
+        item_id,
+        "profile-uuid-abstain-v1-0000001111",
+        now,
+    )?;
+    let claimed = claim_job_with_lease(db, Duration::minutes(5), now)?.expect("the job");
+    complete_job(db, job_id, claimed.attempt_count)?;
+    Ok(job_id.to_string())
+}
+
+fn allow_a_provider(db: &mut Database, now: chrono::DateTime<Utc>) -> Result<String> {
+    let profile = "profile-uuid-abstain-v1-0000001111";
+    create_profile_with_credential(db, "anthropic-abstain", profile, "credential-1")?;
+    set_default_profile(db, ProcessingCapability::TextInterpretation, profile, now)
+        .map_err(|failure| anyhow::anyhow!("{failure:?}"))?;
+    grant_route_capability(
+        db,
+        "route-1",
+        ProcessingCapability::TextInterpretation,
+        profile,
+        "2026-01-01T00:00:00Z",
+    )
+    .map_err(|failure| anyhow::anyhow!("{failure:?}"))?;
+    Ok(profile.to_string())
+}
+
+fn interpret_job_count(db: &Database, item_id: &str) -> Result<i64> {
+    Ok(db.conn().query_row(
+        "SELECT COUNT(*) FROM jobs WHERE item_id = ? AND job_type = 'interpret'",
+        [item_id],
+        |row| row.get(0),
+    )?)
+}
+
+#[test]
+fn test_rerun_of_an_abstained_item_queues_one_pinned_job_and_is_idempotent() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+    let profile = allow_a_provider(&mut db, now)?;
+    let abstained_job = abstained_item(&mut db, &item_id, now)?;
+    let scopes = [ItemScope::Personal];
+
+    // Abstentions are never failed work.
+    let listed = list_failed_interpretations(&mut db, &scopes, 10, None)?;
+    assert!(listed.failed.is_empty());
+    let all = rerun_failed_interpretations(&mut db, &scopes, &RerunSelection::AllListed, now)?;
+    assert_eq!((all.moved, all.skipped.len()), (0, 0));
+    let named = rerun_failed_interpretations(
+        &mut db,
+        &scopes,
+        &RerunSelection::Items(vec![item_id.clone()]),
+        now,
+    )?;
+    assert_eq!(named.moved, 0, "an abstention is not rerun as failed work");
+    assert_eq!(interpret_job_count(&db, &item_id)?, 1);
+
+    let outcome = RerunOutcome::rerun_abstained(&mut db, &scopes, &item_id, now)?;
+    assert_eq!(outcome.as_str(), "queued");
+    assert_eq!(interpret_job_count(&db, &item_id)?, 2);
+    let (new_job_id, new_pin, new_status, new_revision): (String, Option<String>, String, i32) =
+        db.conn().query_row(
+            "SELECT j.job_id, j.profile_version, j.status, j.source_revision FROM jobs j \
+              JOIN job_requeues r ON r.new_job_id = j.job_id WHERE r.old_job_id = ?",
+            [&abstained_job],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    assert_eq!(new_pin.as_deref(), Some(profile.as_str()));
+    assert_eq!(new_status, "queued");
+    assert_eq!(new_revision, 0);
+    assert_eq!(
+        job_state(&db, &abstained_job)?,
+        ("completed".to_string(), None),
+        "the original job is not modified"
+    );
+
+    // Repeating before the new job runs creates nothing.
+    let repeat = RerunOutcome::rerun_abstained(&mut db, &scopes, &item_id, now)?;
+    assert_eq!(repeat.as_str(), "not_abstained");
+    assert_eq!(interpret_job_count(&db, &item_id)?, 2);
+    assert!(!new_job_id.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_rerun_of_an_abstained_item_without_an_allowed_provider_creates_nothing() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+    create_profile_with_credential(
+        &mut db,
+        "anthropic-abstain",
+        "profile-uuid-abstain-v1-0000001111",
+        "credential-1",
+    )?;
+    let abstained_job = abstained_item(&mut db, &item_id, now)?;
+
+    let outcome = RerunOutcome::rerun_abstained(&mut db, &[ItemScope::Personal], &item_id, now)?;
+
+    assert_eq!(outcome.as_str(), "no_provider_allowed");
+    assert_eq!(interpret_job_count(&db, &item_id)?, 1);
+    assert!(get_requeue_record(db.conn(), &abstained_job)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_rerun_of_an_item_that_is_not_abstained_or_not_readable_is_refused() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+    allow_a_provider(&mut db, now)?;
+    abstained_item(&mut db, &item_id, now)?;
+
+    // Another scope, an unknown item and no scope at all read nothing.
+    for (scopes, id) in [
+        (vec![ItemScope::Work], item_id.as_str()),
+        (vec![ItemScope::Personal], "no-such-item"),
+        (vec![], item_id.as_str()),
+    ] {
+        assert_eq!(
+            RerunOutcome::rerun_abstained(&mut db, &scopes, id, now)?.as_str(),
+            "not_abstained"
+        );
+    }
+    // Processed and deleted items are not abstained.
+    for (column, value) in [
+        ("processing_state", "processed"),
+        ("lifecycle_state", "deleted"),
+    ] {
+        db.conn().execute(
+            &format!("UPDATE items SET processing_state = 'abstained', lifecycle_state = 'active', {column} = ? WHERE item_id = ?"),
+            [value, item_id.as_str()],
+        )?;
+        assert_eq!(
+            RerunOutcome::rerun_abstained(&mut db, &[ItemScope::Personal], &item_id, now)?.as_str(),
+            "not_abstained"
+        );
+    }
+    assert_eq!(interpret_job_count(&db, &item_id)?, 1);
     Ok(())
 }
