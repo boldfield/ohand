@@ -3974,6 +3974,24 @@ Acceptance:
 
 Contributes to original T10 criteria: 1 (simulator), 2, 3 (tooling), 4 (simulator records).
 
+
+**Amendment 1 (2026-10-27, coordinator).** Review round 1 of PR #372 raised four findings. Here is how each is resolved.
+
+1. **Metrics wiring (finding 1).** In scope and required. The production `MetricsService` supplies `CoreMetricsBuild.current()` by default. A test of the production construction path shows that an export names the build.
+2. **Container path (finding 2): criterion 4 is corrected, not relaxed.** "The data container path before and after must be the same" was the wrong property. iOS does not promise a stable absolute container path across an install. Two exact-head CI runs show the simulator moving it on install-over while the contents carry over. An app that depended on the path would be the bug. The check now proves the real property, and proves it more strongly:
+   - It records both paths, and does not require them to be equal.
+   - The prior build writes a marker file with random synthetic content into its own container. After the upgrade, that file is present with identical content (SHA-256 compared), proving the same container's contents were carried over rather than recreated.
+   - A test shows that the app never persists an absolute container path. The store, audio and evidence locations are resolved from the container at runtime. Grep-level evidence is not enough on its own.
+
+   All other parts of criterion 4 stand. The verifier fails if the marker is missing or changed. Its regression test covers both a moved path that passes and a missing or changed marker that fails.
+3. **Provider endpoint (finding 3): the seed matches M1's product.** Since F39, M1's provider setup offers only fixed hosted providers. Own-server, the only path with a user-chosen endpoint, is hidden until after the trial, so no endpoint can be seeded through the production path. Seed a fixed provider with a synthetic credential through the production setup path. If setup would make a network request, use F45's fixture mode, which writes through production services with a scripted sender. CI must make no provider network request. After the upgrade, require the same profile version, provider type, model, authorized destinations and credential presence, and that Processing still routes to that profile version. Endpoint persistence moves to the post-trial own-server work.
+4. **Ownership (finding 4).** T10a now also owns:
+   - in `Makefile`, the `release-test` target and its place in `test`;
+   - `core/src/ffi/metrics.rs` and its tests, `ios/OhAndCoreBridge/CoreHandle+Metrics.swift` and `ios/Tests/Metrics/`, additively, for the build field;
+   - `ios/Tests/UpgradeCheck/` (new).
+
+T10b's procedure follows the same rules: contents carried over, not path equality, and a fixed-provider profile.
+
 ### T10b
 
 Record the signed trial candidate and the maintainer's device upgrade
@@ -4311,3 +4329,139 @@ Ownership amendment (2026-10-25): F52 also owns `tools/evaluation/tests/evaluati
 
 Item 1 removes the zone from `timezone-conflicting`'s oracle, so the old test cannot pass unchanged. That does not weaken it: the scorer's zone-claim logic stays covered, on a fixture that still has a zone. No other edit to that file and no scorer source change is allowed. PR #367 (head 757c397) may continue under this amendment.
 
+### F53
+
+Two Control Center buttons: one that starts recording as soon as the app opens, and one that opens typing
+
+The maintainer asked on 2026-10-27 that the Control Center shortcut open straight into recording. Today it cannot. The only control (`OhAndCaptureControl`, `ios/Capture/Entry/Control/CaptureControlBundle.swift`) sends `OpenCaptureIntent(target: .capture)`, which means "the default mode", and that default is hard-coded to typing (`ios/AppAssembly/AppServices.swift:116`, `{ .silent }`). Even an explicit voice request (Shortcuts with Destination "Voice capture", or `ohand-capture://capture?mode=voice`) only shows the voice surface; recording waits for a tap on the mic (`ios/Capture/Voice/VoiceRecordingController.swift:118`).
+
+Tapping a Control Center button labelled "Voice" is itself the explicit user action, so starting the recording on it keeps DESIGN.md's rule that there is no always-listening behaviour. A plain app launch, a notification, or any other path still never records on its own.
+
+Owned paths: `ios/Capture/Entry/` (including `Control/` and `Shared/`), `ios/Capture/Voice/` (only to expose the existing microphone permission state to the entry model, `VoiceCaptureEngine.swift:31-50`), `ios/Tests/CaptureEntry/`, and additive tests in `ios/Tests/VoiceCapture/`. Do not edit `ios/AppAssembly/` (F44 owns its `StatusModel` call site); the session and model already carry what is needed. If a seam is missing, block and name it.
+
+Dependencies: none (F47 has merged).
+
+Acceptance:
+
+1. **Two controls.** The control bundle offers:
+   - **"Oh And Voice"** (`mic` symbol), sending `OpenCaptureIntent(target: .voice)`. It **keeps the existing kind** `com.boldfield.ohand.app.capture-control.entry`, so a control the maintainer already placed becomes the voice control without being re-added.
+   - **"Oh And Note"** (a text symbol such as `square.and.pencil`), with a new kind `com.boldfield.ohand.app.capture-control.note`, sending `OpenCaptureIntent(target: .silent)`.
+
+   Each button's own label names its mode, so the accessibility label differs too. `ios/scripts/check_project_config.py` keeps passing.
+2. **Recording starts on an explicit voice request only.** A presentation made from a request whose requested mode is explicitly `.voice` (the control, the intent from Shortcuts or the Action button, or the shortcut URL with `mode=voice`) starts recording once, as if the mic had been tapped, when all of these hold:
+   - the capture surface is idle: nothing is being typed, recorded or saved. Otherwise the existing rule applies: the presentation changes nothing, and no input is lost;
+   - microphone permission is already granted. When it is undetermined or denied, the voice surface is shown and nothing starts. The existing mic tap then asks or explains as it does today. Auto-start never triggers the system permission prompt;
+   - the presentation came from a trigger in this foreground entry. A presentation is consumed once (`CaptureEntrySession.presentPending`), so returning to the app later, rotating, or redrawing the view never starts a second recording.
+
+   A request with no mode, or `.silent`, behaves exactly as today.
+3. **Honest state.** While recording, the existing recording state, Stop and Discard are shown, as after a tap. VoiceOver announces that recording started. A start failure (for example, the engine is unavailable) shows the existing start-failure notice and leaves the surface usable. Trigger-to-ready latency is measured as it is now, and the recording start is not counted as input.
+4. **Tests.** Unit tests in `ios/Tests/CaptureEntry/` drive the session and model with the fake recorder:
+   - the voice control's intent `perform()` registers a `.voice` request (the existing way controls are tested, `docs/validation/capture-entry.md`);
+   - an explicit voice request with permission granted starts exactly one recording;
+   - each of these starts none: permission undetermined, permission denied, typing in progress, recording in progress, saving in progress, a request without a mode, a `.silent` request, and a second foreground entry with nothing pending;
+   - a start failure shows the notice.
+
+   Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run. Keep fixtures synthetic.
+
+Device check (recorded by the maintainer or T05 after merge, not by this task): with the voice control, on cold and warm launch, unlocked and locked, record whether recording is under way when the app appears, and whether iOS asks for Face ID before opening. `simctl` cannot press a control, so only a device shows this.
+
+
+**Amendment 1 (2026-10-27, coordinator).** Review round 1 of PR #373 found that the auto-start gate reads microphone permission through a protocol-extension default (`SystemMicrophonePermission`). The app's real recorder, `VoiceRecorderFanOut` (`ios/AppAssembly/VoiceServiceAdapters.swift:105`), does not forward the permission provider that `VoiceRecordingController` is given. So the gate and the recorder read different sources, and no assembled-app test can drive auto-start.
+- **Ownership.** F53 now also owns `ios/AppAssembly/VoiceServiceAdapters.swift`, **only** to add `microphonePermission` to `VoiceRecorderFanOut`, forwarding `controller.microphonePermission`. No other edit to that file.
+- **Required.** Remove the protocol-extension default, so every `VoiceRecordingControlling` conformer must implement the permission. Add a test showing that the assembled voice services gate auto-start on the injected permission, not the system's.
+- **VoiceOver.** The announcement must not depend on `.onChange` firing after mount. On a cold launch, recording starts before the first render. Use a one-shot event owned by the model that the view consumes both on appear and on change, and add a test for the cold-launch order.
+
+Acceptance is otherwise unchanged.
+
+### F54a
+
+Keep the reason a model gives for not sorting a note, and let one such note be run again
+
+On 2026-10-27 a voice note on the maintainer's phone came back `abstained`. The provider request succeeded and the model chose not to sort the note. The app could not say why. The model returns a reason (`AbstentionReason`, `core/src/interpretation/contracts/mod.rs:211`: `UncertainTarget`, `Negated`, `Ambiguous`, `UnsupportedOperation` or `Other` with a short detail), and apply validates it. But `insert_proposal_row` (`core/src/interpretation/apply/mod.rs:520`) stores only `abstained = 1`, so the reason is discarded. An abstention is not a failure, so F43's failed-work read and rerun do not cover it either. The note looks unsorted, with no explanation and no way to try again.
+
+F54a stores the reason, exposes it as a fixed label, and adds a rerun for one abstained note. F54b shows it.
+
+Owned paths:
+- `core/src/store/schema/mod.rs` (one new migration step, v14);
+- `core/src/interpretation/apply/mod.rs` (the abstention branch and `insert_proposal_row` only);
+- `core/src/domain/status/` and `core/src/ffi/capture.rs` (the item status read);
+- `ios/OhAndCoreBridge/CaptureModels.swift`;
+- `core/src/jobs/configuration/failed_work.rs`, `core/src/ffi/job_configuration.rs`, `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift` and `ios/Services/JobConfiguration/`, additively, for the rerun;
+- tests in `core/tests/migrations/`, `core/tests/status/`, `core/tests/job_configuration/`, `ios/Tests/JobConfiguration/` and the apply module's own tests.
+
+Dependencies: none (F43 has merged).
+
+Acceptance:
+
+1. **Stored.** Migration v14 adds two nullable columns to `proposals`:
+   - `abstention_reason`, a fixed machine label: `uncertain_target`, `negated`, `ambiguous`, `unsupported_operation` or `other`;
+   - `abstention_detail`, the `Other` detail only, truncated to 200 Unicode scalars.
+
+   Apply writes both for every abstention and leaves them null otherwise. Rows that already exist keep null, and nothing is backfilled or guessed. The migration test opens a v13 store holding an abstained proposal, migrates it, and shows the old row with a null reason and a new abstention with its reason. Reset, deletion and export behave as before. A deleted item's proposal rows, including the detail, go with it.
+2. **Exposed as a label.** The item status read (`StatusReadout`, `core/src/ffi/capture.rs:129`) gains `abstention_reason: Option<&'static str>`. It is the label of the item's current abstained proposal when `processing_state` is `abstained`, and null otherwise, the same way `unschedulable_reason` works. The detail text is never exposed through any FFI read: it is model output, kept on the device for diagnosis. `CaptureModels.swift` decodes the new field, and absence decodes as nil.
+3. **Run one abstained note again.** Add an operation beside `rerun_failed_interpretations` that takes one item ID whose current interpretation is `abstained`. It makes a new `interpret` job at the item's current revision, pinned by `resolve_profile_pin`, through the same code path. Do not write a second pinning path. It returns `queued`, `no_provider_allowed` or `not_abstained`, and repeating it before the new job runs creates nothing. The failed-work list and "all listed" never include abstentions. It is exposed through the job-configuration FFI and the Swift service like the existing rerun.
+4. **Tests** cover each reason label, the 200-scalar truncation, a non-abstained item's null reason, the rerun's three outcomes and its idempotence, and the Swift decoding. Native edits need exact-head macOS CI evidence.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F54b
+
+Say on a note's detail screen why it was not sorted, and offer to try again or set the type yourself
+
+The screen for F54a. Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths: `app/source-detail/` and `ios/Tests/SourceDetail/`.
+
+Dependencies: F54a (the label and the rerun), and F44, which edits `app/source-detail/` first.
+
+Acceptance:
+
+1. **One line on the detail screen** when the item's `processing_state` is `abstained`. It sits where F44's failure line would, and the two never show together. The line maps the label to fixed copy:
+   - `uncertain_target`: "Not sorted: it wasn't clear what this note is about";
+   - `negated`: "Not sorted: the note says not to do something";
+   - `ambiguous`: "Not sorted: it was too unclear to sort";
+   - `unsupported_operation`: "Not sorted: changing an existing note this way isn't supported yet";
+   - `other` or null (older notes): "Not sorted: it couldn't tell how to sort this".
+
+   The model's detail text is never shown.
+2. **Two actions under the line:**
+   - "Try again" calls F54a's rerun. It then shows "Sorting…" when queued, or "Choose a provider in Processing first" with a link to Processing when no provider is allowed.
+   - A control that opens the existing item-type correction (`app/item-controls/`), reused, not rebuilt.
+3. **Hosted view tests** cover each label, the null label, both rerun outcomes, and that a processed or failed item shows no abstention line. Run them in both appearances. Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F55
+
+Tell the model how to sort a question the user asks themselves
+
+On 2026-10-27, a spoken question to self came back `abstained` on the phone. It was of the form "What are the next steps for <project> I forgot where I was". The coordinator replayed it privately through the live harness on main 4501f2e (raw exchanges outside the repository).
+
+| Backend | Input | Result |
+|---|---|---|
+| Haiku 5.5 and gpt-5.5 | as typed, with a comma | `idea` |
+| Sonnet 5.5 | as typed, with a comma | `note` |
+| Haiku 5.5 and Sonnet 5.5, 3 runs each | three transcript variants: no comma, lower case, and a misrecognised project word | 11 of 18 calls abstained |
+
+The abstentions were `Ambiguous` 10 times and once `Other` ("question seeking information"). The same text gets `note`, `idea` or an abstention by chance.
+
+The cause is an instruction gap. `core/src/interpretation/instructions/text.rs` says nothing about questions. Its `idea` is "an exploratory thought or possibility". Its abstention reasons cover "missing words or no usable content" and "too incomplete to resolve", and its hard limits say "When unsure, abstain rather than guess". Yet the fixture oracle files every open question to self as `idea`: `question-reflection`, `comparison-no-preference` and `hypothetical-question`. `question-reflection` is one of the remaining live misses after F52. A note with clear words always has a type, and abstaining loses it from the sorted views. DESIGN.md: "Broad intentions remain findable even without a well-formed next step."
+
+Owned paths: as F52. `core/src/interpretation/instructions/`, `core/tests/interpretation_instructions/`, `fixtures/intent/contrastive-fixtures.json`, `core/tests/fixture_validation/`, `docs/validation/intent-fixtures.md` and `tools/evaluation/fixtures/recorded-responses.json`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Instructions.** The `item_type` definitions say that a question the user asks themselves (reflective, open, or about what to do next, including one that trails off or says they lost their place) is an `idea`. They also say that being a question, being lower case, or lacking punctuation is never by itself a reason to abstain. Abstention stays for notes with no usable content, negation, unsupported operations, and text whose words cannot be resolved, as `asr-dropped-word-remind-me` shows. Every forbidden rule and the prompt-injection guidance stay word for word, and the tests that pin them keep passing.
+2. **Fixtures.** Add at least three synthetic fixtures, each expecting `idea` with a full span. Use no real project or person names:
+   - a next-steps question to self with no punctuation, such as "what are the next steps for the garden project I lost my place";
+   - the same idea in lower case with a trailing "um";
+   - a "where was I with …" question.
+
+   Add a control fixture that still abstains: a question with its object dropped by recognition, such as "what are the next steps for the I forgot". Document all four in `docs/validation/intent-fixtures.md`. Recorded responses for the new fixtures are added so the offline evaluation stays green.
+3. **Tests.** The instruction tests assert the new guidance is present and the forbidden-rule text is unchanged. `make check` and `make test` pass.
+
+Live evidence (the coordinator runs it after merge, not this task): the live harness over all fixtures with Haiku 5.5, Sonnet 5.5 and gpt-5.5, plus the private replay variants. A question-to-self fixture that still abstains in more than 1 of 9 calls per backend means F55 is not done, and is reopened.
