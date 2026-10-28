@@ -142,6 +142,9 @@ struct StatusReadout {
     unschedulable_reason: Option<&'static str>,
     /// Fixed label of why the model did not sort an abstained item; never the free-text detail.
     abstention_reason: Option<String>,
+    /// `queued`, `running`, `retrying_after_transient` or `awaiting_configuration` while a rerun
+    /// of an uninterpreted or abstained item is waiting or running; otherwise `null`.
+    rerun_state: Option<&'static str>,
 }
 
 fn storage_failure(error: impl Into<Error>) -> AbiFailure {
@@ -230,6 +233,7 @@ fn item_status_job(item_id: String, operation_id: u64) -> JobFn {
                 .map(|value| value.as_str()),
             unschedulable_reason: status.unschedulable_reason.map(|value| value.as_str()),
             abstention_reason: status.abstention_reason,
+            rerun_state: status.rerun_state,
         })
     })
 }

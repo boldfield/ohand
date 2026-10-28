@@ -495,6 +495,10 @@ pub struct ItemStatus {
     /// unless `processing_state` is `abstained` and the proposal recorded a reason (rows stored
     /// before the reason was kept have none). The free-text detail is never part of the status.
     pub abstention_reason: Option<String>,
+    /// Set only while a "Try again" is waiting or running: `processing_state` is `uninterpreted`
+    /// or `abstained` and the newest `interpret` job is not terminal. One of `queued`, `running`,
+    /// `retrying_after_transient` or `awaiting_configuration`; `None` otherwise.
+    pub rerun_state: Option<&'static str>,
 }
 
 /// The closed set of stored abstention labels.
@@ -539,6 +543,15 @@ impl ItemStatus {
             ProcessingState::Unprocessed | ProcessingState::Processing
         ) {
             load_interpretation_job_status(tx, item_id)?
+        } else {
+            None
+        };
+
+        let rerun_state = if matches!(
+            processing_state,
+            ProcessingState::Uninterpreted | ProcessingState::Abstained
+        ) {
+            load_rerun_state(tx, item_id)?
         } else {
             None
         };
@@ -626,6 +639,7 @@ impl ItemStatus {
             reminder_acknowledgment_state,
             unschedulable_reason,
             abstention_reason,
+            rerun_state,
         }))
     }
 
@@ -684,6 +698,36 @@ fn load_interpretation_job_status(
             }
         }
         _ => None,
+    })
+}
+
+/// The state of a rerun in flight for an item that stays `uninterpreted` or `abstained` while its
+/// replacement `interpret` job is not terminal. A failed, completed or cancelled newest job (or
+/// none) is not a rerun in flight.
+fn load_rerun_state(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+) -> anyhow::Result<Option<&'static str>> {
+    use rusqlite::OptionalExtension;
+
+    let latest_status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM jobs WHERE item_id = ? AND job_type = ? \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            rusqlite::params![item_id, JOB_TYPE_INTERPRET],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match latest_status {
+        Some(status_str) => match status_str.parse::<JobStatus>()? {
+            JobStatus::Running => Some("running"),
+            JobStatus::Queued => Some(match load_interpretation_job_status(tx, item_id)? {
+                Some(waiting) => waiting.as_str(),
+                None => "queued",
+            }),
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => None,
+        },
+        None => None,
     })
 }
 
