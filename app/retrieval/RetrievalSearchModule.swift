@@ -7,6 +7,15 @@ protocol RetrievalSearching: AnyObject {
     func search(
         _ request: RetrievalSearchRequest,
         completion: @escaping (Result<RetrievalPage, RetrievalSearchFailure>) -> Void)
+
+    /// How many completed or cancelled items match the request's words and filters. A count-only query that asks the
+    /// core for one result; a failure reports nothing at all.
+    func countClosedMatches(for request: RetrievalSearchRequest, completion: @escaping (Int) -> Void)
+}
+
+extension RetrievalSearching {
+    /// Searchers that cannot count closed matches say nothing, so no hint is shown.
+    func countClosedMatches(for request: RetrievalSearchRequest, completion: @escaping (Int) -> Void) {}
 }
 
 /// Sends searches to the core through the root's private read gate and nothing else. The gate refuses a capture-only
@@ -73,6 +82,16 @@ final class RetrievalSearchModule: CompositionModule, RetrievalSearching, @unche
             lock.unlock()
             let failure = (error as? CoreFailure).map(RetrievalSearchFailure.init(core:)) ?? .unavailable
             claimed?.completion(.failure(failure))
+        }
+    }
+
+    func countClosedMatches(for request: RetrievalSearchRequest, completion: @escaping (Int) -> Void) {
+        var counting = request
+        counting.closedOnly = true
+        counting.includeDone = false
+        counting.offset = 0
+        search(counting) { result in
+            if case .success(let page) = result { completion(page.totalAccessible) }
         }
     }
 

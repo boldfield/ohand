@@ -51,6 +51,9 @@ struct RetrievalSearchView: View {
     static let typeChipIdentifier = "retrieval.search.chip.type"
     static let timeChipIdentifier = "retrieval.search.chip.time"
     static let topicChipIdentifier = "retrieval.search.chip.topic"
+    static let includeDoneChipIdentifier = "retrieval.search.chip.include-done"
+    static let closedHintIdentifier = "retrieval.search.closed-hint"
+    static let closedHintActionIdentifier = "retrieval.search.closed-hint.include-done"
     static let loadMoreIdentifier = "retrieval.search.load-more"
     static let filterSheetTitleIdentifier = "retrieval.search.sheet.title"
     static let sinceToggleIdentifier = "retrieval.search.sheet.since"
@@ -64,6 +67,8 @@ struct RetrievalSearchView: View {
 
     static let promptText = "Search runs on this device. Type words you captured, or choose a date, type or session topic."
     static let emptyText = "Nothing matches. Your captures are saved; try other words or fewer filters."
+    static let emptyIncludingDoneText =
+        "Nothing matches, and no done or cancelled items either. Your captures are saved; try other words or fewer filters."
     static let lockedText = "Your saved items are locked. Go back and open Search again to unlock them."
 
     static func rowIdentifier(_ row: RetrievalResultRow) -> String {
@@ -76,6 +81,15 @@ struct RetrievalSearchView: View {
 
     static func rowOriginalIdentifier(_ row: RetrievalResultRow) -> String {
         "retrieval.search.row-original.\(row.id)"
+    }
+
+    static func rowMarkerIdentifier(_ row: RetrievalResultRow) -> String {
+        "retrieval.search.row-marker.\(row.id)"
+    }
+
+    /// "N done items also match." for the line that offers "Include done".
+    static func closedHintText(count: Int) -> String {
+        count == 1 ? "1 done item also matches." : "\(count) done items also match."
     }
 
     static func rowDetailsIdentifier(_ row: RetrievalResultRow) -> String {
@@ -217,6 +231,7 @@ struct RetrievalSearchView: View {
                 typeChip
                 timeChip
                 topicChip
+                includeDoneChip
             }
         }
     }
@@ -278,6 +293,37 @@ struct RetrievalSearchView: View {
         .accessibilityValue(topicIsActive ? topicTitle : "Any")
         .accessibilityAddTraits(topicIsActive ? .isSelected : [])
         .reportRendered(Self.topicChipIdentifier, text: topicTitle)
+    }
+
+    private var includeDoneChip: some View {
+        DSChip(title: "Include done", isSelected: model.includeDone) {
+            model.setIncludeDone(!model.includeDone)
+        }
+        .accessibilityLabel("Include done")
+        .accessibilityValue(model.includeDone ? "On" : "Off")
+        .reportRendered(Self.includeDoneChipIdentifier, text: model.includeDone ? "Include done: on" : "Include done: off")
+    }
+
+    /// One line under the count (or the empty state) when done items match too: the count and a way to include them.
+    @ViewBuilder private var closedHint: some View {
+        if !model.includeDone, model.closedMatchCount > 0 {
+            let hint = Self.closedHintText(count: model.closedMatchCount)
+            HStack(spacing: DSSpacing.xs) {
+                Text(hint)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(Self.closedHintIdentifier)
+                    .reportRendered(Self.closedHintIdentifier, text: hint)
+                Button("Include done") { model.setIncludeDone(true) }
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.accent.color)
+                    .frame(minHeight: DSLayout.minimumTouchTarget)
+                    .accessibilityIdentifier(Self.closedHintActionIdentifier)
+                    .reportRendered(Self.closedHintActionIdentifier, text: "Include done")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// The design-system Chip as a menu's label: the menu takes the tap, so the chip's own button is not hit-tested.
@@ -342,9 +388,13 @@ struct RetrievalSearchView: View {
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier(Self.countIdentifier)
                 .reportRendered(Self.countIdentifier, text: countText)
+            closedHint
             resultRows
         case .empty:
-            emptyState(title: "No matches", message: Self.emptyText, identifier: Self.emptyIdentifier)
+            emptyState(
+                title: "No matches", message: model.includeDone ? Self.emptyIncludingDoneText : Self.emptyText,
+                identifier: Self.emptyIdentifier)
+            closedHint
         case .locked:
             emptyState(title: "Locked", message: Self.lockedText, identifier: Self.lockedIdentifier)
         case .failed(let failure):
@@ -524,6 +574,20 @@ struct RetrievalResultRowView: View {
                         .foregroundColor(DSColor.inkMuted.color)
                         .fixedSize(horizontal: false, vertical: true)
                         .reportRendered(RetrievalSearchView.rowDetailsIdentifier(row), text: Self.detailsText(for: row))
+                }
+                if let marker = row.lifecycle?.markerText {
+                    HStack(spacing: DSSpacing.xs) {
+                        if row.lifecycle == .completed {
+                            Image(systemName: "checkmark")
+                                .font(DSFont.footer)
+                                .foregroundColor(DSColor.inkMuted.color)
+                                .accessibilityHidden(true)
+                        }
+                        Text(marker)
+                            .font(DSFont.footer)
+                            .foregroundColor(DSColor.inkMuted.color)
+                            .reportRendered(RetrievalSearchView.rowMarkerIdentifier(row), text: marker)
+                    }
                 }
                 snippetText
                     .font(DSFont.body)

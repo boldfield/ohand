@@ -21,6 +21,22 @@ enum RetrievalItemType: String, CaseIterable, Identifiable, Equatable {
     }
 }
 
+/// Where an item stands, as the core reports it on a hit.
+enum RetrievalLifecycle: String, Equatable {
+    case active
+    case completed
+    case cancelled
+
+    /// The mark a closed row shows; open items show none.
+    var markerText: String? {
+        switch self {
+        case .active: return nil
+        case .completed: return "Done"
+        case .cancelled: return "Cancelled"
+        }
+    }
+}
+
 /// An item identifier that came out of a retrieval answer and was checked on the way in: a UUID, written in the core's
 /// canonical lowercase form. Detail navigation receives this and nothing else about the hit, so what it opens is never
 /// a string the screen assembled.
@@ -90,6 +106,10 @@ struct RetrievalSearchRequest: Equatable {
     var since: Date?
     var until: Date?
     var itemType: RetrievalItemType?
+    /// Off unless the person asked for it: searches then name only open (`active`) items.
+    var includeDone = false
+    /// Asks only how many completed or cancelled items match, as a page of one. Never shown as rows.
+    var closedOnly = false
     var offset = 0
 
     var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -122,12 +142,19 @@ struct RetrievalSearchRequest: Equatable {
         return PrivateRetrievalFilters(
             scopes: nil,
             itemTypes: itemType.map { [$0.rawValue] } ?? [],
+            lifecycleStates: lifecycleStates,
             sessionTopics: topic.isEmpty ? [] : [topic],
             requireSessionTopic: onlyWithSessionTopic,
             capturedAfter: range?.start.map(Self.instantText),
             capturedBefore: range?.end.map(Self.instantText),
-            limit: Self.pageSize,
+            limit: closedOnly ? 1 : Self.pageSize,
             offset: offset)
+    }
+
+    /// The lifecycle states every search names, so the default never depends on the core's "no filter" meaning.
+    var lifecycleStates: [String] {
+        if closedOnly { return ["completed", "cancelled"] }
+        return includeDone ? ["active", "completed", "cancelled"] : ["active"]
     }
 
     private struct DateRange {
@@ -199,6 +226,8 @@ struct RetrievalResultRow: Identifiable, Equatable {
     let capturedAt: Date
     /// The item's own type from the gated answer; `nil` while the item has not been classified.
     let itemType: RetrievalItemType?
+    /// Whether the item is open, completed or cancelled; `nil` when the answer did not say.
+    var lifecycle: RetrievalLifecycle? = nil
 
     var typeTitle: String { itemType?.title ?? "Not yet sorted" }
 
@@ -233,6 +262,11 @@ struct RetrievalPage: Equatable {
                 guard let known = RetrievalItemType(rawValue: label) else { throw RetrievalSearchFailure.unreadable }
                 itemType = known
             }
+            var lifecycle: RetrievalLifecycle?
+            if let label = hit.lifecycleState {
+                guard let known = RetrievalLifecycle(rawValue: label) else { throw RetrievalSearchFailure.unreadable }
+                lifecycle = known
+            }
             rows.append(
                 RetrievalResultRow(
                     reference: reference,
@@ -243,7 +277,8 @@ struct RetrievalPage: Equatable {
                     snippet: RetrievalSnippet(text: hit.text, span: hit.matched == .current ? hit.matchSpan : nil),
                     scopeName: hit.scope == "work" ? "Work" : "Personal",
                     capturedAt: capturedAt,
-                    itemType: itemType))
+                    itemType: itemType,
+                    lifecycle: lifecycle))
         }
         return RetrievalPage(totalAccessible: answer.totalAccessible, rows: rows, offset: request.offset)
     }
