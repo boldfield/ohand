@@ -12,6 +12,9 @@ use ohand_core::jobs::queue::{
     claim_job_with_lease, complete_job, enqueue_job, fail_job_with_backoff, get_job, Job, JobStatus,
 };
 use ohand_core::privacy::routing::{JOB_TYPE_INTERPRET, JOB_TYPE_TRANSCRIPTION_ATTACHMENT};
+use ohand_core::store::events::{
+    save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
+};
 use ohand_core::store::schema::{Clock, Database};
 
 struct TestClock {
@@ -1159,10 +1162,26 @@ fn test_abstention_reason_ignores_a_proposal_from_an_older_revision() -> Result<
     let tx = db.transaction()?;
     let current = ItemStatus::load(&tx, "stale")?.expect("item exists");
     assert_eq!(current.abstention_reason.as_deref(), Some("ambiguous"));
+    tx.commit()?;
 
-    // A user correction advances the item revision; the revision-0 proposal is now stale.
-    tx.execute("UPDATE items SET revision = 1 WHERE item_id = 'stale'", [])?;
+    // A real user type correction advances the item revision; the revision-0 proposal is stale.
+    let correction = Event::new(
+        "evt-stale-1".to_string(),
+        "stale".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-01-15T10:31:00Z".to_string(),
+    )?;
+    save_event(&mut db, &correction, 0)?;
+
+    let tx = db.transaction()?;
     let advanced = ItemStatus::load(&tx, "stale")?.expect("item exists");
+    assert_eq!(advanced.processing_state, ProcessingState::Abstained);
     assert_eq!(advanced.abstention_reason, None);
     Ok(())
 }

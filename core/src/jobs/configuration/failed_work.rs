@@ -404,6 +404,19 @@ impl AbstainedRerun {
     }
 }
 
+impl RerunOutcome {
+    /// Run one abstained note again (see [`rerun_abstained_interpretation`]). Reached through this
+    /// already-exported type so the job-configuration module's re-exports stay unchanged.
+    pub fn rerun_abstained(
+        db: &mut Database,
+        read_scopes: &[ItemScope],
+        item_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AbstainedRerun> {
+        rerun_abstained_interpretation(db, read_scopes, item_id, now)
+    }
+}
+
 /// Run one abstained note again: a new `interpret` job at the item's current revision, pinned by
 /// [`resolve_profile_pin`] and linked to the completed job that produced the abstention. Abstained
 /// items are never listed by [`list_failed_interpretations`] and never part of

@@ -65,8 +65,7 @@ use super::core_handle::instance::{self, lock, JobFn};
 use crate::jobs::configuration::{
     get_jobs_pinned_to_profile, get_profile_id, get_requeue_record, jobs_retired_by_revocation,
     list_failed_interpretations, repin_waiting_interpretations, requeue_job_to_new_profile,
-    rerun_abstained_interpretation, rerun_failed_interpretations, revoke_profile, RerunSelection,
-    MAX_RERUN_BATCH,
+    rerun_failed_interpretations, revoke_profile, RerunOutcome, RerunSelection, MAX_RERUN_BATCH,
 };
 use crate::jobs::queue::get_job;
 use crate::providers::contracts::ErrorClass;
@@ -439,7 +438,7 @@ fn rerun_abstained(
     item_id: &str,
 ) -> Result<Value, AbiFailure> {
     let scopes = parse_scopes(read_scopes)?;
-    let outcome = rerun_abstained_interpretation(database, &scopes, item_id, Utc::now())
+    let outcome = RerunOutcome::rerun_abstained(database, &scopes, item_id, Utc::now())
         .map_err(|error| store_failure(&error))?;
     Ok(json!({ "outcome": outcome.as_str() }))
 }

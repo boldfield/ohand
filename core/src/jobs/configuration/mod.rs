@@ -18,11 +18,9 @@ mod failed_work;
 mod repin;
 
 pub use failed_work::{
-    list_failed_interpretations, rerun_abstained_interpretation,
-    rerun_abstained_interpretation_in_tx, rerun_failed_interpretations,
-    rerun_failed_interpretations_in_tx, AbstainedRerun, FailedInterpretation,
-    FailedInterpretationPage, FailedWorkRecovery, RerunOutcome, RerunSelection, RerunSkipReason,
-    MAX_RERUN_BATCH,
+    list_failed_interpretations, rerun_failed_interpretations, rerun_failed_interpretations_in_tx,
+    FailedInterpretation, FailedInterpretationPage, FailedWorkRecovery, RerunOutcome,
+    RerunSelection, RerunSkipReason, MAX_RERUN_BATCH,
 };
 
 pub use repin::{

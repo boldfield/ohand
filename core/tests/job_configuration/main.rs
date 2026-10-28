@@ -7,9 +7,9 @@ use ohand_core::interpretation::enqueue::{enqueue_default_interpretation, plan_i
 use ohand_core::jobs::configuration::{
     get_item_jobs_for_profile, get_jobs_pinned_to_profile, get_requeue_record,
     is_job_profile_revoked, is_profile_available, jobs_retired_by_revocation,
-    list_failed_interpretations, requeue_job_to_new_profile, rerun_abstained_interpretation,
-    rerun_failed_interpretations, resolve_execution_target, revoke_profile,
-    revoke_profile_and_retire_jobs_in_tx, AbstainedRerun, ExecutionResolution, RerunSelection,
+    list_failed_interpretations, requeue_job_to_new_profile, rerun_failed_interpretations,
+    resolve_execution_target, revoke_profile, revoke_profile_and_retire_jobs_in_tx,
+    ExecutionResolution, RerunOutcome, RerunSelection,
 };
 use ohand_core::jobs::queue::{
     claim_job_with_lease, complete_job, complete_job_in_tx, enqueue_job, JobStatus,
@@ -1661,8 +1661,7 @@ fn test_rerun_of_an_abstained_item_queues_one_pinned_job_and_is_idempotent() -> 
     assert_eq!(named.moved, 0, "an abstention is not rerun as failed work");
     assert_eq!(interpret_job_count(&db, &item_id)?, 1);
 
-    let outcome = rerun_abstained_interpretation(&mut db, &scopes, &item_id, now)?;
-    assert_eq!(outcome, AbstainedRerun::Queued);
+    let outcome = RerunOutcome::rerun_abstained(&mut db, &scopes, &item_id, now)?;
     assert_eq!(outcome.as_str(), "queued");
     assert_eq!(interpret_job_count(&db, &item_id)?, 2);
     let (new_job_id, new_pin, new_status, new_revision): (String, Option<String>, String, i32) =
@@ -1682,8 +1681,7 @@ fn test_rerun_of_an_abstained_item_queues_one_pinned_job_and_is_idempotent() -> 
     );
 
     // Repeating before the new job runs creates nothing.
-    let repeat = rerun_abstained_interpretation(&mut db, &scopes, &item_id, now)?;
-    assert_eq!(repeat, AbstainedRerun::NotAbstained);
+    let repeat = RerunOutcome::rerun_abstained(&mut db, &scopes, &item_id, now)?;
     assert_eq!(repeat.as_str(), "not_abstained");
     assert_eq!(interpret_job_count(&db, &item_id)?, 2);
     assert!(!new_job_id.is_empty());
@@ -1703,9 +1701,8 @@ fn test_rerun_of_an_abstained_item_without_an_allowed_provider_creates_nothing()
     )?;
     let abstained_job = abstained_item(&mut db, &item_id, now)?;
 
-    let outcome = rerun_abstained_interpretation(&mut db, &[ItemScope::Personal], &item_id, now)?;
+    let outcome = RerunOutcome::rerun_abstained(&mut db, &[ItemScope::Personal], &item_id, now)?;
 
-    assert_eq!(outcome, AbstainedRerun::NoProviderAllowed);
     assert_eq!(outcome.as_str(), "no_provider_allowed");
     assert_eq!(interpret_job_count(&db, &item_id)?, 1);
     assert!(get_requeue_record(db.conn(), &abstained_job)?.is_none());
@@ -1727,8 +1724,8 @@ fn test_rerun_of_an_item_that_is_not_abstained_or_not_readable_is_refused() -> R
         (vec![], item_id.as_str()),
     ] {
         assert_eq!(
-            rerun_abstained_interpretation(&mut db, &scopes, id, now)?,
-            AbstainedRerun::NotAbstained
+            RerunOutcome::rerun_abstained(&mut db, &scopes, id, now)?.as_str(),
+            "not_abstained"
         );
     }
     // Processed and deleted items are not abstained.
@@ -1741,8 +1738,8 @@ fn test_rerun_of_an_item_that_is_not_abstained_or_not_readable_is_refused() -> R
             [value, item_id.as_str()],
         )?;
         assert_eq!(
-            rerun_abstained_interpretation(&mut db, &[ItemScope::Personal], &item_id, now)?,
-            AbstainedRerun::NotAbstained
+            RerunOutcome::rerun_abstained(&mut db, &[ItemScope::Personal], &item_id, now)?.as_str(),
+            "not_abstained"
         );
     }
     assert_eq!(interpret_job_count(&db, &item_id)?, 1);
