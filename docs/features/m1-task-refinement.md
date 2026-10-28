@@ -4506,3 +4506,94 @@ Acceptance:
 3. **It works from a fresh read.** It needs no in-memory state. A test reruns a failed note and an abstained note through the core operations (F43's and F54a's), then opens a new database handle and reads the status: `queued`. It then claims the job and gets `running`, completes it and gets null with the new processing state, and fails it and gets null with the item listed as failed again. Swift decodes the field, and absence decodes as nil. Native edits need exact-head macOS CI evidence.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F57
+
+Reopen a completed or cancelled item
+
+Decided by the maintainer on 2026-10-28. There is no way back from Complete or Cancel: the event store refuses every lifecycle event on a `completed` or `cancelled` item (`core/src/store/events/mod.rs`, around line 639). A mistaken "Done", including the one on a reminder notification, is permanent unless the item is deleted. That breaks DESIGN.md's reversibility.
+
+Owned paths:
+- `core/src/store/events/mod.rs`;
+- `core/src/store/schema/mod.rs`, only if `events.event_type` is constrained, as one migration step (v15);
+- `core/src/ffi/item_lifecycle_controls.rs` and its tests;
+- `core/src/export/`, additively, if event types are enumerated there;
+- `ios/OhAndCoreBridge/CoreHandle+ItemLifecycleControls.swift` and `ios/Services/Items/LifecycleControls/`;
+- tests in `core/tests/events/`, `core/tests/item_lifecycle_controls/` and `ios/Tests/ItemLifecycleControls/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **A Reopen event.** A new `EventType::Reopen` moves an item from `completed` or `cancelled` to `active`.
+   - It is refused for `active` (`already_open`) and `deleted` items, and on a stale revision, the way Complete is.
+   - It is idempotent by command ID, like the other lifecycle commands.
+   - It is journaled like Completion and Cancellation, and export includes it.
+2. **It restores nothing it should not.**
+   - A reminder cancelled by the completion stays cancelled. Reopen never reinstalls a notification. The UI offers to set one again (F59).
+   - Suggestion state is unchanged: a "stop suggesting" (`pull_only`) item stays pull-only, and other items become eligible again only through the normal policy.
+   - Prompts that were cancelled stay cancelled.
+   - Reprocessing never closes a reopened item again.
+3. **Exposed** as a `reopen` command on the lifecycle-control FFI, with outcomes `reopened`, `already_open`, `stale_revision` and `not_found`, and on `ItemLifecycleControlService`. The result carries the cancelled reminder's former instant, if it had one, so the UI can offer it again. That instant is read from the stored reminder and never invented.
+4. **Tests** cover complete→reopen and cancel→reopen; reopen of an active, a deleted and a stale item; idempotence; the reminder staying cancelled with its former instant returned; pull-only preserved; and the Swift service round trip. Native edits need exact-head macOS CI evidence.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F58
+
+Home and search show only open items unless closed ones are asked for
+
+Decided by the maintainer on 2026-10-28: completed and cancelled items ("closed") must not appear on Home or in default search results. Today Home's recent items (`core/src/retrieval/recent/mod.rs`, around line 111) exclude only deleted items, so marked-done items keep showing. Search already accepts `lifecycle_states` (`core/src/retrieval/query/mod.rs:16`, `core/src/ffi/retrieval.rs:75`, `CoreHandle+Retrieval.swift:42`), but the app never passes it, and hits do not say whether an item is closed.
+
+Owned paths:
+- `core/src/retrieval/recent/` and `core/src/ffi/recent_items.rs`;
+- `core/src/ffi/retrieval.rs` (the hit's lifecycle field) and `ios/OhAndCoreBridge/CoreHandle+Retrieval.swift`;
+- tests in `core/tests/retrieval/`, the recent module's tests, `ios/Tests/RecentItems/` and `ios/Tests/Retrieval/` (bridge decoding only).
+
+Dependencies: none. F48, which edits `core/src/retrieval/recent/` additively, now depends on F58.
+
+Acceptance:
+
+1. **Home is open only.** The recent-items read returns only `active` items. Completed, cancelled and deleted items are excluded in the ordering query, so paging and cursors stay correct. A test completes one item and cancels another, then pages through recents and finds neither, with no gap or duplicate in the pages. A reopened item (F57, if merged; otherwise a direct lifecycle fixture) returns.
+2. **Search hits carry their lifecycle.** Each hit gains `lifecycle_state` (`active`, `completed` or `cancelled`). Swift decodes it, and absence decodes as nil. The filter itself is unchanged: an empty list still means no filter at the core level. The default belongs to the app (F60), so other readers are not changed silently.
+3. **Tests** for both, plus exact-head macOS CI evidence for the bridge change.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F59
+
+Reopen, Undo and "Set a reminder again" on the item's controls
+
+The screens for F57. Follow `docs/features/m1-ui-design.md`, including its copy rules and its review checklist for UI tasks.
+
+Owned paths: `app/item-controls/` and `ios/Tests/ItemControls/`. Reuse the existing reminder edit (`app/reminders/ReminderEditView.swift`). If it cannot start from a given time, block and name the seam; do not fork it.
+
+Dependencies: F57.
+
+Acceptance:
+
+1. **Undo.** After Complete or Cancel succeeds, the existing confirmation line ("Completed. Any reminder for it was cancelled.") gains "Undo". It calls F57's reopen, and stays offered while the screen is open.
+2. **Reopen.** A completed or cancelled item's controls show "This item is completed." (or cancelled) with a "Reopen" button in place of Complete and Cancel.
+3. **Set a reminder again.** After a reopen whose result carries a former reminder instant, show "Its reminder was turned off." with "Set a reminder again". That opens the reminder edit prefilled with the former time when it is still in the future, and empty otherwise. Nothing is scheduled until the person saves.
+4. **Hosted view tests** cover Undo after Complete and after Cancel, Reopen from each closed state, the `already_open` and stale outcomes, and the reminder prompt with a future instant, a past instant and none. Run them in both appearances. Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F60
+
+Search shows open items by default, with "Include done"
+
+The search screen for F58. Follow `docs/features/m1-ui-design.md`.
+
+Owned paths: `app/retrieval/` and `ios/Tests/Retrieval/`.
+
+Dependencies: F58.
+
+Acceptance:
+
+1. **Default open.** Every search the app runs passes `lifecycle_states = ["active"]`, including date-bounded and topic searches.
+2. **An explicit "Include done" control** beside the existing filters. When on, it passes `active`, `completed` and `cancelled`. It is off at every launch and is not persisted. When it is on, the empty-results copy says nothing closed was found. When it is off and the core reports closed matches, say so in one line: "N done items also match. Include done". That needs a second count-only query. If that query costs more than a bounded `limit` of 1, use a plain hint instead.
+3. **Closed rows are marked.** With "Include done" on, completed rows show a checkmark and "Done", and cancelled rows show "Cancelled", in muted text. The marker is part of the accessibility label.
+4. **Hosted view tests** cover the default, the toggle, the markers, and both empty states, in both appearances. Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
