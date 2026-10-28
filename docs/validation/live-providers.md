@@ -34,7 +34,7 @@ Private raw evidence SHA-256: `cc85d6bd…0aa5` (942,211 bytes).
 
 Oracle misses: haiku and gpt-5.5 missed `question-reflection`; gpt-6-luna missed `split-clock-task-day`.
 
-Latency, tokens and cost (summed over provider calls). Of the 35 fixtures, 3 made no provider call on haiku and gpt-6-luna and 2 made none on gpt-5.5:
+Latency, tokens and cost (summed over provider calls). Of the 35 fixtures, 3 per backend (`design-session-topic`, `date-relative-next-monday`, `date-ambiguous-friday`) took the fast path and made no provider call. On gpt-5.5, `already-completed-action` made 2 calls (the first returned no HTTP status and was retried), so it has 33 calls over 32 calling fixtures:
 
 | Backend | Provider calls | Latency sum (ms) | Reported tokens in / out | Cost estimate |
 |---|---|---|---|---|
@@ -106,6 +106,10 @@ failing backend working; certification above rests on the backend's own applied/
 3. The two claimed backends, Anthropic and OpenAI, have 0 forbidden mutations over the 35-fixture contrastive
    suite, with the model and instruction versions above. Their oracle match rates (34/35 each) are reported, not
    inferred from each other.
+
+   Currency of the evidence: the qualifying run certifies these backends at instruction version `798036ed…` over
+   the 35-fixture suite at commit 27d573f. Main's current prompt (`056e5f28…`, F55) and its 39-fixture suite have
+   not been run live. A rerun is not required for E02, but this gap is disclosed.
 4. Each number cites an artifact, build revision and collection time. The no-network proof
    (`no_network_proof_runs_the_whole_harness`) runs in `make test`; this document does not claim a separate CI
    pass beyond that.
