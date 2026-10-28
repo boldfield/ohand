@@ -725,7 +725,11 @@ fn load_rerun_state(
                 Some(waiting) => waiting.as_str(),
                 None => "queued",
             }),
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => None,
+            // A configuration wait is stored as a failed job; any other failure is terminal.
+            JobStatus::Failed => {
+                load_interpretation_job_status(tx, item_id)?.map(|waiting| waiting.as_str())
+            }
+            JobStatus::Completed | JobStatus::Cancelled => None,
         },
         None => None,
     })

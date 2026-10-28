@@ -104,10 +104,14 @@ fn first_interpret_job(db: &mut Database, now: DateTime<Utc>) -> Result<Job> {
 
 /// The queue's terminal failure: the job ends `failed` with a provider reason, no retry left.
 fn fail_job_terminally(db: &Database, job: &Job) -> Result<()> {
+    fail_job_with_reason(db, job, "provider_rejected")
+}
+
+fn fail_job_with_reason(db: &Database, job: &Job, failure_reason: &str) -> Result<()> {
     let affected = db.conn().execute(
-        "UPDATE jobs SET status = 'failed', failure_reason = 'provider_rejected', \
+        "UPDATE jobs SET status = 'failed', failure_reason = ?, \
          lease_expires_at = NULL WHERE job_id = ? AND status = 'running'",
-        [&job.job_id],
+        [failure_reason, &job.job_id],
     )?;
     assert_eq!(affected, 1);
     Ok(())
@@ -297,5 +301,41 @@ fn a_rerun_waiting_to_retry_is_still_a_rerun_in_flight() -> Result<()> {
     let status = fresh_status(&path, now)?;
     assert_eq!(status.rerun_state, Some("retrying_after_transient"));
     assert_eq!(status.processing_job_status, None);
+    Ok(())
+}
+
+#[test]
+fn a_rerun_stopped_for_configuration_reports_awaiting_configuration() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let now = Utc::now();
+
+    for (label, state, reason) in [
+        ("unauthorized-failed", "uninterpreted", "unauthorized"),
+        ("unsupported-abstained", "abstained", "unsupported"),
+    ] {
+        let path = super::temp_db_path(&tmpdir, label);
+        let mut db = seeded_database(&path, now, state)?;
+        let original = first_interpret_job(&mut db, now)?;
+        if state == "uninterpreted" {
+            fail_job_terminally(&db, &original)?;
+            rerun_failed_interpretations(
+                &mut db,
+                &[ItemScope::Personal],
+                &RerunSelection::AllListed,
+                now,
+            )?;
+        } else {
+            complete_job(&mut db, &original.job_id, original.attempt_count)?;
+            RerunOutcome::rerun_abstained(&mut db, &[ItemScope::Personal], ITEM_ID, now)?;
+        }
+        drop(db);
+        let replacement = claim_replacement(&path, now)?;
+        let db = open(&path, now)?;
+        fail_job_with_reason(&db, &replacement, reason)?;
+        drop(db);
+        let status = fresh_status(&path, now)?;
+        assert_eq!(status.processing_state.as_str(), state);
+        assert_eq!(status.rerun_state, Some("awaiting_configuration"));
+    }
     Ok(())
 }
