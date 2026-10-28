@@ -65,10 +65,10 @@ relaunch. The Add provider screen of this build offers only fixed cloud provider
 so the profile's endpoint is the provider type's own; the secret, name and model are synthetic and nothing is sent: the profile
 is made the default after the captures were saved, and no capture is made afterwards.
 
-The first committed result is `docs/validation/evidence/upgrade/simulator-2026-10-27-362.json`: CI run 40544423613 on
-`7ae9568` (candidate build 362) upgrading from the pull request's merge base `6d26d65` (build 1: it predates the build identity, so it
-carries the source plist's number). All checks passed. The committed record came from that run's head; the head of the pull request
-also contains the record and this paragraph, and its own exact-head run is linked in the pull request.
+The committed result is `docs/validation/evidence/upgrade/simulator-2026-10-28-368.json`: CI run 40635251080 on
+`b14e272` (candidate build 368) upgrading from the pull request's merge base `514641a` (build 1: it predates the build identity, so
+it carries the source plist's number). All 41 checks passed. The committed record came from that run's head; the head of the pull
+request differs from it only by the record and this paragraph, and its own exact-head run is linked in the pull request.
 
 The simulator's result is committed under `docs/validation/evidence/upgrade/` (format in the README there).
 
