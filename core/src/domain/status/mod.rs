@@ -491,7 +491,24 @@ pub struct ItemStatus {
     pub reminder_delivery_state: Option<ReminderDeliveryState>,
     pub reminder_acknowledgment_state: Option<ReminderAcknowledgmentState>,
     pub unschedulable_reason: Option<UnschedulableReason>,
+    /// Fixed machine label of the reason the item's current abstained proposal gave. `None`
+    /// unless `processing_state` is `abstained` and the proposal recorded a reason (rows stored
+    /// before the reason was kept have none). The free-text detail is never part of the status.
+    pub abstention_reason: Option<String>,
+    /// Set only while a "Try again" is waiting or running: `processing_state` is `uninterpreted`
+    /// or `abstained` and the newest `interpret` job is not terminal. One of `queued`, `running`,
+    /// `retrying_after_transient` or `awaiting_configuration`; `None` otherwise.
+    pub rerun_state: Option<&'static str>,
 }
+
+/// The closed set of stored abstention labels.
+const ABSTENTION_LABELS: [&str; 5] = [
+    "uncertain_target",
+    "negated",
+    "ambiguous",
+    "unsupported_operation",
+    "other",
+];
 
 impl ItemStatus {
     /// Load item status from the database.
@@ -526,6 +543,15 @@ impl ItemStatus {
             ProcessingState::Unprocessed | ProcessingState::Processing
         ) {
             load_interpretation_job_status(tx, item_id)?
+        } else {
+            None
+        };
+
+        let rerun_state = if matches!(
+            processing_state,
+            ProcessingState::Uninterpreted | ProcessingState::Abstained
+        ) {
+            load_rerun_state(tx, item_id)?
         } else {
             None
         };
@@ -568,6 +594,24 @@ impl ItemStatus {
             (None, None, None, None, None)
         };
 
+        let abstention_reason = if processing_state == ProcessingState::Abstained {
+            let stored: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT abstention_reason FROM proposals \
+                      WHERE item_id = ?1 AND abstained = 1 \
+                        AND source_revision = (SELECT revision FROM items WHERE item_id = ?1) \
+                      ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [item_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            stored
+                .flatten()
+                .filter(|label| ABSTENTION_LABELS.contains(&label.as_str()))
+        } else {
+            None
+        };
+
         match (reminder_request_state, unschedulable_reason) {
             (Some(ReminderRequestState::Unschedulable), None) => {
                 anyhow::bail!("Unschedulable reminder for item {item_id} has no recorded reason")
@@ -594,6 +638,8 @@ impl ItemStatus {
             reminder_delivery_state,
             reminder_acknowledgment_state,
             unschedulable_reason,
+            abstention_reason,
+            rerun_state,
         }))
     }
 
@@ -652,6 +698,40 @@ fn load_interpretation_job_status(
             }
         }
         _ => None,
+    })
+}
+
+/// The state of a rerun in flight for an item that stays `uninterpreted` or `abstained` while its
+/// replacement `interpret` job is not terminal. A failed, completed or cancelled newest job (or
+/// none) is not a rerun in flight.
+fn load_rerun_state(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+) -> anyhow::Result<Option<&'static str>> {
+    use rusqlite::OptionalExtension;
+
+    let latest_status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM jobs WHERE item_id = ? AND job_type = ? \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            rusqlite::params![item_id, JOB_TYPE_INTERPRET],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match latest_status {
+        Some(status_str) => match status_str.parse::<JobStatus>()? {
+            JobStatus::Running => Some("running"),
+            JobStatus::Queued => Some(match load_interpretation_job_status(tx, item_id)? {
+                Some(waiting) => waiting.as_str(),
+                None => "queued",
+            }),
+            // A configuration wait is stored as a failed job; any other failure is terminal.
+            JobStatus::Failed => {
+                load_interpretation_job_status(tx, item_id)?.map(|waiting| waiting.as_str())
+            }
+            JobStatus::Completed | JobStatus::Cancelled => None,
+        },
+        None => None,
     })
 }
 

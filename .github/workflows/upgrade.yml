@@ -1,0 +1,136 @@
+name: Simulator upgrade check
+
+# Installs a newer OhAndApp build over an older one on a simulator and checks that the person's data survives
+# (tools/release/simulator_upgrade_check.sh). Needs no secrets and no signing material.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tools/release/**'
+      - 'ios/UITests/Upgrade/**'
+      - 'ios/AppAssembly/UpgradeCheck/**'
+      - 'core/src/store/schema/**'
+      - '.github/workflows/upgrade.yml'
+  workflow_dispatch:
+    inputs:
+      prior_revision:
+        description: 'Full SHA of the earlier main commit to upgrade from (default: the first parent of the checked-out commit)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    name: Upgrade from an earlier build keeps the data
+    runs-on: macos-26
+    # Two app builds (each with the Rust core), the UI tests and one cold boot, then two seeded UI runs.
+    timeout-minutes: 120
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/upgrade-evidence/host-pressure.txt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The build number is the first-parent commit count, so the full history is needed; a pull request builds its own
+          # head, not the merge commit GitHub makes for it.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Stop unneeded host work
+        shell: bash
+        run: ios/scripts/quiet-host.sh
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          xcode-version: '26.6'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Select simulator and the prior revision
+        id: select
+        shell: bash
+        env:
+          INPUT_PRIOR_REVISION: ${{ github.event.inputs.prior_revision }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+        run: |
+          set -euo pipefail
+          mkdir -p upgrade-evidence
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > upgrade-evidence/simctl-devices.json
+          python3 ios/scripts/select_simulator.py --input upgrade-evidence/simctl-devices.json \
+            --max-runtime "${sdk_version}" --family iPhone > upgrade-evidence/simulator.txt
+          cat upgrade-evidence/simulator.txt
+          cat upgrade-evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          # The prior revision is an earlier main commit: the merge base for a pull request, the first parent otherwise.
+          if [ -n "${INPUT_PRIOR_REVISION}" ]; then
+            prior="${INPUT_PRIOR_REVISION}"
+          elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git fetch origin "${BASE_REF}"
+            prior="$(git merge-base HEAD "origin/${BASE_REF}")"
+          else
+            prior="$(git rev-parse HEAD^1)"
+          fi
+          echo "prior=${prior}" >> "$GITHUB_OUTPUT"
+          echo "prior revision: ${prior}"
+
+      - name: Upgrade check
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.select.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.select.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.select.outputs.runtime }}
+          PRIOR_REVISION: ${{ steps.select.outputs.prior }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          tools/release/simulator_upgrade_check.sh \
+            --udid "${SIMULATOR_UDID}" --prior-revision "${PRIOR_REVISION}" --evidence-dir upgrade-evidence \
+            --simulator-name "${SIMULATOR_NAME}" --simulator-runtime "${SIMULATOR_RUNTIME}" --run-url "${RUN_URL}"
+
+      - name: Show host pressure
+        if: always()
+        shell: bash
+        run: cat upgrade-evidence/host-pressure.txt || true
+
+      - name: Upload the upgrade report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-evidence
+          path: upgrade-evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # The debug-only upgrade report must not exist in a Release build: build one and look for it.
+  release-excludes-report:
+    name: Release build carries no upgrade report
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.6'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Build Release and look for the report
+        shell: bash
+        run: tools/release/check_release_excludes_upgrade_report.sh

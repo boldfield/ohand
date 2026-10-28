@@ -161,6 +161,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 13,
         apply: add_retention_settings_v13,
     },
+    MigrationStep {
+        target_version: 14,
+        apply: add_abstention_reason_v14,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -1021,6 +1025,23 @@ fn add_retention_settings_v13(tx: &Transaction<'_>) -> Result<()> {
             period_seconds INTEGER NOT NULL CHECK (period_seconds BETWEEN 1 AND 315360000),
             updated_at TEXT NOT NULL
         )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The reason a model gave for abstaining (F54a). `abstention_reason` is a fixed machine label and
+/// `abstention_detail` the `Other` detail only (at most 200 Unicode scalars). Both stay null for
+/// proposals that are not abstentions and for rows that existed before this step: nothing is
+/// backfilled or guessed.
+fn add_abstention_reason_v14(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE proposals ADD COLUMN abstention_reason TEXT CHECK (abstention_reason IS NULL OR \
+         abstention_reason IN ('uncertain_target', 'negated', 'ambiguous', 'unsupported_operation', 'other'))",
+        [],
+    )?;
+    tx.execute(
+        "ALTER TABLE proposals ADD COLUMN abstention_detail TEXT",
         [],
     )?;
     Ok(())

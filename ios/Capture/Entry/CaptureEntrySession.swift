@@ -27,11 +27,15 @@ struct CaptureEntryPresentation: Equatable {
     /// The monotonic uptime of the user's trigger (see `CaptureEntryRequest`); `nil` when the presentation was not
     /// made by a trigger, so nothing is measured for it.
     let triggeredAtUptimeNanoseconds: UInt64?
+    /// True only when the trigger explicitly asked for voice (never the default mode): the surface then starts
+    /// recording, if it is idle and the microphone is already allowed.
+    let startsRecording: Bool
 
     init(
         entryID: String, source: CaptureEntrySource, mode: CaptureEntryMode, launchKind: CaptureLaunchKind,
-        access: CaptureEntryAccess, triggeredAtUptimeNanoseconds: UInt64? = nil
+        access: CaptureEntryAccess, triggeredAtUptimeNanoseconds: UInt64? = nil, startsRecording: Bool = false
     ) {
+        self.startsRecording = startsRecording
         self.entryID = entryID
         self.source = source
         self.mode = mode
@@ -132,6 +136,7 @@ final class CaptureEntrySession {
             mode: request.requestedMode ?? defaultMode(),
             launchKind: launchKind,
             access: access(),
-            triggeredAtUptimeNanoseconds: request.triggeredAtUptimeNanoseconds)
+            triggeredAtUptimeNanoseconds: request.triggeredAtUptimeNanoseconds,
+            startsRecording: request.requestedMode == .voice)
     }
 }

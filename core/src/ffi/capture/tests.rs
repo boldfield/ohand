@@ -280,6 +280,7 @@ fn processing_and_reminder_scheduling_statuses_are_read_independently() {
     assert_eq!(status["processing_state"], "uninterpreted");
     assert_eq!(status["transcription_state"], "not_applicable");
     assert_eq!(status["processing_job_status"], Value::Null);
+    assert_eq!(status["rerun_state"], Value::Null);
     assert_eq!(status["reminder_request_state"], "unschedulable");
     assert_eq!(status["reminder_schedule_state"], "not_scheduled");
     assert_eq!(status["reminder_delivery_state"], "unknown");

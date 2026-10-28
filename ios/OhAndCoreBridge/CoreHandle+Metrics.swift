@@ -99,7 +99,7 @@ public enum CoreMetricsRequest: Equatable, Sendable {
     case recordFailure(CoreMetricsFailureSeries)
     case setEnabled(Bool, readAuthentication: CoreExportReadAuthentication)
     case clear(readAuthentication: CoreExportReadAuthentication)
-    case export(readAuthentication: CoreExportReadAuthentication)
+    case export(readAuthentication: CoreExportReadAuthentication, build: CoreMetricsBuild? = nil)
 
     private struct Wire: Encodable {
         var op: String
@@ -108,6 +108,7 @@ public enum CoreMetricsRequest: Equatable, Sendable {
         var durationMilliseconds: UInt64?
         var enabled: Bool?
         var readAuthentication: String?
+        var build: CoreMetricsBuild?
 
         enum CodingKeys: String, CodingKey {
             case op
@@ -116,6 +117,7 @@ public enum CoreMetricsRequest: Equatable, Sendable {
             case durationMilliseconds = "duration_ms"
             case enabled
             case readAuthentication = "read_authentication"
+            case build
         }
     }
 
@@ -138,9 +140,10 @@ public enum CoreMetricsRequest: Equatable, Sendable {
         case .clear(let readAuthentication):
             wire = Wire(op: "clear")
             wire.readAuthentication = readAuthentication.rawValue
-        case .export(let readAuthentication):
+        case .export(let readAuthentication, let build):
             wire = Wire(op: "export")
             wire.readAuthentication = readAuthentication.rawValue
+            wire.build = build
         }
         return try JSONEncoder().encode(wire)
     }
@@ -193,23 +196,72 @@ public struct CoreMetricsFailureSummary: Codable, Equatable, Sendable {
     }
 }
 
-/// The core's aggregate report: labels, counts and millisecond figures only.
+/// The build that exports a report: the marketing version, build number, full git revision and dirty flag the build
+/// script wrote into the app's Info.plist (`ios/scripts/generate_build_info.sh`). The core checks the shapes and
+/// refuses anything else, so nothing else can ride along in the report.
+public struct CoreMetricsBuild: Codable, Equatable, Sendable {
+    public let version: String
+    public let buildNumber: String
+    public let revision: String
+    public let dirty: Bool
+
+    public init(version: String, buildNumber: String, revision: String, dirty: Bool) {
+        self.version = version
+        self.buildNumber = buildNumber
+        self.revision = revision
+        self.dirty = dirty
+    }
+
+    /// Reads the build identity from an Info.plist dictionary; nil when any of the four values is missing or of the
+    /// wrong type, so an app that was not stamped names no build rather than a made-up one.
+    public init?(infoDictionary: [String: Any]?) {
+        guard let info = infoDictionary,
+            let version = info["CFBundleShortVersionString"] as? String,
+            let buildNumber = info["CFBundleVersion"] as? String,
+            let revision = info[Self.revisionKey] as? String,
+            let dirty = info[Self.dirtyKey] as? Bool
+        else { return nil }
+        self.init(version: version, buildNumber: buildNumber, revision: revision, dirty: dirty)
+    }
+
+    /// The Info.plist keys the build script writes next to `CFBundleShortVersionString` and `CFBundleVersion`.
+    public static let revisionKey = "OhAndBuildRevision"
+    public static let dirtyKey = "OhAndBuildDirty"
+
+    /// The running app's own build.
+    public static func current(bundle: Bundle = .main) -> CoreMetricsBuild? {
+        CoreMetricsBuild(infoDictionary: bundle.infoDictionary)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case buildNumber = "build_number"
+        case revision
+        case dirty
+    }
+}
+
+/// The core's aggregate report: labels, counts and millisecond figures only, and the build that exported it.
 public struct CoreMetricsReport: Codable, Equatable, Sendable {
     public let schema: String
     public let generatedAt: String
     public let recordingEnabled: Bool
     public let sampleLimitPerSeries: Int
+    /// The exporting build; absent when the host did not name one.
+    public let build: CoreMetricsBuild?
     public let timings: [CoreMetricsTimingSummary]
     public let failures: [CoreMetricsFailureSummary]
 
     public init(
         schema: String, generatedAt: String, recordingEnabled: Bool, sampleLimitPerSeries: Int,
+        build: CoreMetricsBuild? = nil,
         timings: [CoreMetricsTimingSummary], failures: [CoreMetricsFailureSummary]
     ) {
         self.schema = schema
         self.generatedAt = generatedAt
         self.recordingEnabled = recordingEnabled
         self.sampleLimitPerSeries = sampleLimitPerSeries
+        self.build = build
         self.timings = timings
         self.failures = failures
     }
@@ -219,6 +271,7 @@ public struct CoreMetricsReport: Codable, Equatable, Sendable {
         case generatedAt = "generated_at"
         case recordingEnabled = "recording_enabled"
         case sampleLimitPerSeries = "sample_limit_per_series"
+        case build
         case timings
         case failures
     }

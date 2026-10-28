@@ -1168,6 +1168,129 @@
       "notes": "Open questions must not be interpreted as decisions or preferences."
     },
     {
+      "id": "question-next-steps-unpunctuated",
+      "category": "broad-intention",
+      "input": "What are the next steps for the garden project I lost my place",
+      "provenance": "synthetic, spoken next-steps question to self without punctuation",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "voice",
+        "notes": "Spoken question to self; the transcript carries no question mark"
+      },
+      "expected": {
+        "item_type": "idea",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 62,
+            "text": "What are the next steps for the garden project I lost my place"
+          }
+        ]
+      },
+      "forbidden": {
+        "item_types": [
+          "action"
+        ],
+        "reminder": "any"
+      },
+      "recoverable": true,
+      "notes": "A question the user asks themselves about what to do next, including one that says they lost their place, is an idea. Question form or missing punctuation is never by itself a reason to abstain. Must not become an action or reminder."
+    },
+    {
+      "id": "question-next-steps-lowercase-filler",
+      "category": "broad-intention",
+      "input": "what should i do next on the garden project um",
+      "provenance": "synthetic, lower-case next-steps question to self with trailing filler",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "voice",
+        "notes": "Lower-case spoken question to self with a trailing filler word"
+      },
+      "expected": {
+        "item_type": "idea",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 46,
+            "text": "what should i do next on the garden project um"
+          }
+        ]
+      },
+      "forbidden": {
+        "item_types": [
+          "action"
+        ],
+        "reminder": "any"
+      },
+      "recoverable": true,
+      "notes": "The same idea as question-next-steps-unpunctuated in lower case with a trailing filler: still an idea with the full transcript as evidence. Lower case is never by itself a reason to abstain. Must not become an action or reminder."
+    },
+    {
+      "id": "question-where-was-i",
+      "category": "broad-intention",
+      "input": "Where was I with the kitchen plan",
+      "provenance": "synthetic, where-was-I question to self",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "voice",
+        "notes": "Spoken question to self about losing one's place"
+      },
+      "expected": {
+        "item_type": "idea",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 33,
+            "text": "Where was I with the kitchen plan"
+          }
+        ]
+      },
+      "forbidden": {
+        "item_types": [
+          "action"
+        ],
+        "reminder": "any"
+      },
+      "recoverable": true,
+      "notes": "A where-was-I question is the user asking themselves where they left off: an idea, not an abstention. Must not become an action or reminder."
+    },
+    {
+      "id": "question-next-steps-dropped-object",
+      "category": "dropped-asr-word",
+      "input": "what are the next steps for the I forgot",
+      "provenance": "synthetic, ASR error - dropped the object of a next-steps question",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "voice",
+        "notes": "Simulates ASR dropping the project name from a question to self"
+      },
+      "expected": {
+        "abstention": "UncertainTarget"
+      },
+      "forbidden": {
+        "facets": "any"
+      },
+      "recoverable": false,
+      "recovery_notes": "The object of the question is missing; what the user asks about cannot be recovered from the transcript.",
+      "notes": "Control for the question-to-self fixtures: the words that say what the question is about were dropped by recognition, so there is no usable content. Abstain with UncertainTarget; do not guess the missing project."
+    },
+    {
       "id": "already-completed-action",
       "category": "design",
       "input": "Called the dentist",

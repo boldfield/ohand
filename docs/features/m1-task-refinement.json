@@ -3917,7 +3917,8 @@
       "depends_on": [
         "F43",
         "F47",
-        "F45"
+        "F45",
+        "F56"
       ],
       "source_pointers": [
         "app/status/StatusText.swift:30",
@@ -4108,7 +4109,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F44"
+        "F44",
+        "F58"
       ],
       "source_pointers": [
         "ios/Services/NotificationPermission/NotificationReadiness.swift:90",
@@ -4252,7 +4254,8 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F54a",
-        "F44"
+        "F44",
+        "F56"
       ],
       "source_pointers": [
         "app/source-detail/SourceDetailView.swift",
@@ -4281,6 +4284,122 @@
         "core/src/interpretation/instructions/text.rs:27",
         "core/src/interpretation/instructions/text.rs:31",
         "fixtures/intent/contrastive-fixtures.json"
+      ]
+    },
+    {
+      "key": "F56",
+      "parent": null,
+      "title": "Report on a note's status when a Try again is waiting or running",
+      "file_scope": [
+        "core/src/domain/status/",
+        "core/src/ffi/capture.rs (status readout)",
+        "ios/OhAndCoreBridge/CaptureModels.swift",
+        "core/tests/status/",
+        "ios/Tests/CoreBridge/ (additive)"
+      ],
+      "intent": "Item status gains rerun_state, set while an uninterpreted or abstained item's latest interpret job is not terminal, so Sorting… survives screens and relaunch.",
+      "acceptance": [
+        "See the F56 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/domain/status/mod.rs:537",
+        "core/src/domain/status/mod.rs:653",
+        "core/src/ffi/capture.rs:129"
+      ]
+    },
+    {
+      "key": "F57",
+      "parent": null,
+      "title": "Reopen a completed or cancelled item",
+      "file_scope": [
+        "core/src/store/events/mod.rs",
+        "core/src/store/schema/mod.rs (v15 only if event_type is constrained)",
+        "core/src/ffi/item_lifecycle_controls.rs",
+        "core/src/export/ (additive)",
+        "ios/OhAndCoreBridge/CoreHandle+ItemLifecycleControls.swift",
+        "ios/Services/Items/LifecycleControls/",
+        "core/tests/events/",
+        "core/tests/item_lifecycle_controls/",
+        "ios/Tests/ItemLifecycleControls/"
+      ],
+      "intent": "A Reopen lifecycle event returns completed or cancelled items to active without restoring reminders, prompts or suggestion state.",
+      "acceptance": [
+        "See the F57 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/store/events/mod.rs:639",
+        "core/src/ffi/item_lifecycle_controls.rs"
+      ]
+    },
+    {
+      "key": "F58",
+      "parent": null,
+      "title": "Home and search show only open items unless closed ones are asked for",
+      "file_scope": [
+        "core/src/retrieval/recent/",
+        "core/src/ffi/recent_items.rs",
+        "core/src/ffi/retrieval.rs (hit lifecycle field)",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift",
+        "core/tests/retrieval/",
+        "ios/Tests/RecentItems/",
+        "ios/Tests/Retrieval/ (bridge decoding only)"
+      ],
+      "intent": "Recents return only active items; search hits carry lifecycle_state so the app can default to open and mark closed rows.",
+      "acceptance": [
+        "See the F58 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/retrieval/recent/mod.rs:111",
+        "core/src/retrieval/query/mod.rs:16",
+        "core/src/ffi/retrieval.rs:75"
+      ]
+    },
+    {
+      "key": "F59",
+      "parent": null,
+      "title": "Reopen, Undo and Set a reminder again on the item's controls",
+      "file_scope": [
+        "app/item-controls/",
+        "ios/Tests/ItemControls/"
+      ],
+      "intent": "Undo after Complete or Cancel, Reopen on closed items, and an offer to set the cancelled reminder again.",
+      "acceptance": [
+        "See the F59 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F57"
+      ],
+      "source_pointers": [
+        "app/item-controls/ItemControlsView.swift:72",
+        "app/reminders/ReminderEditView.swift"
+      ]
+    },
+    {
+      "key": "F60",
+      "parent": null,
+      "title": "Search shows open items by default, with Include done",
+      "file_scope": [
+        "app/retrieval/",
+        "ios/Tests/Retrieval/"
+      ],
+      "intent": "Default lifecycle filter active; an explicit, unpersisted Include done; closed rows marked Done or Cancelled.",
+      "acceptance": [
+        "See the F60 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F58"
+      ],
+      "source_pointers": [
+        "app/retrieval/RetrievalSearchModel.swift",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift:42"
       ]
     }
   ],
@@ -5065,7 +5184,9 @@
       "U04b",
       "U07c",
       "U08b",
-      "U09"
+      "U09",
+      "F59",
+      "F60"
     ],
     "U10b": [
       "U10a"
@@ -5075,7 +5196,8 @@
     "F44": [
       "F43",
       "F47",
-      "F45"
+      "F45",
+      "F56"
     ],
     "F45": [
       "F37",
@@ -5098,7 +5220,8 @@
       "U10a"
     ],
     "F48": [
-      "F44"
+      "F44",
+      "F58"
     ],
     "E02b": [],
     "F51": [],
@@ -5107,9 +5230,19 @@
     "F54a": [],
     "F54b": [
       "F54a",
-      "F44"
+      "F44",
+      "F56"
     ],
-    "F55": []
+    "F55": [],
+    "F56": [],
+    "F57": [],
+    "F58": [],
+    "F59": [
+      "F57"
+    ],
+    "F60": [
+      "F58"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5375,6 +5508,14 @@
     {
       "date": "2026-10-27",
       "change": "F53 amendment 1: owns the VoiceRecorderFanOut permission forward; remove the protocol default; one-shot VoiceOver event. T10a amendment 1: production metrics build wiring; container contents (marker SHA-256) replace path equality; fixed-provider seed with synthetic credential; ownership of Makefile release-test, metrics FFI/bridge/tests, UpgradeCheck tests."
+    },
+    {
+      "date": "2026-10-28",
+      "change": "F56 added: item status rerun_state for in-flight reruns of uninterpreted and abstained items. F44 amendment 2: Sorting… from rerun_state, fresh-model tests, rerun batching at MAX_RERUN_BATCH, Status refresh on unlock; F44 and F54b depend on F56."
+    },
+    {
+      "date": "2026-10-28",
+      "change": "Maintainer decision: closed (completed or cancelled) items are omitted from Home and default search; search has an explicit Include done. F57 reopen (core), F58 open-only recents and hit lifecycle (core), F59 Undo/Reopen/Set a reminder again (UI), F60 search default and Include done (UI). F48 depends on F58; U10a depends on F59 and F60."
     }
   ]
 }

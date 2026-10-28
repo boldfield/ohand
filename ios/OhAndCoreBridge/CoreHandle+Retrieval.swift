@@ -136,11 +136,13 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
     public let matchSpan: CoreRetrievalMatchSpan?
     /// The capture instant as stored (RFC 3339).
     public let capturedAt: String
+    /// `active`, `completed` or `cancelled`; `nil` when the core did not say.
+    public let lifecycleState: String?
 
     public init(
         itemID: String, captureID: String, scope: String, text: String, textBasis: CoreRetrievalTextBasis,
         originalText: String?, matched: CoreRetrievalMatchedText, matchSpan: CoreRetrievalMatchSpan?,
-        capturedAt: String, itemType: String? = nil
+        capturedAt: String, itemType: String? = nil, lifecycleState: String? = nil
     ) {
         self.itemID = itemID
         self.captureID = captureID
@@ -152,6 +154,7 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
         self.matched = matched
         self.matchSpan = matchSpan
         self.capturedAt = capturedAt
+        self.lifecycleState = lifecycleState
     }
 
     enum CodingKeys: String, CodingKey {
@@ -165,6 +168,7 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
         case matched
         case matchSpan = "match_span"
         case capturedAt = "captured_at"
+        case lifecycleState = "lifecycle_state"
     }
 }
 

@@ -2,8 +2,9 @@
 //
 // The listing reads the authoritative tables (items, captures, corrections,
 // transcript_attachments) directly, so it needs no search query and cannot disagree with the
-// scope and lifecycle rules of retrieval: deleted (tombstoned) items never appear and only items
-// whose current scope is in `read_scopes` do. Ordering is the capture instant as a point in time
+// scope rules of retrieval: only open (active) items appear, so completed, cancelled and
+// deleted (tombstoned) items never do, and only items whose current scope is in `read_scopes`
+// do. Ordering is the capture instant as a point in time
 // (so mixed UTC offsets order correctly), newest first, then item id. Paging is by keyset cursor
 // rather than offset, so a capture saved between two pages cannot shift or repeat an item.
 // Items whose stored capture instant is not a valid timestamp cannot be placed in the order and
@@ -108,7 +109,7 @@ pub fn recent_items(
         "SELECT i.item_id, c.capture_instant
            FROM items i
            JOIN captures c ON c.capture_id = i.capture_id
-          WHERE i.lifecycle_state != 'deleted'
+          WHERE i.lifecycle_state = 'active'
             AND COALESCE(i.current_scope, c.item_scope) IN ({scope_placeholders})"
     );
     let scope_parameters = read_scopes.iter().map(|scope| scope.as_str().to_string());

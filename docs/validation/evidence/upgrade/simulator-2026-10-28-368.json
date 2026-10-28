@@ -1,0 +1,215 @@
+{
+  "candidate": {
+    "build_number": 368,
+    "revision": "b14e272d19babea7d0d03987f4cb222b03dc33ee"
+  },
+  "checks": [
+    {
+      "check": "prior and candidate are different full revisions",
+      "passed": true
+    },
+    {
+      "check": "prior revision is an ancestor of the candidate",
+      "passed": true
+    },
+    {
+      "check": "build number before seeding is the prior build's",
+      "detail": "1",
+      "passed": true
+    },
+    {
+      "check": "build number after the upgrade is the candidate's",
+      "detail": "368",
+      "passed": true
+    },
+    {
+      "check": "the upgrade raised the build number",
+      "detail": "1 -> 368",
+      "passed": true
+    },
+    {
+      "check": "build number after relaunch is unchanged",
+      "detail": "368",
+      "passed": true
+    },
+    {
+      "check": "the data container's contents carried over the upgrade (marker file written before it)",
+      "passed": true
+    },
+    {
+      "check": "data container is the same after relaunch",
+      "passed": true
+    },
+    {
+      "check": "the candidate was installed over the prior build, never uninstalled",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: report schema",
+      "detail": "ohand.upgrade-report.v1",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: report names the candidate build",
+      "detail": "build 368",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: kept capture present and active",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: correction present and authoritative",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: original of the corrected capture kept",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: deleted item stays deleted",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: deleted item absent from the recents",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: reminder item present with its reminder",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: exactly the seeded captures are listed",
+      "detail": "3 listed",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: exactly one pending notification request, for the reminder",
+      "detail": "1 pending",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: provider profile configured with its credential",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: processing routes to the provider",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: exactly one provider profile exists",
+      "detail": "1 profiles",
+      "passed": true
+    },
+    {
+      "check": "after upgrade: the provider keeps the seeded type, model and authorized destinations",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: report schema",
+      "detail": "ohand.upgrade-report.v1",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: report names the candidate build",
+      "detail": "build 368",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: kept capture present and active",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: correction present and authoritative",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: original of the corrected capture kept",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: deleted item stays deleted",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: deleted item absent from the recents",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: reminder item present with its reminder",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: exactly the seeded captures are listed",
+      "detail": "3 listed",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: exactly one pending notification request, for the reminder",
+      "detail": "1 pending",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: provider profile configured with its credential",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: processing routes to the provider",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: exactly one provider profile exists",
+      "detail": "1 profiles",
+      "passed": true
+    },
+    {
+      "check": "after relaunch: the provider keeps the seeded type, model and authorized destinations",
+      "passed": true
+    },
+    {
+      "check": "reminder identity and fire time are unchanged by the relaunch",
+      "passed": true
+    },
+    {
+      "check": "pending notification requests are unchanged by the relaunch",
+      "passed": true
+    },
+    {
+      "check": "UI run after the upgrade passed (captures, correction, search, recents, reminder time)",
+      "passed": true
+    },
+    {
+      "check": "UI seeding run passed",
+      "passed": true
+    }
+  ],
+  "collected_at": "2026-10-28T05:22:21Z",
+  "data_container_path_unchanged_by_install": false,
+  "data_container_unchanged_after_relaunch": true,
+  "installed_build_numbers": {
+    "after_relaunch": "368",
+    "after_upgrade": "368",
+    "before_seeding": "1"
+  },
+  "prior": {
+    "build_number": 1,
+    "revision": "514641a7f790e66e316085a25e209180055d4ccc"
+  },
+  "prior_revision_has_upgrade_report": "absent",
+  "result": "passed",
+  "run": {
+    "workflow_run": "https://github.com/boldfield/ohand/actions/runs/40635251080"
+  },
+  "schema": "ohand.upgrade-simulator-record.v1",
+  "seeded": {
+    "captures": 4,
+    "corrections": 1,
+    "deleted": 1,
+    "provider_profiles": 1,
+    "reminders": 1
+  },
+  "simulator": {
+    "name": "iPhone 17",
+    "runtime": "26.5"
+  }
+}
