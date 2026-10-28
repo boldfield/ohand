@@ -426,6 +426,11 @@ fn item_type_lifecycle_and_route_filters_apply() {
     }));
     assert_eq!(completed["total_accessible"], 0);
 
+    let everything = session.succeed(&json!({"op": "list", "read_scopes": both}));
+    for hit in everything["hits"].as_array().unwrap() {
+        assert_eq!(hit["lifecycle_state"], "active");
+    }
+
     let work_route = session.succeed(&json!({
         "op": "list", "read_scopes": both, "route_ids": ["route-work"]
     }));

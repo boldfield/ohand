@@ -22,7 +22,8 @@
 //! ranges, before the store is read. The outcome event is `{"operation_id", "total_accessible",
 //! "hits"}`. `total_accessible` counts the items the caller may read that satisfy the filters,
 //! before paging. Each hit is `{"item_id", "capture_id", "scope", "item_type", "text",
-//! "text_basis", "original_text", "matched", "match_span", "captured_at"}`: `item_type` is the
+//! "text_basis", "original_text", "matched", "match_span", "captured_at", "lifecycle_state"}`: `lifecycle_state` is `active`,
+//! `completed` or `cancelled`; `item_type` is the
 //! item's current type, or `null` while it is unclassified; `text` is the current text to show
 //! and quote, `text_basis` is `original`, `transcribed` or `corrected`, `original_text` is set
 //! only for a corrected item, `matched` is `current` or `superseded_original` (only the replaced
@@ -334,6 +335,7 @@ fn hit_json(
         },
         "match_span": span,
         "captured_at": capture_instant(connection, &hit.item_id)?,
+        "lifecycle_state": hit.lifecycle_state,
     }))
 }
 

@@ -345,6 +345,58 @@ fn deleted_items_never_appear() {
 }
 
 #[test]
+fn completed_and_cancelled_items_never_appear_and_paging_stays_whole() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let set_lifecycle = |item_id: &str, state: &str| {
+        let database = Database::open(&fixture.store_path, Arc::new(SystemClock)).unwrap();
+        database
+            .conn()
+            .execute(
+                "UPDATE items SET lifecycle_state = ? WHERE item_id = ?",
+                rusqlite::params![state, item_id],
+            )
+            .unwrap();
+    };
+    let session = Session::over(&fixture.store_path);
+    let request = json!({"read_scopes": ["personal", "work"], "limit": 100});
+    let open_before = item_ids(&session.succeed(&request));
+    assert!(open_before.contains(&fixture.seeded.typed));
+    assert!(open_before.contains(&fixture.seeded.work));
+
+    set_lifecycle(&fixture.seeded.typed, "completed");
+    set_lifecycle(&fixture.seeded.work, "cancelled");
+    let expected: Vec<String> = open_before
+        .iter()
+        .filter(|id| **id != fixture.seeded.typed && **id != fixture.seeded.work)
+        .cloned()
+        .collect();
+
+    let mut collected: Vec<String> = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let mut page_request = json!({"read_scopes": ["personal", "work"], "limit": 2});
+        if !cursor.is_null() {
+            page_request["cursor"] = cursor.clone();
+        }
+        let body = session.succeed(&page_request);
+        collected.extend(item_ids(&body));
+        cursor = body["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    }
+    assert_eq!(collected, expected, "no gap, no duplicate, no closed item");
+
+    set_lifecycle(&fixture.seeded.typed, "active");
+    let reopened = item_ids(&session.succeed(&request));
+    assert!(reopened.contains(&fixture.seeded.typed));
+    assert!(!reopened.contains(&fixture.seeded.work));
+    session.close();
+}
+
+#[test]
 fn pages_follow_the_cursor_without_gaps_or_repeats() {
     let _guard = serial();
     let fixture = Fixture::new();
