@@ -152,11 +152,20 @@ struct SourceDetailView: View {
         case .none:
             EmptyView()
         case .sorting:
-            Text(Self.sortingText)
-                .font(DSFont.footer)
-                .foregroundColor(DSColor.inkMuted.color)
-                .padding(.horizontal, DSSpacing.md)
-                .reported(Self.sortingIdentifier, renderReporter, layoutReporter)
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(Self.sortingText)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .reported(Self.sortingIdentifier, renderReporter, layoutReporter)
+                if let summary = model.tryAgainSummary {
+                    Text(summary.text)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.tryAgainSummaryIdentifier, renderReporter, layoutReporter)
+                }
+            }
+            .padding(.horizontal, DSSpacing.md)
         case .failed(let reason):
             VStack(alignment: .leading, spacing: DSSpacing.xxs) {
                 Text(reason)

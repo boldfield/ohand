@@ -85,6 +85,8 @@ final class StatusModel: ObservableObject {
     /// The most notes the Status screen lists before "Show all".
     static let listedNoteLimit = 5
     private static let readLimit = 100
+    /// Pages followed per read (100 notes each), so a runaway cursor cannot loop forever.
+    private static let maxPages = 50
 
     /// Newest first, as the core listed them. Empty unless `failedNotesAccess` is `readable`.
     @Published private(set) var failedNotes: [FailedNote] = []
@@ -151,8 +153,15 @@ final class StatusModel: ObservableObject {
     @MainActor private func refreshFailedNotes() async {
         guard let failedWork else { return }
         do {
-            let page = try await failedWork.failedInterpretations(limit: Self.readLimit, cursor: nil)
-            failedNotes = page.failed.map(FailedNote.init)
+            var notes: [FailedNote] = []
+            var cursor: String?
+            for _ in 0..<Self.maxPages {
+                let page = try await failedWork.failedInterpretations(limit: Self.readLimit, cursor: cursor)
+                notes += page.failed.map(FailedNote.init)
+                guard let next = page.nextCursor else { break }
+                cursor = next
+            }
+            failedNotes = notes
             failedNotesAccess = .readable
         } catch {
             failedNotes = []

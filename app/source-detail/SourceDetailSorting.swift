@@ -28,6 +28,10 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
     private let jobs: FailedInterpretationsControlling
     private let processing: ProcessingRead
     private let afterQueued: () -> Void
+    /// Notes this source queued again. A permanent failure leaves the note `uninterpreted` and the rerun does not change
+    /// that, so the replacement job's progress is not in the item status; this set keeps it visible as "Sorting…".
+    private let requeuedLock = NSLock()
+    private var requeued: Set<String> = []
 
     init(
         jobs: FailedInterpretationsControlling, processing: @escaping ProcessingRead,
@@ -49,13 +53,21 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
             cursor = next
         }
         guard let status = await processing(itemID) else { return .none }
+        if status.state == "uninterpreted", isRequeued(itemID) { return .sorting }
         let isWorking = status.state == "processing" || status.state == "unprocessed"
         return isWorking && status.jobStatus != "awaiting_configuration" ? .sorting : .none
     }
 
     func tryAgain(itemID: String) async -> FailedNotesRerunSummary {
         guard let result = try? await jobs.rerunFailedInterpretations(itemIDs: [itemID]) else { return .failed }
-        if result.moved > 0 { afterQueued() }
+        if result.moved > 0 {
+            requeuedLock.withLock { _ = requeued.insert(itemID) }
+            afterQueued()
+        }
         return FailedNotesRerunSummary(result)
+    }
+
+    private func isRequeued(_ itemID: String) -> Bool {
+        requeuedLock.withLock { requeued.contains(itemID) }
     }
 }

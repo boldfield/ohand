@@ -34,12 +34,17 @@ private final class FakeFailedWork: FailedInterpretationsControlling, @unchecked
     var listing: Result<[JobConfigurationFailedInterpretation], Error>
     var rerunResult: Result<JobConfigurationRerunResult, Error> = .success(
         JobConfigurationRerunResult(moved: 0, skipped: 0, skippedItems: []))
+    /// Pages after the first, read with cursors "1", "2", and so on.
+    var laterPages: [[JobConfigurationFailedInterpretation]] = []
     private(set) var rerunRequests: [[String]] = []
 
     init(_ listing: Result<[JobConfigurationFailedInterpretation], Error>) { self.listing = listing }
 
     func failedInterpretations(limit: Int?, cursor: String?) async throws -> JobConfigurationFailedInterpretations {
-        JobConfigurationFailedInterpretations(failed: try listing.get(), nextCursor: nil)
+        let index = cursor.flatMap { Int($0) } ?? 0
+        let page = index == 0 ? try listing.get() : laterPages[index - 1]
+        return JobConfigurationFailedInterpretations(
+            failed: page, nextCursor: index < laterPages.count ? String(index + 1) : nil)
     }
 
     func rerunFailedInterpretations(itemIDs: [String]) async throws -> JobConfigurationRerunResult {
@@ -149,6 +154,19 @@ final class StatusFailedNotesTests: XCTestCase {
             XCTAssertEqual(rendered[StatusView.retryNotesIdentifier], StatusText.retryLabel)
             XCTAssertNil(rendered[StatusView.unlockIdentifier])
         }
+    }
+
+    func testEveryPageOfFailedNotesIsReadAndRunAgain() async {
+        let work = FakeFailedWork(.success((1...2).map { failedNote($0) }))
+        work.laterPages = [[failedNote(3)], [failedNote(4)]]
+        work.rerunResult = .success(JobConfigurationRerunResult(moved: 4, skipped: 0, skippedItems: []))
+        let model = makeModel(work)
+        await model.refresh()
+        XCTAssertEqual(model.failedNotes.map(\.itemID), ["item-1", "item-2", "item-3", "item-4"])
+
+        await model.retryFailedNotes()
+
+        XCTAssertEqual(work.rerunRequests, [["item-1", "item-2", "item-3", "item-4"]])
     }
 
     func testMoreThanFiveNotesListFiveAndLeadToShowAll() {

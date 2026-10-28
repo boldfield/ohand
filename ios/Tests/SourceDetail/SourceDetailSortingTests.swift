@@ -130,6 +130,38 @@ final class SourceDetailSortingTests: XCTestCase {
         XCTAssertEqual(sorting.tryAgainCalls, 1, "a note that is not failed offers no Try again")
     }
 
+    /// The production transition: a permanent failure leaves the note `uninterpreted`; the rerun queues a replacement
+    /// without changing that, and the replaced failure leaves the failed-work list.
+    func testARerunPermanentFailureStaysVisibleAsSortingWhileItsReplacementJobRuns() async {
+        let failed = JobConfigurationFailedInterpretations(
+            failed: [failedRecord(Self.itemID, reason: "rejected")], nextCursor: nil)
+        let jobs = ScriptedJobs([failed])
+        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil) }, afterQueued: {})
+        let model = makeModel(source)
+        await model.load()
+        XCTAssertEqual(model.sorting, .failed(reason: "The request was not accepted"))
+        jobs.pages = [JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)]
+
+        await model.tryAgain()
+
+        XCTAssertEqual(model.sorting, .sorting)
+        XCTAssertEqual(model.tryAgainSummary, .done(queued: 1, needsSetting: 0))
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            host(model, style: style)
+            wait("Sorting… and the queued line are shown, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.sortingIdentifier) && self.shown.contains(SourceDetailView.tryAgainSummaryIdentifier)
+            }
+            XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier))
+        }
+    }
+
+    func testAnUninterpretedNoteThatWasNeverRunAgainShowsNothing() async {
+        let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
+        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil) }, afterQueued: {})
+        let state = await source.sorting(itemID: Self.itemID)
+        XCTAssertEqual(state, .none)
+    }
+
     func testASortingNoteShowsSortingAndNothingElse() {
         for style in [UIUserInterfaceStyle.light, .dark] {
             host(makeModel(ScriptedSorting([.sorting])), style: style)
