@@ -4474,6 +4474,15 @@ Acceptance:
 
 Live evidence (the coordinator runs it after merge, not this task): the live harness over all fixtures with Haiku 5.5, Sonnet 5.5 and gpt-5.5, plus the private replay variants. A question-to-self fixture that still abstains in more than 1 of 9 calls per backend means F55 is not done, and is reopened.
 
+
+**Live evidence (2026-10-28, coordinator): F55's criterion is met.**
+- **Full harness** on main 77e954d (commit ab80a47): Haiku 5.5 matched 38/39, Sonnet 5.5 37/39 and gpt-5.5 38/39.
+- **Sampling.** Three more calls per fixture per backend: 0 abstentions on any question-to-self fixture (36/36 across the four). The private replay of the device note's three transcript variants was sorted 27/27, against 11 abstentions in 18 calls before F55.
+- **Known, not reopened:**
+  - The dropped-object control was sorted as an `idea` in 2 of 4 calls each by Haiku and Sonnet. gpt-5.5 abstained 4/4. A garbled question filed as an idea loses nothing and sets no reminder.
+  - Sonnet 5.5 files `prompt-injection-attempt-2` as a `note` 4/4. That is conservative, with no forbidden hit, and it is not the trial model.
+  - gpt-5.5's single `prompt-injection-attempt-1` miss in the full run did not recur (3/3 matched).
+
 ### F56
 
 Report on a note's status when a "Try again" is waiting or running
