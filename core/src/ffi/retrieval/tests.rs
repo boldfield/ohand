@@ -4,12 +4,39 @@ use super::*;
 use crate::ffi::core_handle::exports::*;
 use crate::ffi::core_handle::failure::*;
 use crate::ffi::core_handle::tests::{consume, recorder, register, serial, Event, Outcome, WAIT};
+use crate::ffi::item_lifecycle_controls::{
+    apply_item_lifecycle_control, ItemLifecycleControl, LifecycleControl, LifecycleControlOutcome,
+};
 use crate::ingress::import::import_foreground_ingress;
 use crate::retrieval::index::sync_item_in_tx;
 use crate::store::captures::Capture;
 use crate::store::schema::SystemClock;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+/// Ends an item through the same path the lifecycle control export uses.
+fn end_item(store_path: &str, item_id: &str, control: LifecycleControl) {
+    let mut database = Database::open(store_path, Arc::new(SystemClock)).unwrap();
+    let revision: i32 = database
+        .conn()
+        .query_row(
+            "SELECT revision FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome = apply_item_lifecycle_control(
+        &mut database,
+        &ItemLifecycleControl {
+            command_id: format!("end-{item_id}"),
+            item_id: item_id.to_string(),
+            expected_revision: revision,
+            control,
+        },
+    )
+    .unwrap();
+    assert!(matches!(outcome, LifecycleControlOutcome::Applied { .. }));
+}
 
 const WORK_SECRET: &str = "zebrafinch";
 const QUERY_SENTINEL: &str = "sentinelquery";
@@ -427,6 +454,7 @@ fn item_type_lifecycle_and_route_filters_apply() {
     assert_eq!(completed["total_accessible"], 0);
 
     let everything = session.succeed(&json!({"op": "list", "read_scopes": both}));
+    assert!(!everything["hits"].as_array().unwrap().is_empty());
     for hit in everything["hits"].as_array().unwrap() {
         assert_eq!(hit["lifecycle_state"], "active");
     }
@@ -745,5 +773,54 @@ fn an_unaccented_query_gets_a_span_in_accented_current_text() {
         assert_eq!(hit["matched"], "current", "{query}");
         assert_eq!(hit["match_span"], expected, "{query}");
     }
+    session.close();
+}
+
+#[test]
+fn closed_hits_carry_their_lifecycle_and_the_default_filter_still_returns_them() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    end_item(
+        &fixture.store_path,
+        &fixture.seeded.personal_dentist,
+        LifecycleControl::Complete,
+    );
+    end_item(
+        &fixture.store_path,
+        &fixture.seeded.personal_groceries,
+        LifecycleControl::Cancel,
+    );
+    let session = Session::over(&fixture.store_path);
+    let both = ["personal", "work"];
+
+    let everything = session.succeed(&json!({"op": "list", "read_scopes": both}));
+    let state_of = |item_id: &str| {
+        everything["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["item_id"] == item_id)
+            .map(|hit| hit["lifecycle_state"].as_str().unwrap().to_string())
+    };
+    assert_eq!(
+        state_of(&fixture.seeded.personal_dentist).as_deref(),
+        Some("completed")
+    );
+    assert_eq!(
+        state_of(&fixture.seeded.personal_groceries).as_deref(),
+        Some("cancelled")
+    );
+    assert_eq!(
+        state_of(&fixture.seeded.work_budget).as_deref(),
+        Some("active")
+    );
+
+    let open_only = session.succeed(&json!({
+        "op": "list", "read_scopes": both, "lifecycle_states": ["active"]
+    }));
+    let open_ids = item_ids(&open_only);
+    assert!(!open_ids.is_empty());
+    assert!(!open_ids.contains(&fixture.seeded.personal_dentist));
+    assert!(!open_ids.contains(&fixture.seeded.personal_groceries));
     session.close();
 }

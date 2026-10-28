@@ -4,6 +4,9 @@ use super::*;
 use crate::ffi::core_handle::exports::*;
 use crate::ffi::core_handle::failure::*;
 use crate::ffi::core_handle::tests::{consume, recorder, register, serial, Event, Outcome, WAIT};
+use crate::ffi::item_lifecycle_controls::{
+    apply_item_lifecycle_control, ItemLifecycleControl, LifecycleControl, LifecycleControlOutcome,
+};
 use crate::ingress::import::import_foreground_ingress;
 use crate::lifecycle::delete_intent::mark_deletion_intent;
 use crate::store::captures::Capture;
@@ -11,6 +14,30 @@ use crate::store::schema::SystemClock;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tempfile::TempDir;
+
+/// Ends an item through the same path the lifecycle control export uses.
+fn end_item(store_path: &str, item_id: &str, control: LifecycleControl) {
+    let mut database = Database::open(store_path, Arc::new(SystemClock)).unwrap();
+    let revision: i32 = database
+        .conn()
+        .query_row(
+            "SELECT revision FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome = apply_item_lifecycle_control(
+        &mut database,
+        &ItemLifecycleControl {
+            command_id: format!("end-{item_id}"),
+            item_id: item_id.to_string(),
+            expected_revision: revision,
+            control,
+        },
+    )
+    .unwrap();
+    assert!(matches!(outcome, LifecycleControlOutcome::Applied { .. }));
+}
 
 const CURSOR_SENTINEL: &str = "sentinelcursor";
 
@@ -348,24 +375,22 @@ fn deleted_items_never_appear() {
 fn completed_and_cancelled_items_never_appear_and_paging_stays_whole() {
     let _guard = serial();
     let fixture = Fixture::new();
-    let set_lifecycle = |item_id: &str, state: &str| {
-        let database = Database::open(&fixture.store_path, Arc::new(SystemClock)).unwrap();
-        database
-            .conn()
-            .execute(
-                "UPDATE items SET lifecycle_state = ? WHERE item_id = ?",
-                rusqlite::params![state, item_id],
-            )
-            .unwrap();
-    };
     let session = Session::over(&fixture.store_path);
     let request = json!({"read_scopes": ["personal", "work"], "limit": 100});
     let open_before = item_ids(&session.succeed(&request));
     assert!(open_before.contains(&fixture.seeded.typed));
     assert!(open_before.contains(&fixture.seeded.work));
 
-    set_lifecycle(&fixture.seeded.typed, "completed");
-    set_lifecycle(&fixture.seeded.work, "cancelled");
+    end_item(
+        &fixture.store_path,
+        &fixture.seeded.typed,
+        LifecycleControl::Complete,
+    );
+    end_item(
+        &fixture.store_path,
+        &fixture.seeded.work,
+        LifecycleControl::Cancel,
+    );
     let expected: Vec<String> = open_before
         .iter()
         .filter(|id| **id != fixture.seeded.typed && **id != fixture.seeded.work)
@@ -389,7 +414,15 @@ fn completed_and_cancelled_items_never_appear_and_paging_stays_whole() {
     }
     assert_eq!(collected, expected, "no gap, no duplicate, no closed item");
 
-    set_lifecycle(&fixture.seeded.typed, "active");
+    // There is no reopen path yet (F57), so a direct fixture stands in for it.
+    Database::open(&fixture.store_path, Arc::new(SystemClock))
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE items SET lifecycle_state = 'active' WHERE item_id = ?",
+            [&fixture.seeded.typed],
+        )
+        .unwrap();
     let reopened = item_ids(&session.succeed(&request));
     assert!(reopened.contains(&fixture.seeded.typed));
     assert!(!reopened.contains(&fixture.seeded.work));
