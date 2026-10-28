@@ -3711,6 +3711,14 @@ Acceptance:
 
 Validation is unchanged: `make check` **and** `make test`, both run and reported, plus the exact-head macOS CI run for the submitted commit. Dependencies now include F45 (merged).
 
+
+**Amendment 2 (2026-10-28, coordinator).** Review round 2 (PR #369, head 039b976) rejected acceptance 3. "Sorting…" after a "Try again" came from an in-memory set that only one detail screen held, so it was lost when the person used Try again on Status, reopened the note, or restarted the app. The worker correctly blocked on the missing core seam, which is now F56. F44 depends on F56.
+- **Required.** The detail screen shows "Sorting…" from the item status's `rerun_state` (non-null) as well as from today's `processing` states. Remove the in-memory `requeued` set. Add a test that runs a rerun through Status's model, then builds a **fresh** source and detail model and asserts that "Sorting…" is rendered. A second test does the same after reopening the note.
+- **Also required, inside the owned paths.** Status's "Try again" sends at most `MAX_RERUN_BATCH` (100) items per call, chunks larger lists and adds up the outcomes, with a test of more than 100. Status refreshes its own model after unlock (the round 1 note).
+- **Optional.** Instead of silently stopping at the page cap, show an explicit "more than N" state when the failed-work cursor is not exhausted at the cap.
+
+Acceptance is otherwise unchanged.
+
 ### F45
 
 Add a debug-only fixture launch mode for UI tests
@@ -4465,3 +4473,27 @@ Acceptance:
 3. **Tests.** The instruction tests assert the new guidance is present and the forbidden-rule text is unchanged. `make check` and `make test` pass.
 
 Live evidence (the coordinator runs it after merge, not this task): the live harness over all fixtures with Haiku 5.5, Sonnet 5.5 and gpt-5.5, plus the private replay variants. A question-to-self fixture that still abstains in more than 1 of 9 calls per backend means F55 is not done, and is reopened.
+
+### F56
+
+Report on a note's status when a "Try again" is waiting or running
+
+F44's review, round 2 (PR #369, 2026-10-28), found that "Sorting…" after a "Try again" cannot be shown from durable state. A note whose sorting failed stays `processing_state = uninterpreted` while its replacement job is queued or running, and one that was declined stays `abstained`. `ItemStatus::load` (`core/src/domain/status/mod.rs`, around line 537) reads the interpret job only for `unprocessed` or `processing` items. The failed-work list drops a rerun item through `job_requeues`. So once the screen that started the rerun closes, or the app restarts, nothing can say the note is being sorted. F44, for failed notes, and F54b, for declined ones, both need this.
+
+Owned paths: `core/src/domain/status/`, `core/src/ffi/capture.rs` (the status readout), `ios/OhAndCoreBridge/CaptureModels.swift`, `core/tests/status/` and additive tests in `ios/Tests/CoreBridge/`.
+
+Dependencies: none (F43 and F54a have merged).
+
+Acceptance:
+
+1. **A new field, not a reuse.** `ItemStatus` and `StatusReadout` gain `rerun_state: Option<&'static str>`. It is set only when `processing_state` is `uninterpreted` or `abstained` **and** the item's latest `interpret` job is not terminal:
+   - `queued` (waiting, not yet claimed);
+   - `running` (leased);
+   - `retrying_after_transient`;
+   - `awaiting_configuration`.
+
+   These use the same rules `load_interpretation_job_status` already applies. Otherwise it is null. `processing_job_status` keeps its current meaning and values, because Privacy settings and other readers depend on it.
+2. **It ends with the job.** When the replacement completes, `processing_state` moves on as it does today and `rerun_state` returns to null. When the replacement fails, `rerun_state` is null and the item is listed again by F43's failed-work read.
+3. **It works from a fresh read.** It needs no in-memory state. A test reruns a failed note and an abstained note through the core operations (F43's and F54a's), then opens a new database handle and reads the status: `queued`. It then claims the job and gets `running`, completes it and gets null with the new processing state, and fails it and gets null with the item listed as failed again. Swift decodes the field, and absence decodes as nil. Native edits need exact-head macOS CI evidence.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
