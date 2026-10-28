@@ -7,6 +7,7 @@ a real signed build.
 import hashlib
 import json
 import plistlib
+import shutil
 import subprocess
 import sys
 import unittest
@@ -22,6 +23,7 @@ from test_sign_probe import (  # noqa: E402
 import sign_trial_candidate  # noqa: E402
 
 CANDIDATE_SCRIPT = Path(__file__).resolve().parent / "sign_trial_candidate.sh"
+REAL_GENERATOR = Path(__file__).resolve().parents[2] / "ios" / "scripts" / "generate.sh"
 INFO_PLIST = Path("ios") / "AppAssembly" / "Info.plist"
 SYNTHETIC_IDENTITY_FRAGMENT = "Synthetic Person"
 
@@ -40,6 +42,10 @@ class CandidateTestCase(SigningToolTestCase):
         self.checkout = self.elsewhere / "checkout"
         (self.checkout / INFO_PLIST).parent.mkdir(parents=True)
         (self.checkout / INFO_PLIST).write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.1.0"}))
+        # The archive step runs the certified checkout's own generator script, so the synthetic checkout carries a copy.
+        generator = self.checkout / "ios" / "scripts" / "generate.sh"
+        generator.parent.mkdir(parents=True)
+        shutil.copy2(REAL_GENERATOR, generator)
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.checkout)], check=True)
         git(self.checkout, "add", "-A")
         git(self.checkout, "commit", "-q", "-m", "synthetic")
@@ -115,6 +121,15 @@ class CandidateRecordTests(CandidateTestCase):
         with self.assertRaises(sign_trial_candidate.sign_probe.SigningError):
             sign_trial_candidate.write_record(record | {"build_number": "1", "revision": "a" * 40}, self.records, [SYNTHETIC_TEAM])
         self.assertEqual(list(self.records.glob("*")) if self.records.exists() else [], [])
+
+
+class CandidateRootTests(CandidateTestCase):
+    def test_the_archived_project_is_the_certified_checkout(self):
+        result = self.candidate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archive_call = self.calls_of("xcodebuild", "archive")[0]["argv"]
+        archived_project = Path(archive_call[archive_call.index("-project") + 1])
+        self.assertEqual(archived_project, self.checkout.resolve() / "ios" / "OhAnd.xcodeproj")
 
 
 class CandidateRefusalTests(CandidateTestCase):

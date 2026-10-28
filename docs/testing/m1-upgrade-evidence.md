@@ -46,7 +46,8 @@ What the check requires (each is a named check in the record):
   the script writes a marker file into the prior container before the upgrade and finds it in the container afterwards. The
   record also says whether the container's path changed. On the simulator `simctl install` over an installed app can give the
   data a new container directory (the identifier in the path) while keeping its contents, so the path is recorded, not required
-  to be equal; on a device the container does not move;
+  to be equal. iOS does not promise a stable absolute container path across an install, so the device procedure relies on the
+  contents carrying over, not on the path;
 * every seeded source is present, active and has the length it was typed with; the corrected capture's authoritative text is the
   correction and its original is kept;
 * the deleted item is not found and not in the recents;

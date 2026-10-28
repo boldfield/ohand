@@ -35,7 +35,9 @@ final class UpgradeSeedUITests: UpgradeUITestCase {
                     correctedTextLength: correctedFinalText.count),
                 deleted: .init(itemID: deletedID),
                 reminder: .init(itemID: reminderID, textLength: reminderText.count, storedTimeLabel: storedTimeLabel),
-                provider: .init(profileName: providerName)))
+                provider: .init(
+                    profileName: providerName, providerProtocol: "anthropic", model: providerModel,
+                    destinationClasses: ["cloud"])))
     }
 
     // MARK: Captures

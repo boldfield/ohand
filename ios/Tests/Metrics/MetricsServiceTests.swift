@@ -244,8 +244,10 @@ final class MetricsServiceTests: XCTestCase {
         // No build argument: the default is the app's own Info.plist identity.
         let service = MetricsService(core: core, session: session)
         _ = try await service.exportReport()
-        XCTAssertEqual(
-            core.requests, [.export(readAuthentication: .authenticated, build: CoreMetricsBuild.current())])
+        // A test host whose Info.plist were not stamped would make `current()` nil and hide a missing build.
+        let runningBuild = try XCTUnwrap(CoreMetricsBuild.current(), "the test host's Info.plist carries no build identity")
+        XCTAssertNotNil(runningBuild.revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression))
+        XCTAssertEqual(core.requests, [.export(readAuthentication: .authenticated, build: runningBuild)])
     }
 
     func testTheExportNamesTheBuildTheAppSupplies() async throws {

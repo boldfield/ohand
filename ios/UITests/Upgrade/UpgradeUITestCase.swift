@@ -25,6 +25,10 @@ struct UpgradeExpectations: Codable {
     }
     struct Provider: Codable {
         let profileName: String
+        /// What the seeding run chose and the app then reported: the verifier requires exactly these after the upgrade.
+        let providerProtocol: String
+        let model: String
+        let destinationClasses: [String]
     }
 
     let kept: Kept

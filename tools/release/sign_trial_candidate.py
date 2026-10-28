@@ -154,6 +154,11 @@ def sign(arguments: argparse.Namespace) -> int:
         print(f"error: {error.message}", file=sys.stderr)
         return error.exit_code
     archive_name = f"OhAnd-{info['version']}-{info['build_number']}-{info['revision'][:8]}.ipa"
+    # sign_probe.py archives the checkout its module globals name; point them at the certified checkout so the record
+    # and the archive cannot describe different trees.
+    certified_root = repository.resolve()
+    sign_probe.REPO_ROOT = certified_root
+    sign_probe.IOS_ROOT = certified_root / "ios"
     run = CandidateRun(output_dir, archive_name, SCHEME, False, Path(arguments.evidence_dir), dict(os.environ))
     sign_probe.install_signal_handlers()
     exit_code = sign_probe.execute(run)
@@ -184,7 +189,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--evidence-dir", default=str(sign_probe.DEFAULT_EVIDENCE_DIR),
                         help="directory for sign_probe.py's sanitized evidence record")
     parser.add_argument("--repo", default=str(REPO_ROOT),
-                        help="checkout whose revision is certified (default: this one); sign_probe.py builds the checkout it lives in")
+                        help="checkout that is both archived and certified in the record (default: this one)")
     parser.add_argument("--verify", metavar="RECORD", help="check --archive against RECORD's checksum instead of signing")
     parser.add_argument("--archive", help="the .ipa to check with --verify")
     arguments = parser.parse_args(argv)

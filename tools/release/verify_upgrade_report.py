@@ -115,8 +115,13 @@ def check_report(checks: Checks, label: str, report: Dict[str, Any], expectation
                  len(configured) == 1 and configured[0]["credential_bound"] and configured[0]["credential_status"] == "present")
     checks.check(f"{label}: processing routes to the provider",
                  len(configured) == 1 and configured[0]["route_covered"])
-    checks.check(f"{label}: the provider names its model and the destination classes its route allows",
-                 len(configured) == 1 and bool(configured[0].get("model")) and bool(configured[0].get("destination_classes")))
+    seeded = expectations["provider"]
+    checks.check(f"{label}: exactly one provider profile exists", len(report.get("providers", [])) == 1,
+                 f"{len(report.get('providers', []))} profiles")
+    checks.check(f"{label}: the provider keeps the seeded type, model and authorized destinations",
+                 len(configured) == 1 and configured[0].get("protocol") == seeded["providerProtocol"]
+                 and configured[0].get("model") == seeded["model"]
+                 and sorted(configured[0].get("destination_classes") or []) == sorted(seeded["destinationClasses"]))
 
 
 def provider_summary(report: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -22,7 +22,8 @@ def expectations():
         "corrected": {"itemID": "item-corrected", "originalTextLength": 36, "correctedTextLength": 56},
         "deleted": {"itemID": "item-deleted"},
         "reminder": {"itemID": "item-reminder", "textLength": 37, "storedTimeLabel": "synthetic label"},
-        "provider": {"profileName": "upgrade-check-provider"},
+        "provider": {"profileName": "upgrade-check-provider", "providerProtocol": "open_ai", "model": "synthetic-model",
+                     "destinationClasses": ["cloud"]},
     }
 
 
@@ -166,10 +167,18 @@ class LossTests(unittest.TestCase):
         checks, _ = run(before=before)
         self.assertEqual(failed(checks), [])
 
-    def test_the_provider_must_name_a_model_and_destinations(self):
+    def test_each_provider_field_differing_from_the_seed_fails_without_a_prior_report(self):
+        for key, value in (("model", "other-model"), ("destination_classes", ["private_server"]),
+                           ("destination_classes", []), ("protocol", "anthropic")):
+            for which in ("after", "relaunch"):
+                changed = report()
+                changed["providers"][0][key] = value
+                self.assert_fails("keeps the seeded type, model", **{which: changed})
+
+    def test_a_second_provider_profile_fails(self):
         after = report()
-        after["providers"][0]["destination_classes"] = []
-        self.assert_fails("names its model", after=after)
+        after["providers"].append({**after["providers"][0], "default_for": [], "revoked": True})
+        self.assert_fails("exactly one provider profile", after=after)
 
     def test_the_same_build_number_is_not_an_upgrade(self):
         changed = facts()
