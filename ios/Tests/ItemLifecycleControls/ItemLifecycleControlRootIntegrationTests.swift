@@ -202,11 +202,10 @@ final class ItemLifecycleControlRootIntegrationTests: XCTestCase {
         let storedInstant = scalar("SELECT resolved_instant FROM reminders WHERE item_id = '\(itemID)'")
         let start = try revision(of: itemID)
 
-        XCTAssertThrowsError(try run {
+        let early = try run {
             try await controls.reopen(commandID: "cmd-early", itemID: itemID, expectedRevision: start)
-        }) { error in
-            XCTAssertEqual(error as? ItemLifecycleControlError, .alreadyOpen)
         }
+        XCTAssertEqual(early, .alreadyOpen)
         _ = try run { try await controls.complete(commandID: "cmd-1", itemID: itemID, expectedRevision: start) }
 
         let receipt = try run {
@@ -214,8 +213,9 @@ final class ItemLifecycleControlRootIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(
             receipt,
-            ItemReopenReceipt(
-                itemID: itemID, revision: start + 2, replayed: false, formerReminderInstant: storedInstant))
+            .reopened(
+                ItemReopenReceipt(
+                    itemID: itemID, revision: start + 2, replayed: false, formerReminderInstant: storedInstant)))
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
         XCTAssertEqual(scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "cancelled")
 
@@ -225,9 +225,10 @@ final class ItemLifecycleControlRootIntegrationTests: XCTestCase {
         let replay = try run {
             try await controls.reopen(commandID: "cmd-2", itemID: itemID, expectedRevision: start + 1)
         }
-        XCTAssertEqual(replay.revision, start + 2)
-        XCTAssertTrue(replay.replayed)
-        XCTAssertEqual(replay.formerReminderInstant, storedInstant)
+        guard case .reopened(let replayReceipt) = replay else { return XCTFail("expected a reopen") }
+        XCTAssertEqual(replayReceipt.revision, start + 2)
+        XCTAssertTrue(replayReceipt.replayed)
+        XCTAssertEqual(replayReceipt.formerReminderInstant, storedInstant)
     }
 
     func testAnUnknownItemIsNotFound() throws {

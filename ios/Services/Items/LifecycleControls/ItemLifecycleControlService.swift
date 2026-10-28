@@ -31,6 +31,12 @@ public struct ItemReopenReceipt: Equatable, Sendable {
     }
 }
 
+/// What a reopen did. `alreadyOpen` means the item was not completed or cancelled and nothing was written.
+public enum ItemReopenResult: Equatable, Sendable {
+    case reopened(ItemReopenReceipt)
+    case alreadyOpen
+}
+
 /// Why a control was not stored. Every case except `core` and `unreadable` means the core decided and nothing changed.
 public enum ItemLifecycleControlError: Error, Equatable, Sendable {
     /// The read session is capture-only; nothing was requested from the core.
@@ -44,8 +50,6 @@ public enum ItemLifecycleControlError: Error, Equatable, Sendable {
     case itemDeleted
     /// The item was already completed or cancelled (`lifecycle` is `completed` or `cancelled`).
     case itemEnded(lifecycle: String)
-    /// A reopen of an item that is not completed or cancelled.
-    case alreadyOpen
     /// No stored item has that ID.
     case itemNotFound
     case core(CoreFailure)
@@ -109,13 +113,13 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
 
     /// Returns a completed or cancelled item to active. The reminder the ending cancelled stays cancelled and suggestion
     /// state is unchanged; the receipt carries the reminder's former instant so the caller can offer to set it again.
-    public func reopen(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemReopenReceipt {
+    public func reopen(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemReopenResult {
         let answer = try await submit(
             ItemLifecycleControlCommand(
                 commandID: commandID, itemID: itemID, expectedRevision: expectedRevision, control: .reopen))
-        let receipt = try Self.reopenReceipt(from: answer)
-        changes?.publish(.item(receipt.itemID))
-        return receipt
+        let result = try Self.reopenResult(from: answer)
+        if case .reopened(let receipt) = result { changes?.publish(.item(receipt.itemID)) }
+        return result
     }
 
     private func apply(_ command: ItemLifecycleControlCommand) async throws -> ItemLifecycleControlReceipt {
@@ -146,17 +150,18 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
         }
     }
 
-    private static func reopenReceipt(from answer: ItemLifecycleControlAnswer) throws -> ItemReopenReceipt {
+    private static func reopenResult(from answer: ItemLifecycleControlAnswer) throws -> ItemReopenResult {
         switch answer.outcome {
         case "reopened":
             guard let itemID = answer.itemID, let revision = answer.revision else {
                 throw ItemLifecycleControlError.unreadable
             }
-            return ItemReopenReceipt(
-                itemID: itemID, revision: revision, replayed: answer.replayed ?? false,
-                formerReminderInstant: answer.formerReminderInstant)
+            return .reopened(
+                ItemReopenReceipt(
+                    itemID: itemID, revision: revision, replayed: answer.replayed ?? false,
+                    formerReminderInstant: answer.formerReminderInstant))
         case "already_open":
-            throw ItemLifecycleControlError.alreadyOpen
+            return .alreadyOpen
         default:
             try failure(from: answer)
         }

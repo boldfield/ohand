@@ -168,16 +168,20 @@ final class ItemLifecycleControlServiceTests: XCTestCase {
         let replay = try await service.reopen(commandID: "c-1", itemID: "item-1", expectedRevision: 3)
         XCTAssertEqual(
             first,
-            ItemReopenReceipt(
-                itemID: "item-1", revision: 4, replayed: false, formerReminderInstant: "2090-01-01T09:00:00Z"))
-        XCTAssertTrue(replay.replayed)
-        XCTAssertNil(replay.formerReminderInstant)
+            .reopened(
+                ItemReopenReceipt(
+                    itemID: "item-1", revision: 4, replayed: false, formerReminderInstant: "2090-01-01T09:00:00Z")))
+        guard case .reopened(let replayReceipt) = replay else { return XCTFail("expected a reopen") }
+        XCTAssertTrue(replayReceipt.replayed)
+        XCTAssertNil(replayReceipt.formerReminderInstant)
+        let alreadyOpen = try await service.reopen(commandID: "c-2", itemID: "item-1", expectedRevision: 3)
+        XCTAssertEqual(alreadyOpen, .alreadyOpen)
         XCTAssertEqual(
             core.commands.first,
             ItemLifecycleControlCommand(commandID: "c-1", itemID: "item-1", expectedRevision: 3, control: .reopen))
 
         var seen: [ItemLifecycleControlError] = []
-        for index in 2..<7 {
+        for index in 3..<7 {
             do {
                 _ = try await service.reopen(commandID: "c-\(index)", itemID: "item-1", expectedRevision: 3)
                 XCTFail("expected a refusal")
@@ -186,7 +190,7 @@ final class ItemLifecycleControlServiceTests: XCTestCase {
             }
         }
         XCTAssertEqual(
-            seen, [.alreadyOpen, .staleRevision(currentRevision: 9), .itemDeleted, .itemNotFound, .unreadable])
+            seen, [.staleRevision(currentRevision: 9), .itemDeleted, .itemNotFound, .unreadable])
     }
 
     // MARK: Change signal
