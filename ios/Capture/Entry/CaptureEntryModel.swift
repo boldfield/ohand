@@ -11,6 +11,8 @@ protocol VoiceRecordingControlling: AnyObject {
     func start(completion: @escaping (Result<VoiceRecordingStarted, VoiceStartFailure>) -> Void)
     func stop()
     func cancel()
+    /// The microphone permission right now, read without asking.
+    var microphonePermission: MicrophonePermissionStatus { get }
 }
 
 extension VoiceRecordingController: VoiceRecordingControlling {}
@@ -58,6 +60,9 @@ final class CaptureEntryModel: ObservableObject {
     @Published private(set) var recorderState: VoiceRecorderState = .idle
     @Published private(set) var voiceNotice: String?
     @Published private(set) var access: CaptureEntryAccess
+    /// True from the moment a recording starts until the view has spoken the start. It is model state, not a view
+    /// change, because a cold-launch entry starts recording before the first render.
+    @Published private(set) var recordingStartAnnouncementPending = false
 
     let textModel: TextCaptureModel
 
@@ -129,6 +134,11 @@ final class CaptureEntryModel: ObservableObject {
             : "The device has not been unlocked since it restarted, so saving may fail. What you type or record is kept."
     }
 
+    var isRecording: Bool {
+        if case .recording = recorderState { return true }
+        return false
+    }
+
     /// Nothing is being typed, recorded or saved, so a new entry may reset the surface.
     var isIdle: Bool {
         recorderState == .idle && textModel.text.isEmpty && !textModel.isSaving && !(acknowledgment?.isSaving ?? false)
@@ -143,6 +153,14 @@ final class CaptureEntryModel: ObservableObject {
         mode = newPresentation.mode
         clearAcknowledgment()
         voiceNotice = nil
+        startRecordingIfExplicitlyRequested(newPresentation)
+    }
+
+    /// An explicit voice request is the user's own action, so it starts the recording a mic tap would. It never asks
+    /// for permission: unless the microphone is already allowed, the voice surface is shown and the mic tap decides.
+    private func startRecordingIfExplicitlyRequested(_ presentation: CaptureEntryPresentation) {
+        guard presentation.startsRecording, voice.microphonePermission == .granted else { return }
+        startRecording()
     }
 
     /// The capture surface is on screen and can take input. Measures the wait since the system trigger of the current
@@ -210,6 +228,13 @@ final class CaptureEntryModel: ObservableObject {
 
     // MARK: Voice capture
 
+    /// Hands the pending "recording started" announcement to the view, once. The view calls it on appear and on change.
+    func consumeRecordingStartAnnouncement() -> Bool {
+        guard recordingStartAnnouncementPending else { return false }
+        recordingStartAnnouncementPending = false
+        return true
+    }
+
     func startRecording() {
         guard recorderState == .idle, !textModel.isSaving else { return }
         voiceNotice = nil
@@ -237,6 +262,8 @@ final class CaptureEntryModel: ObservableObject {
 
     private func recorderStateChanged(to state: VoiceRecorderState) {
         if case .finishing = state { voiceInputEndedAt = voiceInputEndedAt ?? uptimeNanoseconds() }
+        if case .recording = state, !isRecording { recordingStartAnnouncementPending = true }
+        if case .idle = state { recordingStartAnnouncementPending = false }
         recorderState = state
     }
 
