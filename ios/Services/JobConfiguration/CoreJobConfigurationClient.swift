@@ -71,7 +71,7 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
                 try gate.startRequeueRecord(operationID: operationID, jobID: jobID)
             case .failedInterpretations(_, let limit, let cursor):
                 try gate.startFailedInterpretations(operationID: operationID, limit: limit, cursor: cursor)
-            case .rerunFailedInterpretations:
+            case .rerunFailedInterpretations, .rerunAbstainedInterpretation:
                 try core.startJobConfiguration(
                     operationID: operationID, command: command.withReadScopes(gate.authorizedReadScopes))
             case .requeueJob, .revokeProfile, .repinWaitingWork:
@@ -92,7 +92,9 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
     private static func isStoredStateRead(_ command: JobConfigurationCommand) -> Bool {
         switch command {
         case .jobsPinnedToProfile, .jobsRetiredByRevocation, .requeueRecord, .failedInterpretations: return true
-        case .requeueJob, .revokeProfile, .repinWaitingWork, .rerunFailedInterpretations: return false
+        case .requeueJob, .revokeProfile, .repinWaitingWork, .rerunFailedInterpretations,
+            .rerunAbstainedInterpretation:
+            return false
         }
     }
 

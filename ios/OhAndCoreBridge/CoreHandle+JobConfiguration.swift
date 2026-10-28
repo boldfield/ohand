@@ -24,6 +24,9 @@ public enum JobConfigurationCommand: Equatable, Sendable {
     case failedInterpretations(readScopes: [CoreExportScope], limit: Int?, cursor: String?)
     /// Runs the selected failed items again: a new `interpret` job each, pinned to what the core selects now.
     case rerunFailedInterpretations(readScopes: [CoreExportScope], selection: JobConfigurationRerunSelection)
+    /// Runs one abstained item again: a new `interpret` job pinned like a failed-work rerun. Abstained items are never part
+    /// of the failed-work list or "all listed".
+    case rerunAbstainedInterpretation(readScopes: [CoreExportScope], itemID: String)
 
     /// The same command with `readScopes` replaced, for the commands that carry them; any other command is unchanged.
     public func withReadScopes(_ scopes: [CoreExportScope]) -> JobConfigurationCommand {
@@ -32,6 +35,8 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             return .failedInterpretations(readScopes: scopes, limit: limit, cursor: cursor)
         case .rerunFailedInterpretations(_, let selection):
             return .rerunFailedInterpretations(readScopes: scopes, selection: selection)
+        case .rerunAbstainedInterpretation(_, let itemID):
+            return .rerunAbstainedInterpretation(readScopes: scopes, itemID: itemID)
         default:
             return self
         }
@@ -62,6 +67,8 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             case .allListed:
                 return Request(command: "rerun_failed_interpretations", readScopes: readScopes, allListed: true)
             }
+        case .rerunAbstainedInterpretation(let readScopes, let itemID):
+            return Request(command: "rerun_abstained_interpretation", readScopes: readScopes, itemID: itemID)
         }
     }
 
@@ -79,6 +86,7 @@ public enum JobConfigurationCommand: Equatable, Sendable {
         var readScopes: [CoreExportScope]?
         var itemIDs: [String]?
         var allListed: Bool?
+        var itemID: String?
 
         enum CodingKeys: String, CodingKey {
             case command
@@ -93,6 +101,7 @@ public enum JobConfigurationCommand: Equatable, Sendable {
             case readScopes = "read_scopes"
             case itemIDs = "item_ids"
             case allListed = "all_listed"
+            case itemID = "item_id"
         }
     }
 }
@@ -201,6 +210,25 @@ public struct JobConfigurationRerunResult: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case moved, skipped
         case skippedItems = "skipped_items"
+    }
+}
+
+/// What running one abstained item again did. Raw values are the core's.
+public enum JobConfigurationAbstainedRerunOutcome: String, Decodable, Equatable, Sendable {
+    /// A new interpretation job exists for the item.
+    case queued
+    /// No provider is allowed for the item now.
+    case noProviderAllowed = "no_provider_allowed"
+    /// The item is unknown, out of reach, not abstained, or already run again.
+    case notAbstained = "not_abstained"
+}
+
+/// The answer to `rerunAbstainedInterpretation`.
+public struct JobConfigurationAbstainedRerunResult: Decodable, Equatable, Sendable {
+    public let outcome: JobConfigurationAbstainedRerunOutcome
+
+    public init(outcome: JobConfigurationAbstainedRerunOutcome) {
+        self.outcome = outcome
     }
 }
 
@@ -340,6 +368,7 @@ public enum JobConfigurationAnswer: Equatable, Sendable {
     case repinned(moved: Int)
     case failedInterpretations(JobConfigurationFailedInterpretations)
     case rerun(JobConfigurationRerunResult)
+    case abstainedRerun(JobConfigurationAbstainedRerunResult)
 
     private struct RecordEnvelope: Decodable {
         let record: JobConfigurationRequeueRecord?
@@ -375,6 +404,8 @@ public enum JobConfigurationAnswer: Equatable, Sendable {
             return .failedInterpretations(try decoder.decode(JobConfigurationFailedInterpretations.self, from: data))
         case .rerunFailedInterpretations:
             return .rerun(try decoder.decode(JobConfigurationRerunResult.self, from: data))
+        case .rerunAbstainedInterpretation:
+            return .abstainedRerun(try decoder.decode(JobConfigurationAbstainedRerunResult.self, from: data))
         }
     }
 }

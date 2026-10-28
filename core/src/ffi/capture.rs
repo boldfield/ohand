@@ -140,6 +140,8 @@ struct StatusReadout {
     reminder_delivery_state: Option<&'static str>,
     reminder_acknowledgment_state: Option<&'static str>,
     unschedulable_reason: Option<&'static str>,
+    /// Fixed label of why the model did not sort an abstained item; never the free-text detail.
+    abstention_reason: Option<String>,
 }
 
 fn storage_failure(error: impl Into<Error>) -> AbiFailure {
@@ -227,6 +229,7 @@ fn item_status_job(item_id: String, operation_id: u64) -> JobFn {
                 .reminder_acknowledgment_state
                 .map(|value| value.as_str()),
             unschedulable_reason: status.unschedulable_reason.map(|value| value.as_str()),
+            abstention_reason: status.abstention_reason,
         })
     })
 }

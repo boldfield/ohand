@@ -137,6 +137,15 @@ public final class JobConfigurationService: @unchecked Sendable {
         try await rerun(.allListed)
     }
 
+    /// Runs one abstained note again: a new job pinned to what the core selects now. Answers `queued`,
+    /// `noProviderAllowed`, or `notAbstained` (unknown, not abstained, or already run again, so repeating creates nothing).
+    public func rerunAbstainedInterpretation(itemID: String) async throws -> JobConfigurationAbstainedRerunOutcome {
+        guard Self.isIdentifier(itemID) else { throw JobConfigurationError.invalidRequest }
+        let answer = try await perform(.rerunAbstainedInterpretation(readScopes: [], itemID: itemID), isRead: false)
+        guard case .abstainedRerun(let result) = answer else { throw JobConfigurationError.unreadable }
+        return result.outcome
+    }
+
     private func rerun(_ selection: JobConfigurationRerunSelection) async throws -> JobConfigurationRerunResult {
         let answer = try await perform(.rerunFailedInterpretations(readScopes: [], selection: selection), isRead: false)
         guard case .rerun(let result) = answer else { throw JobConfigurationError.unreadable }

@@ -109,6 +109,10 @@ public struct ItemStatusReport: Decodable, Equatable, Sendable {
     public let reminderDeliveryState: String?
     public let reminderAcknowledgmentState: String?
     public let unschedulableReason: String?
+    /// Why the model did not sort an abstained item: a fixed label (`uncertain_target`, `negated`, `ambiguous`,
+    /// `unsupported_operation` or `other`). `nil` when the item is not abstained or the reason was not kept; the core never
+    /// sends the free-text detail.
+    public let abstentionReason: String?
 
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
@@ -123,5 +127,6 @@ public struct ItemStatusReport: Decodable, Equatable, Sendable {
         case reminderDeliveryState = "reminder_delivery_state"
         case reminderAcknowledgmentState = "reminder_acknowledgment_state"
         case unschedulableReason = "unschedulable_reason"
+        case abstentionReason = "abstention_reason"
     }
 }
