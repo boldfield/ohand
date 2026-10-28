@@ -117,8 +117,10 @@ Transient failures (timeout, network, outage) keep the state `unprocessed` or `p
 
 **Item lifecycle state**:
 - `active`: normal; searchable and eligible for suggestions subject to policy.
-- `completed`: marked done by the user; searchable, not suggested.
-- `cancelled`: dropped by the user; searchable, not suggested.
+- `completed`: marked done by the user; not suggested; omitted from Home and from search unless the search explicitly includes closed items (2026-10-28).
+- `cancelled`: dropped by the user; same rules as `completed`.
+
+The user can reopen a completed or cancelled item, which returns it to `active`. Reopening never reinstalls a reminder the completion cancelled and never changes suggestion state (F57).
 - `deleted`: tombstone; excluded from every result while cleanup completes.
 
 **Suggestion state**: `not_eligible` (excluded by policy, lifecycle, scope, uninterpreted/abstained status or speculative intent), `eligible`, `snoozed` (cooldown-gated), `pull_only` (user said stop suggesting; remains searchable).
