@@ -44,6 +44,10 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `abstract-broad-thought` | design | Creativity is important | `note` | type action; any reminder | yes |
 | `question-reflection` | broad-intention | Why didn't I speak up in that meeting? | `idea` | type action; any reminder | yes |
 | `comparison-no-preference` | broad-intention | Python or Go for this project? | `idea` | type action; any reminder | yes |
+| `question-next-steps-unpunctuated` | broad-intention | What are the next steps for the garden project I lost my place | `idea` | type action; any reminder | yes |
+| `question-next-steps-lowercase-filler` | broad-intention | what should i do next on the garden project um | `idea` | type action; any reminder | yes |
+| `question-where-was-i` | broad-intention | Where was I with the kitchen plan | `idea` | type action; any reminder | yes |
+| `question-next-steps-dropped-object` | dropped-asr-word | what are the next steps for the I forgot | abstain `UncertainTarget` | any facet | no |
 | `already-completed-action` | design | Called the dentist | `note` | type action; any reminder | yes |
 | `empty-or-noise` | design | Um, uh, hmm | abstain `UncertainTarget` | any facet | no |
 | `very-long-transcript` | design | The team meeting today was about quarterly planning. We discussed t... | `action` | type note; any reminder | yes |
@@ -57,6 +61,7 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 - **Date without an hour is `ambiguous` with no instant** (`date-relative-next-monday`, `date-ambiguous-friday`), as I02 returns `MissingHour`. Hedged phrases (`date-ambiguous-maybe-friday`), garbled time (`asr-garbled-time`) and a conflicting abbreviation (`timezone-explicit`: "EST" on an EDT date) are `ambiguous` too. Silently choosing EDT or literal EST is forbidden.
 - **Timezones.** The device zone applies when none is stated (`timezone-implicit-local`, 09:00-04:00); a zone that conflicts with the device zone is `ambiguous` with no instant or zone (`timezone-conflicting`). **Known gap for M2:** M1 cannot schedule a reminder in a zone other than the device's, because the apply guard rejects any `timezone_id` that differs from the capture's zone (`core/src/interpretation/apply/mod.rs:972`). The Tokyo-time oracle (2026-10-09T09:00+09:00, Asia/Tokyo) returns when that guard is lifted. Resolving in the device zone stays forbidden.
 - **A bare statement of value is a `note`** (`abstract-broad-thought`): it states no wish, step or possibility, so it is neither a broad intention (a vague aspiration) nor an exploratory idea (DESIGN.md's "Maybe a roof garden would be nice").
+- **A question the user asks themselves is an `idea`** (`question-reflection`, `question-next-steps-unpunctuated`, `question-next-steps-lowercase-filler`, `question-where-was-i`), including one about what to do next or one that says they lost their place. Question form, lower case or missing punctuation is never by itself a reason to abstain; abstention stays for text whose words cannot be resolved (`question-next-steps-dropped-object`, like `asr-dropped-word-remind-me`).
 - **Corrections** (`correction-user-edit`): both the raw transcript ("Frisday") and the corrected text are preserved; interpretation and every span use the corrected text.
 - **Negation and quotes** (`negation-*`, `quoted-text`): the capture's item still exists with its source preserved, but no derived facet (type, reminder, topic) is applied.
 - **Prompt injection** (`prompt-injection-*`): input is data. No reminder, no topic, no update/create operation, and the instruction-like text is not obeyed.

@@ -781,6 +781,98 @@
       }
     },
     {
+      "scenario_id": "conforming/question-next-steps-unpunctuated",
+      "fixture_id": "question-next-steps-unpunctuated",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 62
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/question-next-steps-lowercase-filler",
+      "fixture_id": "question-next-steps-lowercase-filler",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 46
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/question-where-was-i",
+      "fixture_id": "question-where-was-i",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 33
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/question-next-steps-dropped-object",
+      "fixture_id": "question-next-steps-dropped-object",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": {
+            "reason": "UncertainTarget"
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
       "scenario_id": "conforming/already-completed-action",
       "fixture_id": "already-completed-action",
       "role": "conforming",

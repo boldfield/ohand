@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 /// Content address of [`M1_INSTRUCTION_TEXT`]. Change it only together with the text, and keep
 /// the old text reproducible from history: stored proposals name the version that produced them.
 pub const M1_INSTRUCTION_VERSION: &str =
-    "798036ed8db89475886471020bf1db1a45d9a15da10be6a73d12aa1fa80e520e";
+    "056e5f28bbafbef316c733920a293dc7f14ba6cb4bcdb94ae9f34507e48d69fa";
 
 /// System instructions sent verbatim to every provider for M1 interpretation.
 pub const M1_INSTRUCTION_TEXT: &str = r#"You interpret one captured note for a personal capture app. Reply with a single JSON object and no text outside it.
@@ -24,7 +24,8 @@ TRUST BOUNDARY
 WHAT YOU MAY RETURN
 Return only these keys, and omit every facet you have no evidence for. Do not return null values.
 - `operation`: always `{"kind": "annotate"}`. Never return `update` or `create`.
-- `item_type`: one of `broad_intention` (a vague aspiration with no concrete step), `idea` (an exploratory thought or possibility), `note` (information to remember, including a bare statement of fact, opinion or value that states no wish, step or possibility, such as "Honesty matters"), `action` (a concrete thing the user intends to do). It needs `source_spans`.
+- `item_type`: one of `broad_intention` (a vague aspiration with no concrete step), `idea` (an exploratory thought or possibility, including a question the user asks themselves, whether reflective, open or about what to do next, even one that trails off or says they lost their place), `note` (information to remember, including a bare statement of fact, opinion or value that states no wish, step or possibility, such as "Honesty matters"), `action` (a concrete thing the user intends to do). It needs `source_spans`.
+- A note being a question, being in lower case or lacking punctuation is never by itself a reason to abstain: give it the `item_type` its words support. A question whose object is missing still abstains with `UncertainTarget`.
 - `source_spans`: a list of `{"start": N, "end": M}` evidence spans for `item_type`. When a capture mixes intents, such as a note plus a to-do, choose the action and span only the action part.
 - `reminder_proposal`: only when the user explicitly asks to be reminded, and only together with `item_type` `action` whose span includes what to do, not just the time. Keys: `quality`, `instant`, `timezone_id`, `source_span`. `source_span` covers the time phrase only. `quality` is `explicit` when both the day and the hour are stated; give `instant` as RFC 3339 with its UTC offset and `timezone_id` as the IANA zone. A day without an hour, a hedged or garbled time, or a zone that conflicts with the device zone is `ambiguous`: then give neither `instant` nor `timezone_id`. Never invent an hour. A deadline or dated fact without a request to be reminded is not a reminder. A request for a repeating reminder ("every day", "each week") is not a `reminder_proposal` in this version, which supports only a single reminder time: give none.
 - `session_topic_proposal`: `{"topic": "...", "source_span": {...}}` only when the note says it belongs to, or should be brought up in, a named recurring session or appointment, such as "bring this up in therapy". A note that reports on or summarizes a meeting ("the team meeting today was about the budget") is not attached to it: give no topic. It is descriptive metadata only.

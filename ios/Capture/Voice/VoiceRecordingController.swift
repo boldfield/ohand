@@ -113,6 +113,10 @@ final class VoiceRecordingController {
         UUID().uuidString.lowercased()
     }
 
+    /// The microphone permission as the recorder sees it, without asking. Lets a caller decide whether starting would
+    /// show the system prompt.
+    var microphonePermission: MicrophonePermissionStatus { permission.status }
+
     // MARK: Start
 
     /// Starts one recording after an explicit user action. Completes synchronously unless the microphone permission

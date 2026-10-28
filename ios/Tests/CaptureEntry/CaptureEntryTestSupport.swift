@@ -11,6 +11,7 @@ final class FakeVoiceController: VoiceRecordingControlling {
     var onOutcome: ((VoiceCaptureOutcome) -> Void)?
     var startResult: Result<VoiceRecordingStarted, VoiceStartFailure> = .success(
         VoiceRecordingStarted(captureID: "voice-1", startedAt: Date(timeIntervalSince1970: 1_790_000_000)))
+    var microphonePermission: MicrophonePermissionStatus = .granted
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var cancelCount = 0

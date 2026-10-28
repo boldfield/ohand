@@ -108,6 +108,7 @@ final class VoiceRecorderFanOut: VoiceRecordingControlling {
     var state: VoiceRecorderState { controller.state }
     var onStateChange: ((VoiceRecorderState) -> Void)?
     var onOutcome: ((VoiceCaptureOutcome) -> Void)?
+    var microphonePermission: MicrophonePermissionStatus { controller.microphonePermission }
 
     init(controller: VoiceRecordingController, recoveryModel: VoiceRecoveryModel) {
         self.controller = controller
