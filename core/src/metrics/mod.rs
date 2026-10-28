@@ -255,6 +255,8 @@ pub enum MetricsError {
     DurationOutOfRange,
     #[error("metrics export and control require an authenticated read session")]
     NotAuthenticated,
+    #[error("the build identity is not a version, build number, revision and dirty flag")]
+    InvalidBuildIdentity,
     #[error("metrics storage failed: {0}")]
     Storage(#[from] rusqlite::Error),
 }
@@ -453,6 +455,72 @@ pub struct FailureSummary {
     pub occurrences: u64,
 }
 
+/// Longest marketing version accepted in a [`BuildIdentity`].
+const MAX_VERSION_LEN: usize = 32;
+/// Longest build number accepted in a [`BuildIdentity`].
+const MAX_BUILD_NUMBER_LEN: usize = 10;
+/// Length of a full git revision.
+const REVISION_LEN: usize = 40;
+
+/// Which build produced a report: the app's marketing version, build number, full git revision and
+/// whether the tree it was built from had uncommitted changes. The app reads these from its
+/// Info.plist and passes them to the export; the core stores nothing of them. Each field has a
+/// closed shape, so no captured content can pass as a build identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildIdentity {
+    version: String,
+    build_number: String,
+    revision: String,
+    dirty: bool,
+}
+
+impl BuildIdentity {
+    /// Accepts a version of 1-32 characters from `0-9 A-Z a-z . -`, a build number of 1-10 digits,
+    /// and a revision of 40 lowercase hexadecimal digits. Anything else is refused.
+    pub fn new(
+        version: &str,
+        build_number: &str,
+        revision: &str,
+        dirty: bool,
+    ) -> Result<Self, MetricsError> {
+        let version_valid = (1..=MAX_VERSION_LEN).contains(&version.len())
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+        let build_number_valid = (1..=MAX_BUILD_NUMBER_LEN).contains(&build_number.len())
+            && build_number.bytes().all(|byte| byte.is_ascii_digit());
+        let revision_valid = revision.len() == REVISION_LEN
+            && revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !(version_valid && build_number_valid && revision_valid) {
+            return Err(MetricsError::InvalidBuildIdentity);
+        }
+        Ok(Self {
+            version: version.to_string(),
+            build_number: build_number.to_string(),
+            revision: revision.to_string(),
+            dirty,
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn build_number(&self) -> &str {
+        &self.build_number
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
 /// The exported report: aggregates only, no timestamps of individual events and no identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetricsReport {
@@ -460,6 +528,11 @@ pub struct MetricsReport {
     pub generated_at: DateTime<Utc>,
     pub recording_enabled: bool,
     pub sample_limit_per_series: u32,
+    /// The build that exported the report, when the host named it. An additive field of
+    /// `ohand.metrics.v1`: a reader that ignores unknown fields is unaffected, so the schema label
+    /// stays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
     pub timings: Vec<TimingSummary>,
     pub failures: Vec<FailureSummary>,
 }
@@ -471,11 +544,13 @@ fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
 
 /// Builds the report for an explicit, authenticated export. Refused unless `authentication` is
 /// [`ReadAuthentication::Authenticated`]; nothing is read before that check. Series with no data
-/// are omitted. Exporting changes nothing stored.
+/// are omitted. Exporting changes nothing stored. `build` names the exporting build and is the
+/// only thing besides the aggregates that enters the report.
 pub fn export_metrics(
     database: &Database,
     authentication: ReadAuthentication,
     now: DateTime<Utc>,
+    build: Option<BuildIdentity>,
 ) -> Result<MetricsReport, MetricsError> {
     require_authenticated(authentication)?;
     let connection = store(database)?;
@@ -527,6 +602,7 @@ pub fn export_metrics(
         generated_at: now,
         recording_enabled: metrics_enabled(database)?,
         sample_limit_per_series: MAX_SAMPLES_PER_SERIES as u32,
+        build,
         timings,
         failures,
     })

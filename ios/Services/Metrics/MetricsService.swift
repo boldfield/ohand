@@ -47,12 +47,15 @@ struct MetricsStopwatch {
 ///   that was shut down) is counted in `droppedRecordCount` and otherwise forgotten.
 /// * **Local only.** This type has no destination. The only way data leaves is `exportReport()`, which needs an
 ///   authenticated read session, and the caller decides where the returned JSON goes.
+/// * **Names the build.** An export carries the build identity the app was given (`CoreMetricsBuild.current()`), so a
+///   report says which trial build produced it. Nothing else enters the report.
 /// * **Switchable, authenticated.** `setRecordingEnabled` (on or off) and `clearAll()` need an authenticated read
 ///   session, like the export. A capture-only session gets `false` back and the core is not asked. While recording is
 ///   off the core stores nothing; `clearAll()` removes what was stored.
 final class MetricsService: MetricsRecording, @unchecked Sendable {
     private let core: MetricsCore
     private let session: ReadAuthenticationSession
+    private let build: CoreMetricsBuild?
     private let monotonicNanoseconds: @Sendable () -> UInt64
     private let lock = NSLock()
     private var dropped = 0
@@ -60,10 +63,12 @@ final class MetricsService: MetricsRecording, @unchecked Sendable {
     init(
         core: MetricsCore,
         session: ReadAuthenticationSession,
+        build: CoreMetricsBuild? = CoreMetricsBuild.current(),
         monotonicNanoseconds: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         self.core = core
         self.session = session
+        self.build = build
         self.monotonicNanoseconds = monotonicNanoseconds
     }
 
@@ -157,7 +162,7 @@ final class MetricsService: MetricsRecording, @unchecked Sendable {
         guard let authorization = session.currentAuthorization() else { throw MetricsExportFailure.notAuthenticated }
         let result = await withCheckedContinuation {
             (continuation: CheckedContinuation<Result<CoreMetricsAnswer, CoreFailure>, Never>) in
-            core.submit(.export(readAuthentication: .authenticated)) { continuation.resume(returning: $0) }
+            core.submit(.export(readAuthentication: .authenticated, build: build)) { continuation.resume(returning: $0) }
         }
         guard session.isCurrent(authorization) else { throw MetricsExportFailure.interrupted }
         let answer: CoreMetricsAnswer

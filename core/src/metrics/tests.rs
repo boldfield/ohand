@@ -16,7 +16,7 @@ fn memory_database() -> Database {
 }
 
 fn report(database: &Database) -> MetricsReport {
-    export_metrics(database, ReadAuthentication::Authenticated, now()).unwrap()
+    export_metrics(database, ReadAuthentication::Authenticated, now(), None).unwrap()
 }
 
 fn timing<'a>(report: &'a MetricsReport, series: &str, dimension: &str) -> &'a TimingSummary {
@@ -350,9 +350,9 @@ fn clearing_removes_samples_and_counters_but_not_the_setting() {
 fn export_is_refused_without_an_authenticated_session_and_reads_nothing() {
     let database = memory_database();
     record_timing(&database, TimingSeries::TriggerToReady(LaunchKind::Cold), 5).unwrap();
-    let refused = export_metrics(&database, ReadAuthentication::CaptureOnly, now());
+    let refused = export_metrics(&database, ReadAuthentication::CaptureOnly, now(), None);
     assert!(matches!(refused, Err(MetricsError::NotAuthenticated)));
-    assert!(export_metrics(&database, ReadAuthentication::Authenticated, now()).is_ok());
+    assert!(export_metrics(&database, ReadAuthentication::Authenticated, now(), None).is_ok());
 }
 
 #[test]
@@ -516,6 +516,81 @@ fn the_module_has_no_network_destination() {
         assert!(
             !source.contains(forbidden),
             "metrics must not contain network code or a destination: {forbidden}"
+        );
+    }
+}
+
+const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn the_exported_report_names_the_build() {
+    let database = memory_database();
+    let build = BuildIdentity::new("0.1.0", "412", REVISION, false).unwrap();
+    let exported = export_metrics(
+        &database,
+        ReadAuthentication::Authenticated,
+        now(),
+        Some(build),
+    )
+    .unwrap();
+    let json = serde_json::to_value(&exported).unwrap();
+    assert_eq!(
+        json["build"],
+        serde_json::json!({
+            "version": "0.1.0", "build_number": "412", "revision": REVISION, "dirty": false
+        })
+    );
+    assert_eq!(json["schema"], REPORT_SCHEMA);
+    let fields: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for field in fields {
+        assert!(
+            [
+                "schema",
+                "generated_at",
+                "recording_enabled",
+                "sample_limit_per_series",
+                "build",
+                "timings",
+                "failures"
+            ]
+            .contains(&field),
+            "unexpected report field {field}"
+        );
+    }
+}
+
+#[test]
+fn a_report_without_a_named_build_has_no_build_field() {
+    let database = memory_database();
+    let json = serde_json::to_value(report(&database)).unwrap();
+    assert!(json.get("build").is_none());
+}
+
+#[test]
+fn a_build_identity_only_accepts_its_closed_shapes() {
+    assert!(BuildIdentity::new("0.1.0-beta.2", "1", REVISION, true).is_ok());
+    for (version, build_number, revision) in [
+        ("", "1", REVISION),
+        ("0.1.0 draft", "1", REVISION),
+        ("a note the user wrote", "1", REVISION),
+        ("0.1.0", "", REVISION),
+        ("0.1.0", "12345678901", REVISION),
+        ("0.1.0", "1.2", REVISION),
+        ("0.1.0", "1", "unknown"),
+        ("0.1.0", "1", "0123456"),
+        ("0.1.0", "1", &REVISION.to_uppercase()),
+    ] {
+        assert!(
+            matches!(
+                BuildIdentity::new(version, build_number, revision, false),
+                Err(MetricsError::InvalidBuildIdentity)
+            ),
+            "{version}/{build_number}/{revision} must be refused"
         );
     }
 }

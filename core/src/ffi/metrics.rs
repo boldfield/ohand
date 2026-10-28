@@ -11,7 +11,10 @@
 //!   in [`crate::metrics`].
 //! * `{"op":"set_enabled","enabled","read_authentication"}` switches recording on or off;
 //!   `{"op":"clear","read_authentication"}` removes the stored samples and counters.
-//! * `{"op":"export","read_authentication"}` returns the aggregate report.
+//! * `{"op":"export","read_authentication"}` returns the aggregate report. It may carry
+//!   `"build":{"version","build_number","revision","dirty"}`, the app's own build identity from its
+//!   Info.plist (a version, digits, a 40-digit lowercase hexadecimal revision and a boolean); the
+//!   report then names that build in its `build` field. A malformed build is `invalid_request`.
 //!
 //!   For these three, `read_authentication` is `authenticated` or `capture_only`, the native
 //!   session read scope; `capture_only` is refused as `metrics_not_authorized` before anything is
@@ -30,7 +33,7 @@ use super::core_handle::instance::{self, lock, JobFn};
 use crate::export::ReadAuthentication;
 use crate::metrics::{
     clear_metrics, export_metrics, record_failure, record_timing, set_metrics_enabled,
-    FailureSeries, MetricsError, RecordOutcome, TimingSeries,
+    BuildIdentity, FailureSeries, MetricsError, RecordOutcome, TimingSeries,
 };
 use crate::providers::contracts::ErrorClass;
 use crate::store::schema::Database;
@@ -39,6 +42,15 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::sync::Mutex;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildFields {
+    version: String,
+    build_number: String,
+    revision: String,
+    dirty: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -61,6 +73,8 @@ enum Command {
     },
     Export {
         read_authentication: String,
+        #[serde(default)]
+        build: Option<BuildFields>,
     },
 }
 
@@ -69,7 +83,7 @@ enum Validated {
     RecordFailure(FailureSeries),
     SetEnabled(bool, ReadAuthentication),
     Clear(ReadAuthentication),
-    Export(ReadAuthentication),
+    Export(ReadAuthentication, Option<BuildIdentity>),
 }
 
 const fn unauthorized() -> AbiFailure {
@@ -111,9 +125,24 @@ impl Command {
             )?)),
             Command::Export {
                 read_authentication,
-            } => Ok(Validated::Export(parse_authentication(
-                &read_authentication,
-            )?)),
+                build,
+            } => {
+                let build = build
+                    .map(|fields| {
+                        BuildIdentity::new(
+                            &fields.version,
+                            &fields.build_number,
+                            &fields.revision,
+                            fields.dirty,
+                        )
+                        .map_err(|_| AbiFailure::INVALID_REQUEST)
+                    })
+                    .transpose()?;
+                Ok(Validated::Export(
+                    parse_authentication(&read_authentication)?,
+                    build,
+                ))
+            }
         }
     }
 }
@@ -128,7 +157,9 @@ fn parse_authentication(label: &str) -> Result<ReadAuthentication, AbiFailure> {
 
 fn metrics_failure(error: MetricsError) -> AbiFailure {
     match error {
-        MetricsError::DurationOutOfRange => AbiFailure::INVALID_REQUEST,
+        MetricsError::DurationOutOfRange | MetricsError::InvalidBuildIdentity => {
+            AbiFailure::INVALID_REQUEST
+        }
         MetricsError::NotAuthenticated => unauthorized(),
         MetricsError::Storage(error) => {
             AbiFailure::from_store(&anyhow::Error::new(error), AbiFailure::STORAGE_ERROR)
@@ -164,8 +195,9 @@ fn run(database: &Database, command: &Validated) -> Result<Value, AbiFailure> {
             clear_metrics(database, *authentication).map_err(metrics_failure)?;
             Ok(json!({ "outcome": "ok" }))
         }
-        Validated::Export(authentication) => {
-            let report = export_metrics(database, *authentication, now).map_err(metrics_failure)?;
+        Validated::Export(authentication, build) => {
+            let report = export_metrics(database, *authentication, now, build.clone())
+                .map_err(metrics_failure)?;
             Ok(json!({ "outcome": "report", "report": report }))
         }
     }
