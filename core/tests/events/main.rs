@@ -1463,3 +1463,95 @@ fn test_suggestion_control_kinds_are_not_now_and_stop_only() {
     );
     assert!("cooldown".parse::<SuggestionControlKind>().is_err());
 }
+
+fn make_reopen_event(event_id: &str, item_id: &str, revision: i32) -> Event {
+    Event::new(
+        event_id.to_string(),
+        item_id.to_string(),
+        revision,
+        EventType::Reopen,
+        EventPayload::Reopen,
+        "2026-01-15T10:30:00Z".to_string(),
+    )
+    .unwrap()
+}
+
+fn lifecycle_of(db: &mut Database, item_id: &str) -> Result<String> {
+    let tx = db.transaction()?;
+    let state = tx.query_row(
+        "SELECT lifecycle_state FROM items WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    tx.commit()?;
+    Ok(state)
+}
+
+#[test]
+fn test_reopen_returns_completed_and_cancelled_items_to_active() -> Result<()> {
+    for ending in [
+        make_completion_event("evt-end", "item-1", 0),
+        make_cancellation_event("evt-end", "item-1", 0),
+    ] {
+        let path = temp_db_path("reopen_ended");
+        let instant =
+            DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+        let mut db = make_test_db(&path, instant)?;
+        let tx = db.transaction()?;
+        insert_test_item(&tx, "item-1")?;
+        tx.commit()?;
+        save_event(&mut db, &ending, 0)?;
+        assert_ne!(lifecycle_of(&mut db, "item-1")?, "active");
+
+        let reopen = make_reopen_event("evt-reopen", "item-1", 1);
+        save_event(&mut db, &reopen, 1)?;
+        // A retry of the same command has one effect.
+        save_event(&mut db, &reopen, 1)?;
+
+        assert_eq!(lifecycle_of(&mut db, "item-1")?, "active");
+        let tx = db.transaction()?;
+        let snapshot = get_item_snapshot(&tx, "item-1")?.unwrap();
+        assert_eq!(snapshot.revision, 2);
+        let stored = get_events_for_item(&tx, "item-1")?;
+        drop(tx);
+        assert_eq!(stored.last().unwrap().event_type, EventType::Reopen);
+        assert_eq!(stored.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_reopen_is_refused_for_active_deleted_and_stale_items() -> Result<()> {
+    let path = temp_db_path("reopen_refused");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    insert_test_item(&tx, "item-2")?;
+    tx.commit()?;
+
+    let result = save_event(&mut db, &make_reopen_event("evt-a", "item-1", 0), 0);
+    assert!(matches!(
+        result,
+        Err(EventError::NotAllowedInState { ref lifecycle_state, .. }) if lifecycle_state == "active"
+    ));
+
+    save_event(&mut db, &make_completion_event("evt-c", "item-1", 0), 0)?;
+    let result = save_event(&mut db, &make_reopen_event("evt-s", "item-1", 0), 0);
+    assert!(matches!(result, Err(EventError::StaleRevision { .. })));
+
+    db.conn().execute(
+        "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = 'item-2'",
+        [],
+    )?;
+    let result = save_event(&mut db, &make_reopen_event("evt-d", "item-2", 0), 0);
+    assert!(matches!(
+        result,
+        Err(EventError::NotAllowedInState { ref lifecycle_state, .. }) if lifecycle_state == "deleted"
+    ));
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}

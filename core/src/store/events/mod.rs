@@ -141,6 +141,9 @@ pub enum EventType {
     Transcript,
     Completion,
     Cancellation,
+    /// Returns a completed or cancelled item to `active`. Restores nothing else: a reminder the
+    /// ending cancelled stays cancelled and suggestion state is untouched.
+    Reopen,
     SuggestionControl,
     // Deletion is internal-only and set via mark_deletion_intent, not public save_event
     #[doc(hidden)]
@@ -154,6 +157,7 @@ impl EventType {
             EventType::Transcript => "transcript",
             EventType::Completion => "completion",
             EventType::Cancellation => "cancellation",
+            EventType::Reopen => "reopen",
             EventType::SuggestionControl => "suggestion_control",
             EventType::Deletion => "deletion",
         }
@@ -169,6 +173,7 @@ impl FromStr for EventType {
             "transcript" => Ok(EventType::Transcript),
             "completion" => Ok(EventType::Completion),
             "cancellation" => Ok(EventType::Cancellation),
+            "reopen" => Ok(EventType::Reopen),
             "suggestion_control" => Ok(EventType::SuggestionControl),
             "deletion" => Ok(EventType::Deletion),
             _ => Err(anyhow!("Unknown event type: {}", s)),
@@ -259,6 +264,7 @@ pub enum EventPayload {
     SuggestionControl(SuggestionControlPayload),
     Completion,
     Cancellation,
+    Reopen,
     #[doc(hidden)]
     Deletion,
 }
@@ -337,6 +343,7 @@ impl Event {
             (EventType::Transcript, EventPayload::Transcript) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
+            (EventType::Reopen, EventPayload::Reopen) => Ok(()),
             (EventType::Deletion, EventPayload::Deletion) => Ok(()),
             _ => Err(EventError::Invalid(format!(
                 "Invalid event type and payload combination: {:?} with {:?}",
@@ -413,6 +420,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         EventType::Transcript => EventPayload::Transcript,
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
+        EventType::Reopen => EventPayload::Reopen,
         EventType::Deletion => EventPayload::Deletion,
     };
 
@@ -636,14 +644,16 @@ fn save_checked_event_in_tx(
     }
 
     // Deleted items accept nothing (a racing correction must not restore readable text).
-    // Completed and cancelled items stay correctable but take no further lifecycle or
-    // suggestion events.
+    // Completed and cancelled items stay correctable and can be reopened, but take no further
+    // lifecycle or suggestion events. Active items refuse Reopen.
     let allowed = match current.lifecycle_state.as_str() {
         "deleted" => false,
         "completed" | "cancelled" => matches!(
             event.event_type,
-            EventType::Correction | EventType::Transcript
+            EventType::Correction | EventType::Transcript | EventType::Reopen
         ),
+        // Only an ended item can be reopened.
+        "active" => event.event_type != EventType::Reopen,
         _ => true,
     };
     if !allowed {
@@ -678,6 +688,7 @@ fn save_checked_event_in_tx(
             EventPayload::Transcript => (None, None, None, None),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
+            EventPayload::Reopen => (None, None, None, None),
             EventPayload::Deletion => (None, None, None, None),
         };
 
@@ -748,6 +759,12 @@ fn save_checked_event_in_tx(
         EventType::Cancellation => {
             tx.execute(
                 "UPDATE items SET lifecycle_state = 'cancelled' WHERE item_id = ?",
+                [event.item_id.as_str()],
+            )?;
+        }
+        EventType::Reopen => {
+            tx.execute(
+                "UPDATE items SET lifecycle_state = 'active' WHERE item_id = ?",
                 [event.item_id.as_str()],
             )?;
         }

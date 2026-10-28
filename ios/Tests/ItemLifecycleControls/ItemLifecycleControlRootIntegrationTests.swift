@@ -192,6 +192,44 @@ final class ItemLifecycleControlRootIntegrationTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE item_id = '\(itemID)'"), "1")
     }
 
+    func testReopeningACompletedItemKeepsItsReminderCancelledAndReturnsTheStoredInstant() throws {
+        let center = FakeNotificationCenter()
+        let root = try makeRoot(authenticated: true, center: center)
+        defer { root.shutDown() }
+        let controls = root.itemLifecycleControls
+        let itemID = try saveCapture(root)
+        _ = seedLiveReminder(for: itemID)
+        let storedInstant = scalar("SELECT resolved_instant FROM reminders WHERE item_id = '\(itemID)'")
+        let start = try revision(of: itemID)
+
+        XCTAssertThrowsError(try run {
+            try await controls.reopen(commandID: "cmd-early", itemID: itemID, expectedRevision: start)
+        }) { error in
+            XCTAssertEqual(error as? ItemLifecycleControlError, .alreadyOpen)
+        }
+        _ = try run { try await controls.complete(commandID: "cmd-1", itemID: itemID, expectedRevision: start) }
+
+        let receipt = try run {
+            try await controls.reopen(commandID: "cmd-2", itemID: itemID, expectedRevision: start + 1)
+        }
+        XCTAssertEqual(
+            receipt,
+            ItemReopenReceipt(
+                itemID: itemID, revision: start + 2, replayed: false, formerReminderInstant: storedInstant))
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertEqual(scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "cancelled")
+
+        _ = try run { try await root.reconcileReminders() }
+        XCTAssertEqual(center.pendingIdentifiers, [], "reopening never reinstalls the reminder")
+
+        let replay = try run {
+            try await controls.reopen(commandID: "cmd-2", itemID: itemID, expectedRevision: start + 1)
+        }
+        XCTAssertEqual(replay.revision, start + 2)
+        XCTAssertTrue(replay.replayed)
+        XCTAssertEqual(replay.formerReminderInstant, storedInstant)
+    }
+
     func testAnUnknownItemIsNotFound() throws {
         let root = try makeRoot(authenticated: true)
         defer { root.shutDown() }

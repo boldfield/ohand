@@ -14,6 +14,23 @@ public struct ItemLifecycleControlReceipt: Equatable, Sendable {
     }
 }
 
+/// What a stored reopen reports: the item's new revision, whether it repeats an earlier identical command, and the
+/// instant of the reminder the ending cancelled, as the core stored it (nil when there was none). Reopening never
+/// reinstalls that reminder; the instant is only there so the caller can offer it again.
+public struct ItemReopenReceipt: Equatable, Sendable {
+    public let itemID: String
+    public let revision: Int
+    public let replayed: Bool
+    public let formerReminderInstant: String?
+
+    public init(itemID: String, revision: Int, replayed: Bool, formerReminderInstant: String?) {
+        self.itemID = itemID
+        self.revision = revision
+        self.replayed = replayed
+        self.formerReminderInstant = formerReminderInstant
+    }
+}
+
 /// Why a control was not stored. Every case except `core` and `unreadable` means the core decided and nothing changed.
 public enum ItemLifecycleControlError: Error, Equatable, Sendable {
     /// The read session is capture-only; nothing was requested from the core.
@@ -27,6 +44,8 @@ public enum ItemLifecycleControlError: Error, Equatable, Sendable {
     case itemDeleted
     /// The item was already completed or cancelled (`lifecycle` is `completed` or `cancelled`).
     case itemEnded(lifecycle: String)
+    /// A reopen of an item that is not completed or cancelled.
+    case alreadyOpen
     /// No stored item has that ID.
     case itemNotFound
     case core(CoreFailure)
@@ -88,7 +107,25 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
                 commandID: commandID, itemID: itemID, expectedRevision: expectedRevision, control: .stopSuggesting))
     }
 
+    /// Returns a completed or cancelled item to active. The reminder the ending cancelled stays cancelled and suggestion
+    /// state is unchanged; the receipt carries the reminder's former instant so the caller can offer to set it again.
+    public func reopen(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemReopenReceipt {
+        let answer = try await submit(
+            ItemLifecycleControlCommand(
+                commandID: commandID, itemID: itemID, expectedRevision: expectedRevision, control: .reopen))
+        let receipt = try Self.reopenReceipt(from: answer)
+        changes?.publish(.item(receipt.itemID))
+        return receipt
+    }
+
     private func apply(_ command: ItemLifecycleControlCommand) async throws -> ItemLifecycleControlReceipt {
+        let answer = try await submit(command)
+        let receipt = try Self.receipt(from: answer)
+        changes?.publish(.item(receipt.itemID))
+        return receipt
+    }
+
+    private func submit(_ command: ItemLifecycleControlCommand) async throws -> ItemLifecycleControlAnswer {
         guard session.currentAuthorization() != nil else { throw ItemLifecycleControlError.notAuthenticated }
         guard !command.commandID.isEmpty, !command.itemID.isEmpty, command.expectedRevision >= 0 else {
             throw ItemLifecycleControlError.invalidRequest
@@ -97,10 +134,9 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
             (continuation: CheckedContinuation<Result<ItemLifecycleControlAnswer, CoreFailure>, Never>) in
             core.submit(command) { continuation.resume(returning: $0) }
         }
-        let answer: ItemLifecycleControlAnswer
         switch result {
         case .success(let value):
-            answer = value
+            return value
         case .failure(let failure):
             switch failure.code {
             case "not_found": throw ItemLifecycleControlError.itemNotFound
@@ -108,9 +144,22 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
             default: throw ItemLifecycleControlError.core(failure)
             }
         }
-        let receipt = try Self.receipt(from: answer)
-        changes?.publish(.item(receipt.itemID))
-        return receipt
+    }
+
+    private static func reopenReceipt(from answer: ItemLifecycleControlAnswer) throws -> ItemReopenReceipt {
+        switch answer.outcome {
+        case "reopened":
+            guard let itemID = answer.itemID, let revision = answer.revision else {
+                throw ItemLifecycleControlError.unreadable
+            }
+            return ItemReopenReceipt(
+                itemID: itemID, revision: revision, replayed: answer.replayed ?? false,
+                formerReminderInstant: answer.formerReminderInstant)
+        case "already_open":
+            throw ItemLifecycleControlError.alreadyOpen
+        default:
+            try failure(from: answer)
+        }
     }
 
     private static func receipt(from answer: ItemLifecycleControlAnswer) throws -> ItemLifecycleControlReceipt {
@@ -120,6 +169,14 @@ public final class ItemLifecycleControlService: @unchecked Sendable {
                 throw ItemLifecycleControlError.unreadable
             }
             return ItemLifecycleControlReceipt(itemID: itemID, revision: revision, replayed: answer.replayed ?? false)
+        default:
+            try failure(from: answer)
+        }
+    }
+
+    /// Throws the error a refusing answer means; every answer that is not a stored control is one.
+    private static func failure(from answer: ItemLifecycleControlAnswer) throws -> Never {
+        switch answer.outcome {
         case "stale_revision":
             guard let current = answer.currentRevision else { throw ItemLifecycleControlError.unreadable }
             throw ItemLifecycleControlError.staleRevision(currentRevision: current)

@@ -4,6 +4,8 @@
 //! handle's worker thread in one transaction, and answers `{"operation_id", "outcome", ...}`:
 //!
 //! * `complete_item` and `cancel_item`: end the item.
+//! * `reopen`: return a completed or cancelled item to active. A reminder the ending cancelled
+//!   stays cancelled and suggestion state is untouched.
 //! * `not_now`: leave the item out of suggestions for the stated cooldown.
 //! * `stop_suggesting`: mark the item pull-only; it stays searchable and is never offered again.
 //!
@@ -29,6 +31,11 @@
 //! * `item_ended` (`lifecycle`: `completed` | `cancelled`): the item was already ended, which
 //!   takes no further lifecycle or suggestion command.
 //!
+//! Reopen answers `reopened` (`item_id`, `revision`, `replayed`, `former_reminder_instant`: the
+//! stored instant of the cancelled reminder or null) or `already_open` for an active item;
+//! deleted, stale and conflicting reopens answer as above, and `item_ended` is never returned
+//! for it.
+//!
 //! Unknown items fail as `not_found`. A repeated `command_id` answers `applied` again with the
 //! revision the first call produced and `replayed` true; it writes nothing and ignores
 //! `expected_revision`, which the first call already consumed. Failures are normalized and never
@@ -47,7 +54,7 @@ use crate::store::events::{
 use crate::store::schema::{Database, SystemClock};
 use crate::suggestions::eligibility::{record_not_now, set_pull_only};
 use chrono::{SecondsFormat, Utc};
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Mutex;
@@ -62,6 +69,8 @@ pub enum LifecycleControl {
     Cancel,
     NotNow,
     StopSuggesting,
+    /// Returns a completed or cancelled item to `active`.
+    Reopen,
 }
 
 impl LifecycleControl {
@@ -69,6 +78,7 @@ impl LifecycleControl {
         match self {
             LifecycleControl::Complete => EventType::Completion,
             LifecycleControl::Cancel => EventType::Cancellation,
+            LifecycleControl::Reopen => EventType::Reopen,
             LifecycleControl::NotNow | LifecycleControl::StopSuggesting => {
                 EventType::SuggestionControl
             }
@@ -79,6 +89,7 @@ impl LifecycleControl {
         match self {
             LifecycleControl::Complete => EventPayload::Completion,
             LifecycleControl::Cancel => EventPayload::Cancellation,
+            LifecycleControl::Reopen => EventPayload::Reopen,
             LifecycleControl::NotNow => EventPayload::SuggestionControl(SuggestionControlPayload {
                 kind: SuggestionControlKind::NotNow,
             }),
@@ -117,6 +128,16 @@ pub enum LifecycleControlOutcome {
         /// `completed` or `cancelled`.
         lifecycle: String,
     },
+    /// A reopen stored. The reminder the ending cancelled stays cancelled.
+    Reopened {
+        /// The item's revision after the reopen.
+        revision: i32,
+        replayed: bool,
+        /// The instant of the reminder the ending cancelled, read from storage, if it had one.
+        former_reminder_instant: Option<String>,
+    },
+    /// A reopen of an item that is not completed or cancelled. Nothing was written.
+    AlreadyOpen,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +159,11 @@ enum Command {
         expected_revision: i64,
     },
     StopSuggesting {
+        command_id: String,
+        item_id: String,
+        expected_revision: i64,
+    },
+    Reopen {
         command_id: String,
         item_id: String,
         expected_revision: i64,
@@ -184,6 +210,16 @@ impl Command {
                 expected_revision,
             } => (
                 LifecycleControl::StopSuggesting,
+                command_id,
+                item_id,
+                expected_revision,
+            ),
+            Command::Reopen {
+                command_id,
+                item_id,
+                expected_revision,
+            } => (
+                LifecycleControl::Reopen,
                 command_id,
                 item_id,
                 expected_revision,
@@ -275,10 +311,33 @@ fn replay(
     if !same_control {
         return Ok(Some(LifecycleControlOutcome::CommandConflict));
     }
+    if request.control == LifecycleControl::Reopen {
+        return Ok(Some(LifecycleControlOutcome::Reopened {
+            revision: stored.revision + 1,
+            replayed: true,
+            former_reminder_instant: former_reminder_instant(tx, &request.item_id)?,
+        }));
+    }
     Ok(Some(LifecycleControlOutcome::Applied {
         revision: stored.revision + 1,
         replayed: true,
     }))
+}
+
+/// The instant of the item's cancelled reminder, as stored. It is never computed or invented.
+fn former_reminder_instant(
+    tx: &Transaction<'_>,
+    item_id: &str,
+) -> Result<Option<String>, AbiFailure> {
+    tx.query_row(
+        "SELECT resolved_instant FROM reminders
+         WHERE item_id = ? AND request_state = 'cancelled'",
+        [item_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(sqlite_failure)
 }
 
 /// Applies one control in its own immediate transaction. See the module documentation for the
@@ -298,13 +357,15 @@ pub fn apply_item_lifecycle_control(
         Ok(None) => return Err(AbiFailure::NOT_FOUND),
         Err(error) => return event_failure(error),
     };
+    let reopening = request.control == LifecycleControl::Reopen;
     match snapshot.lifecycle_state.as_str() {
         "deleted" => return Ok(LifecycleControlOutcome::ItemDeleted),
-        "completed" | "cancelled" => {
+        "completed" | "cancelled" if !reopening => {
             return Ok(LifecycleControlOutcome::ItemEnded {
                 lifecycle: snapshot.lifecycle_state,
             })
         }
+        "active" if reopening => return Ok(LifecycleControlOutcome::AlreadyOpen),
         _ => {}
     }
     if snapshot.revision != request.expected_revision {
@@ -330,6 +391,27 @@ pub fn apply_item_lifecycle_control(
             if let Err(error) = end_item_with_event(&tx, &SystemClock, &event, revision) {
                 return reminder_state_failure(error);
             }
+        }
+        LifecycleControl::Reopen => {
+            let event = Event::new(
+                event_id,
+                request.item_id.clone(),
+                revision,
+                request.control.event_type(),
+                request.control.payload(),
+                now.to_rfc3339_opts(SecondsFormat::Secs, true),
+            )
+            .map_err(|_| AbiFailure::INVALID_REQUEST)?;
+            if let Err(error) = save_event_in_tx(&tx, &event, revision) {
+                return event_failure(error);
+            }
+            let former_reminder_instant = former_reminder_instant(&tx, &request.item_id)?;
+            tx.commit().map_err(sqlite_failure)?;
+            return Ok(LifecycleControlOutcome::Reopened {
+                revision: revision + 1,
+                replayed: false,
+                former_reminder_instant,
+            });
         }
         LifecycleControl::NotNow => {
             record_not_now(&tx, &request.item_id, &event_id, revision, now)
@@ -376,6 +458,18 @@ fn answer(item_id: &str, outcome: &LifecycleControlOutcome) -> Value {
             "outcome": "item_ended",
             "lifecycle": lifecycle,
         }),
+        LifecycleControlOutcome::Reopened {
+            revision,
+            replayed,
+            former_reminder_instant,
+        } => json!({
+            "outcome": "reopened",
+            "item_id": item_id,
+            "revision": revision,
+            "replayed": replayed,
+            "former_reminder_instant": former_reminder_instant,
+        }),
+        LifecycleControlOutcome::AlreadyOpen => json!({ "outcome": "already_open" }),
     }
 }
 

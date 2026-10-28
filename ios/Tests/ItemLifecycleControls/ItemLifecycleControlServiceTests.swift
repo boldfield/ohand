@@ -149,6 +149,46 @@ final class ItemLifecycleControlServiceTests: XCTestCase {
             ])
     }
 
+    func testReopenSendsItsCommandAndReturnsTheFormerReminderInstant() async throws {
+        let core = ScriptedItemLifecycleControlCore([
+            .success(
+                ItemLifecycleControlAnswer(
+                    outcome: "reopened", itemID: "item-1", revision: 4, replayed: false,
+                    formerReminderInstant: "2090-01-01T09:00:00Z")),
+            .success(ItemLifecycleControlAnswer(outcome: "reopened", itemID: "item-1", revision: 4, replayed: true)),
+            .success(ItemLifecycleControlAnswer(outcome: "already_open")),
+            .success(ItemLifecycleControlAnswer(outcome: "stale_revision", currentRevision: 9)),
+            .success(ItemLifecycleControlAnswer(outcome: "item_deleted")),
+            .failure(CoreFailure(errorClass: .permanent, code: "not_found", message: "no stored record")),
+            .success(ItemLifecycleControlAnswer(outcome: "reopened")),
+        ])
+        let service = ItemLifecycleControlService(core: core, session: makeSession(authenticated: true))
+
+        let first = try await service.reopen(commandID: "c-1", itemID: "item-1", expectedRevision: 3)
+        let replay = try await service.reopen(commandID: "c-1", itemID: "item-1", expectedRevision: 3)
+        XCTAssertEqual(
+            first,
+            ItemReopenReceipt(
+                itemID: "item-1", revision: 4, replayed: false, formerReminderInstant: "2090-01-01T09:00:00Z"))
+        XCTAssertTrue(replay.replayed)
+        XCTAssertNil(replay.formerReminderInstant)
+        XCTAssertEqual(
+            core.commands.first,
+            ItemLifecycleControlCommand(commandID: "c-1", itemID: "item-1", expectedRevision: 3, control: .reopen))
+
+        var seen: [ItemLifecycleControlError] = []
+        for index in 2..<7 {
+            do {
+                _ = try await service.reopen(commandID: "c-\(index)", itemID: "item-1", expectedRevision: 3)
+                XCTFail("expected a refusal")
+            } catch {
+                seen.append(error as! ItemLifecycleControlError)
+            }
+        }
+        XCTAssertEqual(
+            seen, [.alreadyOpen, .staleRevision(currentRevision: 9), .itemDeleted, .itemNotFound, .unreadable])
+    }
+
     // MARK: Change signal
 
     func testEachControlThatTheCoreAppliedPublishesTheItemAndRefusalsPublishNothing() async {
