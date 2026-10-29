@@ -60,4 +60,19 @@ extension XCUIApplication {
             .matching(NSPredicate(format: "identifier BEGINSWITH 'home.recents.card.' AND label CONTAINS %@", phrase))
             .firstMatch
     }
+
+    /// The distinct identifiers of the home cards whose text contains `phrase`. One card can expose several
+    /// accessibility elements under its identifier, so cards are counted by identifier.
+    func homeCardIdentifiers(containing phrase: String) -> Set<String> {
+        Set(
+            descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH 'home.recents.card.' AND label CONTAINS %@", phrase))
+                .allElementsBoundByIndex.map(\.identifier))
+    }
+
+    /// What the fixture reports about the captures it saved and the captures the store holds, for a failure message.
+    var fixtureDiagnostics: String {
+        let diagnostics = element(identifier: "ui-fixture.diagnostics")
+        return diagnostics.exists ? diagnostics.label : "no diagnostics"
+    }
 }
