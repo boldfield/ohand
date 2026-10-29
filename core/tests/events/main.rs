@@ -1470,7 +1470,9 @@ fn make_reopen_event(event_id: &str, item_id: &str, revision: i32) -> Event {
         item_id.to_string(),
         revision,
         EventType::Reopen,
-        EventPayload::Reopen,
+        EventPayload::Reopen {
+            former_reminder_instant: None,
+        },
         "2026-01-15T10:30:00Z".to_string(),
     )
     .unwrap()

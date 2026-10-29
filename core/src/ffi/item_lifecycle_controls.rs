@@ -89,7 +89,9 @@ impl LifecycleControl {
         match self {
             LifecycleControl::Complete => EventPayload::Completion,
             LifecycleControl::Cancel => EventPayload::Cancellation,
-            LifecycleControl::Reopen => EventPayload::Reopen,
+            LifecycleControl::Reopen => EventPayload::Reopen {
+                former_reminder_instant: None,
+            },
             LifecycleControl::NotNow => EventPayload::SuggestionControl(SuggestionControlPayload {
                 kind: SuggestionControlKind::NotNow,
             }),
@@ -307,15 +309,20 @@ fn replay(
     };
     let same_control = stored.item_id == request.item_id
         && stored.event_type == request.control.event_type()
-        && stored.payload == request.control.payload();
+        && (request.control == LifecycleControl::Reopen
+            || stored.payload == request.control.payload());
     if !same_control {
         return Ok(Some(LifecycleControlOutcome::CommandConflict));
     }
-    if request.control == LifecycleControl::Reopen {
+    if let EventPayload::Reopen {
+        former_reminder_instant,
+    } = stored.payload
+    {
+        // The instant recorded when the reopen was applied, not the reminder's current row.
         return Ok(Some(LifecycleControlOutcome::Reopened {
             revision: stored.revision + 1,
             replayed: true,
-            former_reminder_instant: former_reminder_instant(tx, &request.item_id)?,
+            former_reminder_instant,
         }));
     }
     Ok(Some(LifecycleControlOutcome::Applied {
@@ -393,19 +400,21 @@ pub fn apply_item_lifecycle_control(
             }
         }
         LifecycleControl::Reopen => {
+            let former_reminder_instant = former_reminder_instant(&tx, &request.item_id)?;
             let event = Event::new(
                 event_id,
                 request.item_id.clone(),
                 revision,
                 request.control.event_type(),
-                request.control.payload(),
+                EventPayload::Reopen {
+                    former_reminder_instant: former_reminder_instant.clone(),
+                },
                 now.to_rfc3339_opts(SecondsFormat::Secs, true),
             )
             .map_err(|_| AbiFailure::INVALID_REQUEST)?;
             if let Err(error) = save_event_in_tx(&tx, &event, revision) {
                 return event_failure(error);
             }
-            let former_reminder_instant = former_reminder_instant(&tx, &request.item_id)?;
             tx.commit().map_err(sqlite_failure)?;
             return Ok(LifecycleControlOutcome::Reopened {
                 revision: revision + 1,

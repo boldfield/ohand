@@ -589,3 +589,55 @@ fn a_reopened_item_can_be_completed_again() {
 
     assert_eq!(fixture.durable().lifecycle_state, "cancelled");
 }
+
+#[test]
+fn a_retried_reopen_replays_the_instant_the_first_one_returned_after_the_reminder_changes() {
+    let mut fixture = Fixture::with_reminder();
+    fixture.applied("c-1", 0, LifecycleControl::Complete);
+    let first = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+    assert_eq!(first.2.as_deref(), Some("2090-01-01T09:00:00Z"));
+
+    // The person sets a reminder again: the same row now carries a new instant and state.
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE reminders SET request_state = 'resolved', \
+             resolved_instant = '2091-02-02T10:00:00Z' WHERE item_id = ?",
+            [&fixture.item_id],
+        )
+        .unwrap();
+
+    let (revision, replayed, instant) = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+    assert_eq!((revision, replayed), (first.0, true));
+    assert_eq!(instant, first.2);
+}
+
+#[test]
+fn state_rebuilt_from_events_agrees_after_reopening() {
+    let mut fixture = Fixture::new();
+    // The fixture sets a type with no applied proposal behind it; the rebuild would not know it.
+    fixture
+        .db
+        .conn()
+        .execute("UPDATE items SET item_type = NULL", [])
+        .unwrap();
+    for (ending, label) in [
+        (LifecycleControl::Complete, "a"),
+        (LifecycleControl::Cancel, "b"),
+    ] {
+        let base = fixture.durable().revision;
+        fixture.applied(&format!("end-{label}"), base, ending);
+        reopened(fixture.run(&format!("open-{label}"), base + 1, LifecycleControl::Reopen));
+        let tx = fixture.db.transaction().unwrap();
+        assert_eq!(
+            ohand_core::domain::items::verify_state_integrity(&tx, &fixture.item_id).unwrap(),
+            None
+        );
+        let rebuilt = ohand_core::domain::items::rebuild_state_from_events(&tx, &fixture.item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebuilt.lifecycle_state.as_str(), "active");
+    }
+}

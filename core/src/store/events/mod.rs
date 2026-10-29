@@ -264,7 +264,11 @@ pub enum EventPayload {
     SuggestionControl(SuggestionControlPayload),
     Completion,
     Cancellation,
-    Reopen,
+    /// The instant of the reminder the ending cancelled, recorded when the reopen is applied so
+    /// a retried command replays it even after the reminder row changes.
+    Reopen {
+        former_reminder_instant: Option<String>,
+    },
     #[doc(hidden)]
     Deletion,
 }
@@ -343,7 +347,7 @@ impl Event {
             (EventType::Transcript, EventPayload::Transcript) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
-            (EventType::Reopen, EventPayload::Reopen) => Ok(()),
+            (EventType::Reopen, EventPayload::Reopen { .. }) => Ok(()),
             (EventType::Deletion, EventPayload::Deletion) => Ok(()),
             _ => Err(EventError::Invalid(format!(
                 "Invalid event type and payload combination: {:?} with {:?}",
@@ -420,7 +424,9 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         EventType::Transcript => EventPayload::Transcript,
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
-        EventType::Reopen => EventPayload::Reopen,
+        EventType::Reopen => EventPayload::Reopen {
+            former_reminder_instant: row.get(7)?,
+        },
         EventType::Deletion => EventPayload::Deletion,
     };
 
@@ -688,7 +694,9 @@ fn save_checked_event_in_tx(
             EventPayload::Transcript => (None, None, None, None),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
-            EventPayload::Reopen => (None, None, None, None),
+            EventPayload::Reopen {
+                former_reminder_instant,
+            } => (None, None, former_reminder_instant.clone(), None),
             EventPayload::Deletion => (None, None, None, None),
         };
 
