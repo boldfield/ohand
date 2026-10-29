@@ -54,6 +54,14 @@ private final class ScriptedJobs: FailedInterpretationsControlling, @unchecked S
     }
 }
 
+/// What the core's item status says, shared by every source a test builds, as the durable store is.
+private final class DurableStatus: @unchecked Sendable {
+    var rerunState: String?
+    func read() -> (state: String, jobStatus: String?, rerunState: String?)? {
+        (state: "uninterpreted", jobStatus: nil, rerunState: rerunState)
+    }
+}
+
 private func failedRecord(_ itemID: String, reason: String) -> JobConfigurationFailedInterpretation {
     JobConfigurationFailedInterpretation(
         itemID: itemID, capturedAt: "2026-10-22T09:30:00Z", failureReason: reason, pinned: false, profileVersion: nil,
@@ -131,16 +139,20 @@ final class SourceDetailSortingTests: XCTestCase {
     }
 
     /// The production transition: a permanent failure leaves the note `uninterpreted`; the rerun queues a replacement
-    /// without changing that, and the replaced failure leaves the failed-work list.
+    /// without changing that, and the replaced failure leaves the failed-work list. The core then reports `rerun_state`.
     func testARerunPermanentFailureStaysVisibleAsSortingWhileItsReplacementJobRuns() async {
         let failed = JobConfigurationFailedInterpretations(
             failed: [failedRecord(Self.itemID, reason: "rejected")], nextCursor: nil)
         let jobs = ScriptedJobs([failed])
-        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil) }, afterQueued: {})
-        let model = makeModel(source)
+        let durable = DurableStatus()
+        func freshSource() -> ItemSortingSource {
+            ItemSortingSource(jobs: jobs, processing: { _ in durable.read() }, afterQueued: {})
+        }
+        let model = makeModel(freshSource())
         await model.load()
         XCTAssertEqual(model.sorting, .failed(reason: "The request was not accepted"))
         jobs.pages = [JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)]
+        durable.rerunState = "queued"
 
         await model.tryAgain()
 
@@ -153,11 +165,56 @@ final class SourceDetailSortingTests: XCTestCase {
             }
             XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier))
         }
+
+        // Reopening the note (or restarting the app) builds a fresh source and model; the state is durable.
+        let reopened = makeModel(freshSource())
+        await reopened.load()
+        XCTAssertEqual(reopened.sorting, .sorting)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            host(reopened, style: style)
+            wait("Sorting… is shown on the reopened note, \(style.rawValue)") { self.shown.contains(SourceDetailView.sortingIdentifier) }
+            XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier))
+        }
+        durable.rerunState = nil
+        let finished = await freshSource().sorting(itemID: Self.itemID)
+        XCTAssertEqual(finished, .none, "when the replacement ends without failing, nothing is said")
+    }
+
+    func testAReplacementWaitingOnASettingSaysNothingAndOtherRerunStatesSaySorting() async {
+        let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
+        func state(_ rerun: String) async -> SourceDetailSorting {
+            await ItemSortingSource(
+                jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: rerun) }, afterQueued: {}
+            ).sorting(itemID: Self.itemID)
+        }
+        for rerun in ["queued", "running", "retrying_after_transient"] {
+            let sorting = await state(rerun)
+            XCTAssertEqual(sorting, .sorting, rerun)
+        }
+        let waiting = await state("awaiting_configuration")
+        XCTAssertEqual(waiting, .none)
+    }
+
+    func testAFailedNoteBeyondTheFirstFivePagesIsStillFound() async {
+        var pages = (0..<7).map {
+            JobConfigurationFailedInterpretations(failed: [failedRecord("other-\($0)", reason: "timeout")], nextCursor: "\($0 + 1)")
+        }
+        pages.append(JobConfigurationFailedInterpretations(failed: [failedRecord(Self.itemID, reason: "rejected")], nextCursor: nil))
+        let source = ItemSortingSource(jobs: ScriptedJobs(pages), processing: { _ in nil }, afterQueued: {})
+        let state = await source.sorting(itemID: Self.itemID)
+        XCTAssertEqual(state, .failed(reason: "The request was not accepted"))
+    }
+
+    func testARepeatedCursorEndsTheSearchInsteadOfLooping() async {
+        let loop = JobConfigurationFailedInterpretations(failed: [failedRecord("other", reason: "timeout")], nextCursor: "0")
+        let source = ItemSortingSource(jobs: ScriptedJobs([loop]), processing: { _ in nil }, afterQueued: {})
+        let state = await source.sorting(itemID: Self.itemID)
+        XCTAssertEqual(state, .none)
     }
 
     func testAnUninterpretedNoteThatWasNeverRunAgainShowsNothing() async {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
-        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil) }, afterQueued: {})
+        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil, rerunState: nil) }, afterQueued: {})
         let state = await source.sorting(itemID: Self.itemID)
         XCTAssertEqual(state, .none)
     }
@@ -200,7 +257,7 @@ final class SourceDetailSortingTests: XCTestCase {
     func testTheSourceSaysSortingOnlyForWorkInProgress() async {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
         func state(_ processing: String, _ job: String?) async -> SourceDetailSorting {
-            await ItemSortingSource(jobs: jobs, processing: { _ in (state: processing, jobStatus: job) }, afterQueued: {})
+            await ItemSortingSource(jobs: jobs, processing: { _ in (state: processing, jobStatus: job, rerunState: nil) }, afterQueued: {})
                 .sorting(itemID: Self.itemID)
         }
         let inProgress = await state("processing", nil)

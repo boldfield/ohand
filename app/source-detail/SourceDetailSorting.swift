@@ -20,19 +20,11 @@ protocol SourceDetailSortingReading: AnyObject, Sendable {
 
 /// The note's sorting from F43's failed-work read and the core's item status.
 final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
-    /// The most failed notes read while looking for this one (pages of 100).
-    private static let pageLimit = 5
-
-    typealias ProcessingRead = (String) async -> (state: String, jobStatus: String?)?
+    typealias ProcessingRead = (String) async -> (state: String, jobStatus: String?, rerunState: String?)?
 
     private let jobs: FailedInterpretationsControlling
     private let processing: ProcessingRead
     private let afterQueued: () -> Void
-    /// Notes this source queued again. A permanent failure leaves the note `uninterpreted` and the rerun does not change
-    /// that, so the replacement job's progress is not in the item status; this set keeps it visible as "Sorting…".
-    private let requeuedLock = NSLock()
-    private var requeued: Set<String> = []
-
     init(
         jobs: FailedInterpretationsControlling, processing: @escaping ProcessingRead,
         afterQueued: @escaping () -> Void
@@ -44,30 +36,27 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
 
     func sorting(itemID: String) async -> SourceDetailSorting {
         var cursor: String?
-        for _ in 0..<Self.pageLimit {
+        var seenCursors: Set<String> = []
+        while true {
             guard let page = try? await jobs.failedInterpretations(limit: 100, cursor: cursor) else { break }
             if let failed = page.failed.first(where: { $0.itemID == itemID }) {
                 return .failed(reason: StatusText.failureReason(failed.failureReason))
             }
-            guard let next = page.nextCursor else { break }
+            // Follow the cursors to the end; a cursor seen twice would loop, so it ends the search.
+            guard let next = page.nextCursor, seenCursors.insert(next).inserted else { break }
             cursor = next
         }
         guard let status = await processing(itemID) else { return .none }
-        if status.state == "uninterpreted", isRequeued(itemID) { return .sorting }
+        // A "Try again" leaves the note `uninterpreted` or `abstained` while its replacement job waits or runs; the core
+        // reports that as `rerun_state`, so the answer survives reopening the note and restarting the app.
+        if let rerun = status.rerunState { return rerun == "awaiting_configuration" ? .none : .sorting }
         let isWorking = status.state == "processing" || status.state == "unprocessed"
         return isWorking && status.jobStatus != "awaiting_configuration" ? .sorting : .none
     }
 
     func tryAgain(itemID: String) async -> FailedNotesRerunSummary {
         guard let result = try? await jobs.rerunFailedInterpretations(itemIDs: [itemID]) else { return .failed }
-        if result.moved > 0 {
-            requeuedLock.withLock { _ = requeued.insert(itemID) }
-            afterQueued()
-        }
+        if result.moved > 0 { afterQueued() }
         return FailedNotesRerunSummary(result)
-    }
-
-    private func isRequeued(_ itemID: String) -> Bool {
-        requeuedLock.withLock { requeued.contains(itemID) }
     }
 }

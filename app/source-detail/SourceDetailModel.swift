@@ -433,7 +433,7 @@ final class SourceDetailModel: ObservableObject {
             jobs: root.jobConfiguration,
             processing: { [weak root] itemID in
                 await withCheckedContinuation {
-                    (continuation: CheckedContinuation<(state: String, jobStatus: String?)?, Never>) in
+                    (continuation: CheckedContinuation<(state: String, jobStatus: String?, rerunState: String?)?, Never>) in
                     guard let root else {
                         continuation.resume(returning: nil)
                         return
@@ -441,7 +441,7 @@ final class SourceDetailModel: ObservableObject {
                     root.itemStatus(itemID: itemID) { result in
                         let status = try? result.get()
                         continuation.resume(
-                            returning: status.map { (state: $0.processingState, jobStatus: $0.processingJobStatus) })
+                            returning: status.map { (state: $0.processingState, jobStatus: $0.processingJobStatus, rerunState: $0.rerunState) })
                     }
                 }
             },

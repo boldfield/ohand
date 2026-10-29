@@ -37,6 +37,8 @@ private final class FakeFailedWork: FailedInterpretationsControlling, @unchecked
     /// Pages after the first, read with cursors "1", "2", and so on.
     var laterPages: [[JobConfigurationFailedInterpretation]] = []
     private(set) var rerunRequests: [[String]] = []
+    /// Behaves like the core: at most `MAX_RERUN_BATCH` items per call, the rest ignored and not counted.
+    var enforcesCoreBatchCap = false
 
     init(_ listing: Result<[JobConfigurationFailedInterpretation], Error>) { self.listing = listing }
 
@@ -49,6 +51,10 @@ private final class FakeFailedWork: FailedInterpretationsControlling, @unchecked
 
     func rerunFailedInterpretations(itemIDs: [String]) async throws -> JobConfigurationRerunResult {
         rerunRequests.append(itemIDs)
+        if enforcesCoreBatchCap {
+            let accepted = min(itemIDs.count, 100)
+            return JobConfigurationRerunResult(moved: accepted, skipped: 0, skippedItems: [])
+        }
         let result = try rerunResult.get()
         // The new jobs replace the failed ones, so the next read no longer lists them.
         if result.moved > 0 { listing = .success([]) }
@@ -89,7 +95,7 @@ final class StatusFailedNotesTests: XCTestCase {
 
     private func makeModel(
         _ work: FailedInterpretationsControlling, drain: ProcessingRetrying = CountingDrain(),
-        unlock: (() -> Void)? = nil
+        unlock: ((@escaping () -> Void) -> Void)? = nil
     ) -> StatusModel {
         StatusModel(
             health: FixedHealthReader(), permissions: QuietPermissions(), retrier: drain, failedWork: work,
@@ -124,7 +130,7 @@ final class StatusFailedNotesTests: XCTestCase {
     func testLockedKeepsTheCountOnlyWordingAndOffersUnlock() {
         for style in appearances {
             var unlockAsked = 0
-            let model = makeModel(FakeFailedWork(.failure(JobConfigurationError.notAuthenticated)), unlock: { unlockAsked += 1 })
+            let model = makeModel(FakeFailedWork(.failure(JobConfigurationError.notAuthenticated)), unlock: { _ in unlockAsked += 1 })
             host(model, style: style)
             wait("the unlock offer is shown, \(style.rawValue)") { self.rendered[StatusView.unlockIdentifier] != nil }
 
@@ -167,6 +173,54 @@ final class StatusFailedNotesTests: XCTestCase {
         await model.retryFailedNotes()
 
         XCTAssertEqual(work.rerunRequests, [["item-1", "item-2", "item-3", "item-4"]])
+    }
+
+    func testMoreThanOneBatchOfNotesIsRunAgainInChunksAndTheCountsAddUp() async {
+        let drain = CountingDrain()
+        let work = FakeFailedWork(.success((1...100).map { failedNote($0) }))
+        work.laterPages = [(101...250).map { failedNote($0) }]
+        work.enforcesCoreBatchCap = true
+        let model = makeModel(work, drain: drain)
+        await model.refresh()
+        XCTAssertEqual(model.failedNotes.count, 250)
+
+        await model.retryFailedNotes()
+
+        XCTAssertEqual(work.rerunRequests.map(\.count), [100, 100, 50])
+        XCTAssertEqual(work.rerunRequests.flatMap { $0 }, (1...250).map { "item-\($0)" })
+        XCTAssertEqual(model.rerunSummary, .done(queued: 250, needsSetting: 0))
+        XCTAssertEqual(drain.count, 1)
+    }
+
+    func testReachingThePageCapMarksTheListPartialAndTheShowAllCount() async {
+        let work = FakeFailedWork(.success([failedNote(1)]))
+        work.laterPages = (2...60).map { [failedNote($0)] }
+        let model = makeModel(work)
+        await model.refresh()
+        XCTAssertEqual(model.failedNotes.count, 50)
+        XCTAssertTrue(model.failedNotesArePartial)
+
+        let whole = FakeFailedWork(.success([failedNote(1)]))
+        whole.laterPages = [[failedNote(2)]]
+        let complete = makeModel(whole)
+        await complete.refresh()
+        XCTAssertFalse(complete.failedNotesArePartial)
+    }
+
+    func testUnlockingReadsTheFailedNotesAgain() async {
+        let work = FakeFailedWork(.failure(JobConfigurationError.notAuthenticated))
+        let model = makeModel(work, unlock: { done in
+            work.listing = .success([failedNote(1)])
+            done()
+        })
+        await model.refresh()
+        XCTAssertEqual(model.failedNotesAccess, .locked)
+
+        model.requestUnlock?()
+
+        for _ in 0..<200 where model.failedNotesAccess != .readable { try? await Task.sleep(nanoseconds: 25_000_000) }
+        XCTAssertEqual(model.failedNotesAccess, .readable)
+        XCTAssertEqual(model.failedNotes.map(\.itemID), ["item-1"])
     }
 
     func testMoreThanFiveNotesListFiveAndLeadToShowAll() {

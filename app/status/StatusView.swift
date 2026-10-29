@@ -72,7 +72,7 @@ struct StatusView: View {
             NavigationLink {
                 FailedNotesListView(model: model, makeProviderSettings: makeProviderSettings)
             } label: {
-                DSRow(label: StatusText.showAllLabel, value: "\(model.failedNotes.count)")
+                DSRow(label: StatusText.showAllLabel, value: model.failedNotesArePartial ? "\(model.failedNotes.count)+" : "\(model.failedNotes.count)")
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(Self.showAllIdentifier)
