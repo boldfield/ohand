@@ -377,7 +377,8 @@ final class ItemControlsModel: ObservableObject {
         let edit = makeReminderEdit(itemID)
         reminderEdit = edit
         await edit.load()
-        if let instant = prompt.prefilledInstant { edit.draftDate = instant }
+        // The time may have passed while the screen stayed open, so it is checked again here.
+        if let instant = prompt.prefilledInstant, instant > now() { edit.draftDate = instant }
     }
 
     /// Closes the reminder edit and the prompt without storing anything.

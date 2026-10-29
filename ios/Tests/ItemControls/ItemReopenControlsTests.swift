@@ -63,6 +63,7 @@ private final class LifecycleStandIn: ItemControlsLifecycleActing, @unchecked Se
 @MainActor
 final class ItemReopenControlsTests: XCTestCase {
     private static let clock = Date(timeIntervalSince1970: 1_800_000_000)
+    private var elapsed: TimeInterval = 0
     private var onScreen: Set<String> = []
     private var retainedWindow: UIWindow?
     private var reader: MovingDetailReader!
@@ -72,6 +73,7 @@ final class ItemReopenControlsTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
         onScreen = []
+        elapsed = 0
         reader = MovingDetailReader()
         actions = LifecycleStandIn(reader)
     }
@@ -92,8 +94,8 @@ final class ItemReopenControlsTests: XCTestCase {
         controls = ItemControlsModel(
             itemID: "item-1", reader: reader, corrector: NoCorrectionsAllowed(), lifecycle: actions,
             makeCommandID: { counter += 1; return "command-\(counter)" },
-            makeReminderEdit: { ReminderEditModel(itemID: $0, editor: editor, now: { Self.clock }, deviceTimeZone: { TimeZone(identifier: "UTC")! }) },
-            now: { Self.clock })
+            makeReminderEdit: { ReminderEditModel(itemID: $0, editor: editor, now: { [unowned self] in Self.clock.addingTimeInterval(self.elapsed) }, deviceTimeZone: { TimeZone(identifier: "UTC")! }) },
+            now: { [unowned self] in Self.clock.addingTimeInterval(self.elapsed) })
         let hosting = UIHostingController(
             rootView: ScrollView {
                 ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
@@ -241,6 +243,17 @@ final class ItemReopenControlsTests: XCTestCase {
             XCTAssertTrue(onScreen.contains(ItemControlsView.reminderAgainDoneIdentifier), "\(name): the edit is drawn")
             retainedWindow?.isHidden = true
         }
+    }
+
+    func testAFormerReminderThatPassesBeforeTheEditOpensIsNotPrefilled() async {
+        let former = Self.clock.addingTimeInterval(7200)
+        await reopenCarrying(ReminderInstant.string(from: former), style: .light)
+        XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier))
+        elapsed = 10_800
+        await controls.setReminderAgain()
+        await settle()
+        XCTAssertEqual(
+            controls.reminderEdit?.draftDate, Self.clock.addingTimeInterval(elapsed + 3600), "the default, not the time that passed")
     }
 
     func testAPastFormerReminderOpensAnEmptyEdit() async {
