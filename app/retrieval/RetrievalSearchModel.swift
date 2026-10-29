@@ -35,11 +35,17 @@ final class RetrievalSearchModel: ObservableObject {
     @Published var since: Date?
     @Published var until: Date?
     @Published var itemType: RetrievalItemType?
+    /// Whether completed and cancelled items are searched too. Off at every launch and never stored; changing it
+    /// through `setIncludeDone` runs the search on screen again.
+    @Published private(set) var includeDone = false
 
     @Published private(set) var phase: RetrievalSearchPhase = .idle
     @Published private(set) var rows: [RetrievalResultRow] = []
     @Published private(set) var totalAccessible = 0
     @Published private(set) var canLoadMore = false
+    /// How many completed or cancelled items also match the search on screen. Only asked for while `includeDone` is
+    /// off, and 0 until the count query answers.
+    @Published private(set) var closedMatchCount = 0
     @Published private(set) var problem: String?
     /// The result shown in the item pane beside the results. Only set while the session is authenticated and the row
     /// is on screen; a new search, a relock or leaving the screen drops it.
@@ -54,6 +60,7 @@ final class RetrievalSearchModel: ObservableObject {
     private let onSelect: (RetrievalItemReference) -> Void
     private let calendar: Calendar
     private var generation = 0
+    private var closedCountGeneration = 0
     private var lastRequest: RetrievalSearchRequest?
     /// The last search sent from its first result: the words and filters on screen, whether its answer is awaited,
     /// came back or failed. Loading more pages does not change it.
@@ -93,7 +100,16 @@ final class RetrievalSearchModel: ObservableObject {
     var currentRequest: RetrievalSearchRequest {
         RetrievalSearchRequest(
             query: query, sessionTopic: sessionTopic, onlyWithSessionTopic: onlyWithSessionTopic,
-            since: since, until: until, itemType: itemType)
+            since: since, until: until, itemType: itemType, includeDone: includeDone)
+    }
+
+    /// Turns "Include done" on or off. A search already on screen runs again with the new setting.
+    func setIncludeDone(_ include: Bool) {
+        guard include != includeDone else { return }
+        includeDone = include
+        closedMatchCount = 0
+        closedCountGeneration += 1
+        if phase != .idle, currentRequest.hasCriteria { search() }
     }
 
     /// Runs the current words and filters from the first result.
@@ -184,6 +200,9 @@ final class RetrievalSearchModel: ObservableObject {
         since = nil
         until = nil
         itemType = nil
+        includeDone = false
+        closedMatchCount = 0
+        closedCountGeneration += 1
         phase = .idle
         rows = []
         totalAccessible = 0
@@ -217,6 +236,8 @@ final class RetrievalSearchModel: ObservableObject {
             rows = []
             totalAccessible = 0
             canLoadMore = false
+            closedMatchCount = 0
+            closedCountGeneration += 1
         }
         phase = .searching
         if !appending { shownRequest = request }
@@ -224,6 +245,21 @@ final class RetrievalSearchModel: ObservableObject {
             DispatchQueue.main.async {
                 self?.finish(
                     result, for: request, generation: thisGeneration, appending: appending, restoring: restoring)
+            }
+        }
+    }
+
+    /// Asks how many completed or cancelled items match too, so the screen can offer "Include done". A stale or
+    /// failed answer shows nothing.
+    private func countClosedMatches(for request: RetrievalSearchRequest) {
+        guard !request.includeDone else { return }
+        closedCountGeneration += 1
+        let thisGeneration = closedCountGeneration
+        searcher.countClosedMatches(for: request) { [weak self] count in
+            DispatchQueue.main.async {
+                guard let self, thisGeneration == self.closedCountGeneration, self.readScope() == .authenticated
+                else { return }
+                self.closedMatchCount = count
             }
         }
     }
@@ -266,6 +302,7 @@ final class RetrievalSearchModel: ObservableObject {
             rows = appending ? rows + page.rows : page.rows
             canLoadMore = page.hasMore
             phase = rows.isEmpty ? .empty : .results
+            if !appending { countClosedMatches(for: request) }
             // The pane keeps its item even when the row is gone: a deleted item still shows its deletion result there,
             // until the person selects another result or searches again.
         }
