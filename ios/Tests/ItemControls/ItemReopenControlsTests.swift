@@ -116,7 +116,7 @@ final class ItemReopenControlsTests: XCTestCase {
 
     private func eachAppearance(_ body: (String) async -> Void) async {
         for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
-            await setUp()
+            try? await setUp()
             await host()
             retainedWindow?.overrideUserInterfaceStyle = style
             await settle()
@@ -151,7 +151,7 @@ final class ItemReopenControlsTests: XCTestCase {
 
     func testAClosedItemShowsReopenInPlaceOfCompleteAndCancelFromEachState() async {
         for state in ["completed", "cancelled"] {
-            await setUp()
+            try? await setUp()
             await host(state: state)
             for style in [UIUserInterfaceStyle.light, .dark] {
                 retainedWindow?.overrideUserInterfaceStyle = style
