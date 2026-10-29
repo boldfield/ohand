@@ -69,6 +69,7 @@ final class ItemReopenControlsTests: XCTestCase {
     private var reader: MovingDetailReader!
     private var actions: LifecycleStandIn!
     private var controls: ItemControlsModel!
+    private var reminders: FakeReminderEditor!
 
     override func setUp() async throws {
         try await super.setUp()
@@ -88,13 +89,16 @@ final class ItemReopenControlsTests: XCTestCase {
     private func host(state: String = "active", style: UIUserInterfaceStyle = .light) async {
         reader.lifecycleState = state
         var counter = 0
-        let editor = FakeReminderEditor(
+        reminders = FakeReminderEditor(
             read: .success(
                 ReminderReadAnswer(itemID: "item-1", itemRevision: 4, itemType: "action", lifecycleState: "active", reminder: nil)))
+        // Stands in for the host screen's own reminder editor, which these controls prepare but never draw.
+        let reminderEditor = ReminderEditModel(
+            itemID: "item-1", editor: reminders, now: { [unowned self] in Self.clock.addingTimeInterval(self.elapsed) },
+            deviceTimeZone: { TimeZone(identifier: "UTC")! })
         controls = ItemControlsModel(
             itemID: "item-1", reader: reader, corrector: NoCorrectionsAllowed(), lifecycle: actions,
-            makeCommandID: { counter += 1; return "command-\(counter)" },
-            makeReminderEdit: { ReminderEditModel(itemID: $0, editor: editor, now: { [unowned self] in Self.clock.addingTimeInterval(self.elapsed) }, deviceTimeZone: { TimeZone(identifier: "UTC")! }) },
+            makeCommandID: { counter += 1; return "command-\(counter)" }, reminderEditor: reminderEditor,
             now: { [unowned self] in Self.clock.addingTimeInterval(self.elapsed) })
         let hosting = UIHostingController(
             rootView: ScrollView {
@@ -116,6 +120,22 @@ final class ItemReopenControlsTests: XCTestCase {
             retainedWindow?.rootViewController?.view.layoutIfNeeded()
             try? await Task.sleep(nanoseconds: 60_000_000)
         }
+    }
+
+    /// The date pickers drawn in the hosted controls; a reminder editor of their own would add one.
+    private func drawnDatePickers() -> Int {
+        func count(_ view: UIView) -> Int { (view is UIDatePicker ? 1 : 0) + view.subviews.map(count).reduce(0, +) }
+        return retainedWindow.map(count) ?? 0
+    }
+
+    /// After Set a reminder again: the notice stays, the button is spent, the controls draw no editor and nothing is sent.
+    private func assertPreparedWithoutDrawingAnEditor(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(controls.reminderAgainIsOpen, name, file: file, line: line)
+        XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), "\(name): the notice stays", file: file, line: line)
+        XCTAssertFalse(
+            onScreen.contains(ItemControlsView.setReminderAgainIdentifier), "\(name): the button is spent", file: file, line: line)
+        XCTAssertEqual(drawnDatePickers(), 0, "\(name): the controls draw no editor of their own", file: file, line: line)
+        XCTAssertEqual(reminders.sent, [], "\(name): nothing is scheduled until the person saves", file: file, line: line)
     }
 
     private func eachAppearance(_ body: (String) async -> Void) async {
@@ -235,12 +255,13 @@ final class ItemReopenControlsTests: XCTestCase {
             XCTAssertEqual(ItemControlsView.reminderOffNotice, "Its reminder was turned off.")
             XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
             XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier), name)
-            XCTAssertNil(controls.reminderEdit, "\(name): nothing is opened or scheduled until asked")
+            XCTAssertFalse(controls.reminderAgainIsOpen, "\(name): nothing is prepared until asked")
+            XCTAssertNotEqual(controls.reminderEditor?.draftDate, future, "\(name): the editor is untouched until asked")
             await controls.setReminderAgain()
             await settle()
-            XCTAssertEqual(controls.reminderEdit?.draftDate, future, name)
-            XCTAssertEqual(controls.reminderEdit?.reminder == nil, true, "no reminder is stored by opening the edit")
-            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderAgainDoneIdentifier), "\(name): the edit is drawn")
+            XCTAssertEqual(controls.reminderEditor?.draftDate, future, name)
+            XCTAssertNil(controls.reminderEditor?.reminder, "\(name): no reminder is stored by preparing the editor")
+            assertPreparedWithoutDrawingAnEditor(name)
             retainedWindow?.isHidden = true
         }
     }
@@ -253,7 +274,8 @@ final class ItemReopenControlsTests: XCTestCase {
         await controls.setReminderAgain()
         await settle()
         XCTAssertEqual(
-            controls.reminderEdit?.draftDate, Self.clock.addingTimeInterval(elapsed + 3600), "the default, not the time that passed")
+            controls.reminderEditor?.draftDate, Self.clock.addingTimeInterval(elapsed + 3600), "the default, not the time that passed")
+        assertPreparedWithoutDrawingAnEditor("light")
     }
 
     func testAPastFormerReminderOpensAnEmptyEdit() async {
@@ -265,8 +287,8 @@ final class ItemReopenControlsTests: XCTestCase {
             await controls.setReminderAgain()
             await settle()
             XCTAssertEqual(
-                controls.reminderEdit?.draftDate, Self.clock.addingTimeInterval(3600), "\(name): the default, not the past time")
-            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderAgainDoneIdentifier), "\(name): the edit is drawn")
+                controls.reminderEditor?.draftDate, Self.clock.addingTimeInterval(3600), "\(name): the default, not the past time")
+            assertPreparedWithoutDrawingAnEditor(name)
             retainedWindow?.isHidden = true
         }
     }

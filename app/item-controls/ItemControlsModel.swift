@@ -123,8 +123,8 @@ final class ItemControlsModel: ObservableObject {
     @Published private(set) var refreshFailure: ItemControlsRefreshFailure?
     /// Set after a reopen that carried a former reminder instant, until the next action or until it is dismissed.
     @Published private(set) var reminderAgainPrompt: ItemReminderAgainPrompt?
-    /// The reminder edit opened from the prompt. Nothing is scheduled until the person saves in it.
-    @Published private(set) var reminderEdit: ReminderEditModel?
+    /// Set once Set a reminder again has prepared the host's reminder editor, until the next action.
+    @Published private(set) var reminderAgainIsOpen = false
     /// The ending (`complete` or `cancel`) done on this screen that Undo reverses; nil once reopened.
     @Published private(set) var undoableEnding: ItemLifecycleAction?
 
@@ -133,7 +133,8 @@ final class ItemControlsModel: ObservableObject {
     private let corrector: ItemControlsCorrecting
     private let lifecycle: ItemControlsLifecycleActing?
     private let makeCommandID: () -> String
-    private let makeReminderEdit: ((String) -> ReminderEditModel)?
+    /// The host screen's own reminder editor, which Set a reminder again prepares. The controls draw no editor.
+    let reminderEditor: ReminderEditModel?
     private let now: () -> Date
     private let onCorrected: @MainActor () -> Void
     private var heldCommand: (key: String, commandID: String)?
@@ -148,7 +149,7 @@ final class ItemControlsModel: ObservableObject {
         itemID: String, reader: SourceDetailReading, corrector: ItemControlsCorrecting,
         lifecycle: ItemControlsLifecycleActing? = nil,
         makeCommandID: @escaping () -> String = { UUID().uuidString },
-        makeReminderEdit: ((String) -> ReminderEditModel)? = nil,
+        reminderEditor: ReminderEditModel? = nil,
         now: @escaping () -> Date = Date.init,
         onCorrected: @escaping @MainActor () -> Void = {}
     ) {
@@ -157,7 +158,7 @@ final class ItemControlsModel: ObservableObject {
         self.corrector = corrector
         self.lifecycle = lifecycle
         self.makeCommandID = makeCommandID
-        self.makeReminderEdit = makeReminderEdit
+        self.reminderEditor = reminderEditor
         self.now = now
         self.onCorrected = onCorrected
     }
@@ -182,8 +183,8 @@ final class ItemControlsModel: ObservableObject {
     /// Whether Undo is offered: this screen completed or cancelled the item, and it can still be reopened.
     var canUndo: Bool { undoableEnding != nil && canReopen }
 
-    /// Whether Set a reminder again can open the reminder edit.
-    var canSetReminderAgain: Bool { reminderAgainPrompt != nil && makeReminderEdit != nil }
+    /// Whether Set a reminder again can prepare the host's reminder editor.
+    var canSetReminderAgain: Bool { reminderAgainPrompt != nil && reminderEditor != nil && !reminderAgainIsOpen }
 
     /// Whether Not now and Stop suggesting are offered: the item is open and suggestions are not already stopped.
     var canQuietSuggestions: Bool { canAct && snapshot?.suggestionsStopped == false }
@@ -370,21 +371,15 @@ final class ItemControlsModel: ObservableObject {
     @MainActor func stopSuggesting() async { await perform(.stopSuggesting) }
     @MainActor func reopen() async { await perform(.reopen) }
 
-    /// Opens the reminder edit for this item, starting from the former reminder time when it is still in the future.
-    /// The edit stores nothing until the person saves.
+    /// Prepares the host's reminder editor for this item, starting from the former reminder time when it is still in
+    /// the future and from the editor's own default otherwise. The editor stores nothing until the person saves.
     @MainActor func setReminderAgain() async {
-        guard let prompt = reminderAgainPrompt, let makeReminderEdit else { return }
-        let edit = makeReminderEdit(itemID)
-        reminderEdit = edit
-        await edit.load()
+        guard canSetReminderAgain, let prompt = reminderAgainPrompt, let reminderEditor else { return }
+        // A fresh read, so the editor knows the item is open again before anything is offered.
+        await reminderEditor.load()
         // The time may have passed while the screen stayed open, so it is checked again here.
-        if let instant = prompt.prefilledInstant, instant > now() { edit.draftDate = instant }
-    }
-
-    /// Closes the reminder edit and the prompt without storing anything.
-    @MainActor func dismissReminderAgain() {
-        reminderEdit = nil
-        reminderAgainPrompt = nil
+        if let instant = prompt.prefilledInstant, instant > now() { reminderEditor.draftDate = instant }
+        reminderAgainIsOpen = true
     }
 
     /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
@@ -395,7 +390,7 @@ final class ItemControlsModel: ObservableObject {
         isWorking = true
         outcome = nil
         reminderAgainPrompt = nil
-        reminderEdit = nil
+        reminderAgainIsOpen = false
         let commandID: String
         if let held = heldActionCommand, held.action == action {
             commandID = held.commandID
@@ -477,11 +472,12 @@ final class ItemControlsModel: ObservableObject {
     }
 
     static func assembled(
-        itemID: String, root: ServiceCompositionRoot, onCorrected: @escaping @MainActor () -> Void
+        itemID: String, root: ServiceCompositionRoot, reminderEditor: ReminderEditModel? = nil,
+        onCorrected: @escaping @MainActor () -> Void
     ) -> ItemControlsModel {
         ItemControlsModel(
             itemID: itemID, reader: root.itemDetails, corrector: root.itemCorrections,
             lifecycle: root.itemLifecycleControls,
-            makeReminderEdit: { ReminderEditModel.assembled(itemID: $0, root: root) }, onCorrected: onCorrected)
+            reminderEditor: reminderEditor, onCorrected: onCorrected)
     }
 }

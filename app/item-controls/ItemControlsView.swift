@@ -26,7 +26,6 @@ struct ItemControlsView: View {
     static let undoIdentifier = "item-controls.action.undo"
     static let reminderOffIdentifier = "item-controls.reminder-off"
     static let setReminderAgainIdentifier = "item-controls.action.set-reminder-again"
-    static let reminderAgainDoneIdentifier = "item-controls.reminder-again.done"
     static let reminderOffNotice = "Its reminder was turned off."
     /// Reported as shown while the fields can be edited and as gone while they are disabled.
     static let editableIdentifier = "item-controls.editable"
@@ -210,13 +209,8 @@ struct ItemControlsView: View {
             .foregroundColor(DSColor.inkMuted.color)
             .fixedSize(horizontal: false, vertical: true)
             .rendered(Self.reminderOffIdentifier, renderReporter)
-        if let edit = model.reminderEdit {
-            ReminderEditSection(model: edit)
-            Button("Done") { model.dismissReminderAgain() }
-                .buttonStyle(DSPillButtonStyle(style: .secondary))
-                .accessibilityIdentifier(Self.reminderAgainDoneIdentifier)
-                .rendered(Self.reminderAgainDoneIdentifier, renderReporter)
-        } else if model.canSetReminderAgain {
+        // The editor itself is the host screen's; these controls only prepare it.
+        if model.canSetReminderAgain {
             Button("Set a reminder again") { Task { await model.setReminderAgain() } }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
                 .accessibilityIdentifier(Self.setReminderAgainIdentifier)
