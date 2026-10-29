@@ -4539,6 +4539,11 @@ Acceptance:
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
+**Ownership amendment (coordinator, 2026-10-28, after PR #380 round 1).** The worker reported the missing seam correctly. Two changes; nothing else changes:
+
+1. **Owned path.** F57 also owns `core/src/domain/items/mod.rs`, only to add a `"reopen"` arm to the lifecycle replay in `rebuild_state_from_events` (around line 616) that sets `LifecycleState::Active`, plus tests. Without it, complete→reopen rebuilds as `completed` and `verify_state_integrity` reports a mismatch. Tests: `verify_state_integrity` passes after complete→reopen, cancel→reopen and complete→reopen→complete. No other edit to that file.
+2. **The replayed instant is fixed at the first reopen.** This states what acceptance 1 (idempotent by command ID) and 3 (the instant is read from the stored reminder) already require together. A retried `reopen` with the same command ID returns exactly the response the first one returned, including the former instant. That holds even after the person has used "Set a reminder again" and the reminder row now carries a new instant or state. Record the instant when the reopen is applied, in the reopen event's payload or the command journal, and replay from that record. Do not rebuild it from the current reminders row. Add a test: reopen, set a new reminder, retry the same reopen command, and get the original instant.
+
 ### F58
 
 Home and search show only open items unless closed ones are asked for
@@ -4597,3 +4602,9 @@ Acceptance:
 4. **Hosted view tests** cover the default, the toggle, the markers, and both empty states, in both appearances. Exact-head macOS CI evidence is required.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+**Ownership amendment (coordinator, 2026-10-28, after the first claim blocked).** The worker was right. The search screen decodes `PrivateRetrievalHit` (`ios/Services/Authentication/PrivateReadGate.swift`, around line 104), not `CoreRetrievalHit`. F58 added `lifecycle_state` only to `CoreRetrievalHit`, so rows cannot be marked. F60 also owns, only for this seam:
+- `ios/Services/Authentication/PrivateReadGate.swift`, to add `lifecycleState: String?` to `PrivateRetrievalHit`, decoded from `lifecycle_state`, with absence decoding as nil, the same as F58's `CoreRetrievalHit`. No other edit to that file; the request side already forwards `lifecycleStates`.
+- `ios/Tests/Authentication/PrivateReadCoreIntegrationTests.swift`, to add decoding cases for a hit with each lifecycle value and with the field absent.
+
+F60's acceptance is unchanged.
