@@ -27,6 +27,9 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
     private var root: ServiceCompositionRoot!
     private var retainedWindow: UIWindow?
     private var onScreen: Set<String> = []
+    /// What the screen's reminder editor reports drawing. The screen draws its own editor and the controls draw none
+    /// (`ItemReopenControlsTests` checks that), so a drawn Save here is the screen's one editor.
+    private var editorRendering: [String: String] = [:]
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -72,15 +75,17 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         let controls = try XCTUnwrap(detailModel.itemControls)
         let editor = try XCTUnwrap(detailModel.reminderEditor)
         XCTAssertTrue(controls.reminderEditor === editor, "the controls prepare the screen's own editor")
-        host(AnyView(NavigationStack { SourceDetailView(model: detailModel, renderReporter: { [unowned self] id, shown in
-            if shown { onScreen.insert(id) } else { onScreen.remove(id) }
-        }) }))
+        host(AnyView(NavigationStack {
+            SourceDetailView(model: detailModel, renderReporter: { [unowned self] id, shown in
+                if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+            })
+            .onPreferenceChange(ReminderEditSection.RenderedKey.self) { [unowned self] in editorRendering = $0 }
+        }))
         settle("the detail, the controls and the reminder editor loaded") {
             detailModel.content != nil && controls.canAct && editor.isShown && !editor.isLoading
-                && self.drawnReminderEditors() == 1
+                && self.editorIsDrawn
         }
-        XCTAssertEqual(
-            drawnReminderEditors(), 1, "the screen draws one reminder editor: \(DrawnReminderEditors.describe(in: retainedWindow))")
+        XCTAssertTrue(editorIsDrawn, "the screen draws its reminder editor")
 
         onMain { await controls.complete() }
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
@@ -98,7 +103,7 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         let former = try XCTUnwrap(ReminderInstant.date(from: Self.formerInstant))
         XCTAssertEqual(editor.draftDate, former, "the screen's editor starts from the former time")
         settle("the button is spent") { !onScreen.contains(ItemControlsView.setReminderAgainIdentifier) }
-        XCTAssertEqual(drawnReminderEditors(), 1, "still exactly one reminder editor on the screen")
+        XCTAssertTrue(editorIsDrawn, "the screen's editor is the one prepared")
         XCTAssertEqual(
             scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "cancelled",
             "nothing is scheduled before the person saves")
@@ -109,12 +114,15 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         XCTAssertEqual(center.pendingIdentifiers.count, 1, "exactly one reminder is scheduled")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminders WHERE item_id = '\(itemID)'"), "1")
         XCTAssertEqual(scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "resolved")
-        XCTAssertEqual(drawnReminderEditors(), 1, "the save left one reminder editor on the screen")
+        settle("the editor shows the saved reminder") {
+            self.editorIsDrawn && self.editorRendering[ReminderEditSection.messageIdentifier] != nil
+        }
+        XCTAssertTrue(editorIsDrawn, "the screen's editor stays drawn after the save")
     }
 
     // MARK: helpers
 
-    private func drawnReminderEditors() -> Int { DrawnReminderEditors.count(in: retainedWindow) }
+    private var editorIsDrawn: Bool { editorRendering[ReminderEditSection.saveIdentifier] != nil }
 
     private func host(_ view: AnyView) {
         // Tall enough that the whole screen, down to the reminder editor below the history, is laid out.

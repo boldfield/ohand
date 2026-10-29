@@ -70,10 +70,13 @@ final class ItemReopenControlsTests: XCTestCase {
     private var actions: LifecycleStandIn!
     private var controls: ItemControlsModel!
     private var reminders: FakeReminderEditor!
+    /// What any reminder editor drawn inside the hosted controls reports; the controls should draw none.
+    private var editorRendering: [String: String] = [:]
 
     override func setUp() async throws {
         try await super.setUp()
         onScreen = []
+        editorRendering = [:]
         elapsed = 0
         reader = MovingDetailReader()
         actions = LifecycleStandIn(reader)
@@ -105,6 +108,7 @@ final class ItemReopenControlsTests: XCTestCase {
                 ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
                     if shown { onScreen.insert(id) } else { onScreen.remove(id) }
                 })
+                .onPreferenceChange(ReminderEditSection.RenderedKey.self) { [unowned self] in editorRendering = $0 }
             })
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = hosting
@@ -122,8 +126,6 @@ final class ItemReopenControlsTests: XCTestCase {
         }
     }
 
-    /// The reminder editors drawn in the hosted controls; one of their own would count here.
-    private func drawnReminderEditors() -> Int { DrawnReminderEditors.count(in: retainedWindow) }
 
     /// After Set a reminder again: the notice stays, the button is spent, the controls draw no editor and nothing is sent.
     private func assertPreparedWithoutDrawingAnEditor(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
@@ -131,7 +133,7 @@ final class ItemReopenControlsTests: XCTestCase {
         XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), "\(name): the notice stays", file: file, line: line)
         XCTAssertFalse(
             onScreen.contains(ItemControlsView.setReminderAgainIdentifier), "\(name): the button is spent", file: file, line: line)
-        XCTAssertEqual(drawnReminderEditors(), 0, "\(name): the controls draw no editor of their own", file: file, line: line)
+        XCTAssertEqual(editorRendering, [:], "\(name): the controls draw no editor of their own", file: file, line: line)
         XCTAssertEqual(reminders.sent, [], "\(name): nothing is scheduled until the person saves", file: file, line: line)
     }
 
