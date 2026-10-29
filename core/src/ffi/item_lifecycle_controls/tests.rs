@@ -338,6 +338,42 @@ fn a_repeated_command_id_replays_and_a_reused_one_conflicts() {
 }
 
 #[test]
+fn reopening_over_the_boundary_returns_the_item_and_the_stored_reminder_instant() {
+    let _guard = serial();
+    let store = Store::new("reopen", "active", true);
+    let mut session = Session::over(&store.path);
+    let before_instant = store.scalar("SELECT resolved_instant FROM reminders");
+
+    let already_open = session.succeed(&command("reopen", "c-0", 0));
+    assert_eq!(already_open["outcome"], "already_open");
+    assert_eq!(store.count("events"), 0);
+
+    session.succeed(&command("complete_item", "c-1", 0));
+    let stale = session.succeed(&command("reopen", "c-2", 0));
+    assert_eq!(
+        stale,
+        json!({"operation_id": 3, "outcome": "stale_revision", "current_revision": 1})
+    );
+
+    let body = session.succeed(&command("reopen", "c-2", 1));
+    assert_eq!(body["outcome"], "reopened");
+    assert_eq!(body["revision"], 2);
+    assert_eq!(body["replayed"], false);
+    assert_eq!(body["former_reminder_instant"], before_instant);
+    assert_eq!(store.scalar("SELECT lifecycle_state FROM items"), "active");
+    assert_eq!(
+        store.scalar("SELECT request_state FROM reminders"),
+        "cancelled"
+    );
+
+    let replay = session.succeed(&command("reopen", "c-2", 1));
+    assert_eq!(replay["outcome"], "reopened");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["former_reminder_instant"], before_instant);
+    assert_eq!(store.count("events"), 2);
+}
+
+#[test]
 fn deleted_and_ended_items_are_answers_and_unknown_ones_are_not_found() {
     let _guard = serial();
     let deleted = Store::new("deleted", "deleted", true);

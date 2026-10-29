@@ -468,3 +468,188 @@ fn an_unknown_item_is_not_found_for_every_command() {
         );
     }
 }
+
+fn reopened(outcome: LifecycleControlOutcome) -> (i32, bool, Option<String>) {
+    match outcome {
+        LifecycleControlOutcome::Reopened {
+            revision,
+            replayed,
+            former_reminder_instant,
+        } => (revision, replayed, former_reminder_instant),
+        other => panic!("expected a reopen, got {other:?}"),
+    }
+}
+
+#[test]
+fn reopening_a_completed_or_cancelled_item_makes_it_active_and_keeps_its_reminder_cancelled() {
+    for ending in [LifecycleControl::Complete, LifecycleControl::Cancel] {
+        let mut fixture = Fixture::with_reminder();
+        fixture.applied("c-1", 0, ending);
+        assert_eq!(fixture.reminder_snapshot().0, RequestState::Cancelled);
+        let operations_before = fixture.reminder_snapshot().1;
+
+        let (revision, replayed, instant) =
+            reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+        assert_eq!((revision, replayed), (2, false), "{ending:?}");
+        assert_eq!(instant.as_deref(), Some("2090-01-01T09:00:00Z"));
+        let durable = fixture.durable();
+        assert_eq!(durable.lifecycle_state, "active");
+        assert_eq!(durable.revision, 2);
+        assert_eq!(fixture.event_types().last().unwrap(), "reopen");
+        let (request_state, operations, desired) = fixture.reminder_snapshot();
+        assert_eq!(request_state, RequestState::Cancelled);
+        assert_eq!(operations, operations_before);
+        assert_eq!(desired, 0);
+    }
+}
+
+#[test]
+fn reopening_an_item_that_never_had_a_reminder_returns_no_instant() {
+    let mut fixture = Fixture::new();
+    fixture.applied("c-1", 0, LifecycleControl::Complete);
+
+    let (_, _, instant) = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+    assert_eq!(instant, None);
+}
+
+#[test]
+fn reopening_keeps_a_stop_suggesting_item_pull_only() {
+    let mut fixture = Fixture::new();
+    fixture.applied("c-1", 0, LifecycleControl::StopSuggesting);
+    fixture.applied("c-2", 1, LifecycleControl::Complete);
+    let ended = fixture.durable().eligibility;
+
+    reopened(fixture.run("c-3", 2, LifecycleControl::Reopen));
+
+    assert_eq!(fixture.durable().eligibility, ended);
+    assert_eq!(fixture.durable().eligibility, Some((false, false, true)));
+}
+
+#[test]
+fn reopening_an_active_deleted_or_stale_item_changes_nothing() {
+    let mut active = Fixture::with_reminder();
+    let before = active.durable();
+    assert_eq!(
+        active.run("c-1", 0, LifecycleControl::Reopen),
+        LifecycleControlOutcome::AlreadyOpen
+    );
+    assert_eq!(active.durable(), before);
+
+    let mut deleted = Fixture::new();
+    deleted.mark_deleted();
+    assert_eq!(
+        deleted.run("c-1", 0, LifecycleControl::Reopen),
+        LifecycleControlOutcome::ItemDeleted
+    );
+    assert_eq!(deleted.durable().lifecycle_state, "deleted");
+
+    let mut stale = Fixture::new();
+    stale.applied("c-1", 0, LifecycleControl::Cancel);
+    let before = stale.durable();
+    assert_eq!(
+        stale.run("c-2", 0, LifecycleControl::Reopen),
+        LifecycleControlOutcome::StaleRevision {
+            current_revision: 1
+        }
+    );
+    assert_eq!(stale.durable(), before);
+}
+
+#[test]
+fn reopening_is_idempotent_by_command_id_and_a_reused_id_conflicts() {
+    let mut fixture = Fixture::with_reminder();
+    fixture.applied("c-1", 0, LifecycleControl::Complete);
+    let first = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+    let after_first = fixture.durable();
+
+    let (revision, replayed, instant) = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+    assert_eq!((revision, replayed), (first.0, true));
+    assert_eq!(instant, first.2);
+    assert_eq!(fixture.durable(), after_first);
+    assert_eq!(
+        fixture.run("c-2", 2, LifecycleControl::Complete),
+        LifecycleControlOutcome::CommandConflict
+    );
+    assert_eq!(
+        fixture.run("c-1", 0, LifecycleControl::Reopen),
+        LifecycleControlOutcome::CommandConflict
+    );
+}
+
+#[test]
+fn a_reopened_item_can_be_completed_again() {
+    let mut fixture = Fixture::new();
+    fixture.applied("c-1", 0, LifecycleControl::Complete);
+    reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+    fixture.applied("c-3", 2, LifecycleControl::Cancel);
+
+    assert_eq!(fixture.durable().lifecycle_state, "cancelled");
+}
+
+#[test]
+fn a_retried_reopen_replays_the_instant_the_first_one_returned_after_the_reminder_changes() {
+    let mut fixture = Fixture::with_reminder();
+    fixture.applied("c-1", 0, LifecycleControl::Complete);
+    let first = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+    assert_eq!(first.2.as_deref(), Some("2090-01-01T09:00:00Z"));
+
+    // The person sets a reminder again: the same row now carries a new instant and state.
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE reminders SET request_state = 'resolved', \
+             resolved_instant = '2091-02-02T10:00:00Z' WHERE item_id = ?",
+            [&fixture.item_id],
+        )
+        .unwrap();
+
+    let (revision, replayed, instant) = reopened(fixture.run("c-2", 1, LifecycleControl::Reopen));
+
+    assert_eq!((revision, replayed), (first.0, true));
+    assert_eq!(instant, first.2);
+}
+
+#[test]
+fn state_rebuilt_from_events_agrees_after_reopening() {
+    let mut fixture = Fixture::new();
+    // The fixture sets a type with no applied proposal behind it; the rebuild would not know it.
+    fixture
+        .db
+        .conn()
+        .execute("UPDATE items SET item_type = NULL", [])
+        .unwrap();
+    for (ending, label) in [
+        (LifecycleControl::Complete, "a"),
+        (LifecycleControl::Cancel, "b"),
+    ] {
+        let base = fixture.durable().revision;
+        fixture.applied(&format!("end-{label}"), base, ending);
+        reopened(fixture.run(&format!("open-{label}"), base + 1, LifecycleControl::Reopen));
+        let tx = fixture.db.transaction().unwrap();
+        assert_eq!(
+            ohand_core::domain::items::verify_state_integrity(&tx, &fixture.item_id).unwrap(),
+            None
+        );
+        let rebuilt = ohand_core::domain::items::rebuild_state_from_events(&tx, &fixture.item_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebuilt.lifecycle_state.as_str(), "active");
+    }
+    // complete -> reopen -> complete: the rebuild must close the item again.
+    let base = fixture.durable().revision;
+    fixture.applied("end-again", base, LifecycleControl::Complete);
+    let tx = fixture.db.transaction().unwrap();
+    assert_eq!(
+        ohand_core::domain::items::verify_state_integrity(&tx, &fixture.item_id).unwrap(),
+        None
+    );
+    let rebuilt = ohand_core::domain::items::rebuild_state_from_events(&tx, &fixture.item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rebuilt.lifecycle_state.as_str(), "completed");
+}

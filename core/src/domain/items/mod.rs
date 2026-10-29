@@ -621,6 +621,9 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
             "cancellation" => {
                 lifecycle_state = LifecycleState::Cancelled;
             }
+            "reopen" => {
+                lifecycle_state = LifecycleState::Active;
+            }
             "deletion" => {
                 lifecycle_state = LifecycleState::Deleted;
             }
