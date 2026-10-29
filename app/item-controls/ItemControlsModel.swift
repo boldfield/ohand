@@ -24,13 +24,21 @@ protocol ItemControlsLifecycleActing: AnyObject, Sendable {
     func notNow(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemLifecycleControlReceipt
     func stopSuggesting(commandID: String, itemID: String, expectedRevision: Int) async throws
         -> ItemLifecycleControlReceipt
+    func reopen(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemReopenResult
 }
 
 extension ItemLifecycleControlService: ItemControlsLifecycleActing {}
 
 /// The lifecycle and suggestion actions the controls offer.
 enum ItemLifecycleAction: Equatable, Hashable {
-    case complete, cancel, notNow, stopSuggesting
+    case complete, cancel, notNow, stopSuggesting, reopen
+}
+
+/// Offered after a reopen whose result carries the instant of the reminder the ending cancelled. Reopening never brings
+/// that reminder back; this only lets the person set one again.
+struct ItemReminderAgainPrompt: Equatable {
+    /// The former reminder time, only when it is still in the future; the reminder edit starts empty otherwise.
+    let prefilledInstant: Date?
 }
 
 /// What the controls know about the item: the stored values they edit and the revision every correction names.
@@ -71,6 +79,8 @@ enum ItemControlsOutcome: Equatable {
     case actionConflict(ItemLifecycleAction, currentRevision: Int)
     /// The item was already completed or cancelled, so nothing was written.
     case actionItemEnded(lifecycle: String)
+    /// A reopen found the item already open, so nothing was written.
+    case actionAlreadyOpen
     case actionFailed(ItemLifecycleAction)
 }
 
@@ -111,12 +121,20 @@ final class ItemControlsModel: ObservableObject {
     @Published var pendingType: ItemCorrectionItemType?
     /// Set when the read after a correction failed; the snapshot is then older than what is stored.
     @Published private(set) var refreshFailure: ItemControlsRefreshFailure?
+    /// Set after a reopen that carried a former reminder instant, until the next action or until it is dismissed.
+    @Published private(set) var reminderAgainPrompt: ItemReminderAgainPrompt?
+    /// The reminder edit opened from the prompt. Nothing is scheduled until the person saves in it.
+    @Published private(set) var reminderEdit: ReminderEditModel?
+    /// The ending (`complete` or `cancel`) done on this screen that Undo reverses; nil once reopened.
+    @Published private(set) var undoableEnding: ItemLifecycleAction?
 
     let itemID: String
     private let reader: SourceDetailReading
     private let corrector: ItemControlsCorrecting
     private let lifecycle: ItemControlsLifecycleActing?
     private let makeCommandID: () -> String
+    private let makeReminderEdit: ((String) -> ReminderEditModel)?
+    private let now: () -> Date
     private let onCorrected: @MainActor () -> Void
     private var heldCommand: (key: String, commandID: String)?
     private var heldActionCommand: (action: ItemLifecycleAction, commandID: String)?
@@ -130,6 +148,8 @@ final class ItemControlsModel: ObservableObject {
         itemID: String, reader: SourceDetailReading, corrector: ItemControlsCorrecting,
         lifecycle: ItemControlsLifecycleActing? = nil,
         makeCommandID: @escaping () -> String = { UUID().uuidString },
+        makeReminderEdit: ((String) -> ReminderEditModel)? = nil,
+        now: @escaping () -> Date = Date.init,
         onCorrected: @escaping @MainActor () -> Void = {}
     ) {
         self.itemID = itemID
@@ -137,6 +157,8 @@ final class ItemControlsModel: ObservableObject {
         self.corrector = corrector
         self.lifecycle = lifecycle
         self.makeCommandID = makeCommandID
+        self.makeReminderEdit = makeReminderEdit
+        self.now = now
         self.onCorrected = onCorrected
     }
 
@@ -147,6 +169,21 @@ final class ItemControlsModel: ObservableObject {
         guard lifecycle != nil, canEdit, let snapshot else { return false }
         return snapshot.lifecycleState == "active"
     }
+
+    /// Whether the item is stored as completed or cancelled.
+    var isClosed: Bool { snapshot?.lifecycleState == "completed" || snapshot?.lifecycleState == "cancelled" }
+
+    /// Whether a completed or cancelled item can be reopened now.
+    var canReopen: Bool {
+        guard lifecycle != nil, canEdit, let snapshot else { return false }
+        return snapshot.lifecycleState == "completed" || snapshot.lifecycleState == "cancelled"
+    }
+
+    /// Whether Undo is offered: this screen completed or cancelled the item, and it can still be reopened.
+    var canUndo: Bool { undoableEnding != nil && canReopen }
+
+    /// Whether Set a reminder again can open the reminder edit.
+    var canSetReminderAgain: Bool { reminderAgainPrompt != nil && makeReminderEdit != nil }
 
     /// Whether Not now and Stop suggesting are offered: the item is open and suggestions are not already stopped.
     var canQuietSuggestions: Bool { canAct && snapshot?.suggestionsStopped == false }
@@ -331,14 +368,40 @@ final class ItemControlsModel: ObservableObject {
     @MainActor func cancel() async { await perform(.cancel) }
     @MainActor func notNow() async { await perform(.notNow) }
     @MainActor func stopSuggesting() async { await perform(.stopSuggesting) }
+    @MainActor func reopen() async { await perform(.reopen) }
+
+    /// Opens the reminder edit for this item, starting from the former reminder time when it is still in the future.
+    /// The edit stores nothing until the person saves.
+    @MainActor func setReminderAgain() async {
+        guard let prompt = reminderAgainPrompt, let makeReminderEdit else { return }
+        let edit = makeReminderEdit(itemID)
+        reminderEdit = edit
+        await edit.load()
+        if let instant = prompt.prefilledInstant { edit.draftDate = instant }
+    }
+
+    /// Closes the reminder edit and the prompt without storing anything.
+    @MainActor func dismissReminderAgain() {
+        reminderEdit = nil
+        reminderAgainPrompt = nil
+    }
+
+    private static func parseInstant(_ text: String) -> Date? {
+        let plain = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return plain.date(from: text) ?? fractional.date(from: text)
+    }
 
     /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
     /// retries of the same action, so a repeat after an unknown outcome stores once.
     @MainActor private func perform(_ action: ItemLifecycleAction) async {
-        guard canAct, let lifecycle, let snapshot else { return }
+        guard action == .reopen ? canReopen : canAct, let lifecycle, let snapshot else { return }
         if action == .notNow || action == .stopSuggesting, snapshot.suggestionsStopped { return }
         isWorking = true
         outcome = nil
+        reminderAgainPrompt = nil
+        reminderEdit = nil
         let commandID: String
         if let held = heldActionCommand, held.action == action {
             commandID = held.commandID
@@ -348,6 +411,26 @@ final class ItemControlsModel: ObservableObject {
         }
         let revision = snapshot.revision
         do {
+            if action == .reopen {
+                let result = try await lifecycle.reopen(commandID: commandID, itemID: itemID, expectedRevision: revision)
+                heldActionCommand = nil
+                undoableEnding = nil
+                switch result {
+                case .reopened(let receipt):
+                    outcome = .actionDone(.reopen)
+                    if let text = receipt.formerReminderInstant {
+                        let former = Self.parseInstant(text)
+                        reminderAgainPrompt = ItemReminderAgainPrompt(
+                            prefilledInstant: former.flatMap { $0 > now() ? $0 : nil })
+                    }
+                case .alreadyOpen:
+                    outcome = .actionAlreadyOpen
+                }
+                await load(resetting: [], afterSubmit: true)
+                onCorrected()
+                isWorking = false
+                return
+            }
             let receipt: ItemLifecycleControlReceipt
             switch action {
             case .complete: receipt = try await lifecycle.complete(commandID: commandID, itemID: itemID, expectedRevision: revision)
@@ -355,10 +438,14 @@ final class ItemControlsModel: ObservableObject {
             case .notNow: receipt = try await lifecycle.notNow(commandID: commandID, itemID: itemID, expectedRevision: revision)
             case .stopSuggesting:
                 receipt = try await lifecycle.stopSuggesting(commandID: commandID, itemID: itemID, expectedRevision: revision)
+            case .reopen:
+                isWorking = false
+                return
             }
             _ = receipt
             heldActionCommand = nil
             outcome = .actionDone(action)
+            if action == .complete || action == .cancel { undoableEnding = action }
         } catch let error as ItemLifecycleControlError {
             switch error {
             case .staleRevision(let current):
@@ -400,6 +487,7 @@ final class ItemControlsModel: ObservableObject {
     ) -> ItemControlsModel {
         ItemControlsModel(
             itemID: itemID, reader: root.itemDetails, corrector: root.itemCorrections,
-            lifecycle: root.itemLifecycleControls, onCorrected: onCorrected)
+            lifecycle: root.itemLifecycleControls,
+            makeReminderEdit: { ReminderEditModel.assembled(itemID: $0, root: root) }, onCorrected: onCorrected)
     }
 }
