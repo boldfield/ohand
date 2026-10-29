@@ -122,11 +122,8 @@ final class ItemReopenControlsTests: XCTestCase {
         }
     }
 
-    /// The date pickers drawn in the hosted controls; a reminder editor of their own would add one.
-    private func drawnDatePickers() -> Int {
-        func count(_ view: UIView) -> Int { (view is UIDatePicker ? 1 : 0) + view.subviews.map(count).reduce(0, +) }
-        return retainedWindow.map(count) ?? 0
-    }
+    /// The reminder editors drawn in the hosted controls; one of their own would count here.
+    private func drawnReminderEditors() -> Int { DrawnReminderEditors.count(in: retainedWindow) }
 
     /// After Set a reminder again: the notice stays, the button is spent, the controls draw no editor and nothing is sent.
     private func assertPreparedWithoutDrawingAnEditor(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
@@ -134,7 +131,7 @@ final class ItemReopenControlsTests: XCTestCase {
         XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), "\(name): the notice stays", file: file, line: line)
         XCTAssertFalse(
             onScreen.contains(ItemControlsView.setReminderAgainIdentifier), "\(name): the button is spent", file: file, line: line)
-        XCTAssertEqual(drawnDatePickers(), 0, "\(name): the controls draw no editor of their own", file: file, line: line)
+        XCTAssertEqual(drawnReminderEditors(), 0, "\(name): the controls draw no editor of their own", file: file, line: line)
         XCTAssertEqual(reminders.sent, [], "\(name): nothing is scheduled until the person saves", file: file, line: line)
     }
 

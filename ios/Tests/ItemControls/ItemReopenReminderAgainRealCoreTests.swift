@@ -77,9 +77,10 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         }) }))
         settle("the detail, the controls and the reminder editor loaded") {
             detailModel.content != nil && controls.canAct && editor.isShown && !editor.isLoading
-                && self.drawnDatePickers() == 1
+                && self.drawnReminderEditors() == 1
         }
-        XCTAssertEqual(drawnDatePickers(), 1, "the screen draws one reminder editor")
+        XCTAssertEqual(
+            drawnReminderEditors(), 1, "the screen draws one reminder editor: \(DrawnReminderEditors.describe(in: retainedWindow))")
 
         onMain { await controls.complete() }
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
@@ -97,7 +98,7 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         let former = try XCTUnwrap(ReminderInstant.date(from: Self.formerInstant))
         XCTAssertEqual(editor.draftDate, former, "the screen's editor starts from the former time")
         settle("the button is spent") { !onScreen.contains(ItemControlsView.setReminderAgainIdentifier) }
-        XCTAssertEqual(drawnDatePickers(), 1, "still exactly one reminder editor on the screen")
+        XCTAssertEqual(drawnReminderEditors(), 1, "still exactly one reminder editor on the screen")
         XCTAssertEqual(
             scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "cancelled",
             "nothing is scheduled before the person saves")
@@ -108,18 +109,16 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         XCTAssertEqual(center.pendingIdentifiers.count, 1, "exactly one reminder is scheduled")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM reminders WHERE item_id = '\(itemID)'"), "1")
         XCTAssertEqual(scalar("SELECT request_state FROM reminders WHERE item_id = '\(itemID)'"), "resolved")
-        XCTAssertEqual(drawnDatePickers(), 1, "the save left one reminder editor on the screen")
+        XCTAssertEqual(drawnReminderEditors(), 1, "the save left one reminder editor on the screen")
     }
 
     // MARK: helpers
 
-    private func drawnDatePickers() -> Int {
-        func count(_ view: UIView) -> Int { (view is UIDatePicker ? 1 : 0) + view.subviews.map(count).reduce(0, +) }
-        return retainedWindow.map(count) ?? 0
-    }
+    private func drawnReminderEditors() -> Int { DrawnReminderEditors.count(in: retainedWindow) }
 
     private func host(_ view: AnyView) {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        // Tall enough that the whole screen, down to the reminder editor below the history, is laid out.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 3000))
         window.rootViewController = UIHostingController(rootView: view)
         window.makeKeyAndVisible()
         retainedWindow = window
