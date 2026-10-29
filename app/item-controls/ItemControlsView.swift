@@ -135,12 +135,12 @@ struct ItemControlsView: View {
                     .foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
                     .rendered(Self.outcomeIdentifier, renderReporter)
-                if model.canUndo, outcome == .actionDone(.complete) || outcome == .actionDone(.cancel) {
-                    Button("Undo") { Task { await model.reopen() } }
-                        .buttonStyle(DSPillButtonStyle(style: .secondary))
-                        .accessibilityIdentifier(Self.undoIdentifier)
-                        .rendered(Self.undoIdentifier, renderReporter)
-                }
+            }
+            if model.canUndo {
+                Button("Undo") { Task { await model.reopen() } }
+                    .buttonStyle(DSPillButtonStyle(style: .secondary))
+                    .accessibilityIdentifier(Self.undoIdentifier)
+                    .rendered(Self.undoIdentifier, renderReporter)
             }
             if model.reminderAgainPrompt != nil, model.refreshFailure != .locked {
                 reminderAgainControl

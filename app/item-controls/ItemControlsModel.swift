@@ -386,13 +386,6 @@ final class ItemControlsModel: ObservableObject {
         reminderAgainPrompt = nil
     }
 
-    private static func parseInstant(_ text: String) -> Date? {
-        let plain = ISO8601DateFormatter()
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return plain.date(from: text) ?? fractional.date(from: text)
-    }
-
     /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
     /// retries of the same action, so a repeat after an unknown outcome stores once.
     @MainActor private func perform(_ action: ItemLifecycleAction) async {
@@ -419,7 +412,7 @@ final class ItemControlsModel: ObservableObject {
                 case .reopened(let receipt):
                     outcome = .actionDone(.reopen)
                     if let text = receipt.formerReminderInstant {
-                        let former = Self.parseInstant(text)
+                        let former = ReminderInstant.date(from: text)
                         reminderAgainPrompt = ItemReminderAgainPrompt(
                             prefilledInstant: former.flatMap { $0 > now() ? $0 : nil })
                     }

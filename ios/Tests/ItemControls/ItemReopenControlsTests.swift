@@ -71,6 +71,7 @@ final class ItemReopenControlsTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
+        onScreen = []
         reader = MovingDetailReader()
         actions = LifecycleStandIn(reader)
     }
@@ -82,7 +83,7 @@ final class ItemReopenControlsTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func host(state: String = "active") async {
+    private func host(state: String = "active", style: UIUserInterfaceStyle = .light) async {
         reader.lifecycleState = state
         var counter = 0
         let editor = FakeReminderEditor(
@@ -101,6 +102,7 @@ final class ItemReopenControlsTests: XCTestCase {
             })
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = hosting
+        window.overrideUserInterfaceStyle = style
         window.makeKeyAndVisible()
         retainedWindow = window
         await controls.load()
@@ -142,11 +144,21 @@ final class ItemReopenControlsTests: XCTestCase {
         }
     }
 
-    func testUndoStaysOfferedAfterTheConfirmationLineIsSeenAgain() async {
-        await host()
-        await controls.complete()
-        await controls.load(resetting: [])
-        XCTAssertTrue(controls.canUndo)
+    func testUndoStaysOfferedOnScreenAfterTheConfirmationLineChangesAndAfterAFailedUndo() async {
+        await eachAppearance { name in
+            await controls.complete()
+            await controls.load(resetting: [])
+            await settle()
+            XCTAssertTrue(onScreen.contains(ItemControlsView.undoIdentifier), "\(name): still offered after a reload")
+            actions.reopenResults = [.failure(.invalidRequest)]
+            await controls.reopen()
+            await settle()
+            XCTAssertEqual(controls.outcome, .actionFailed(.reopen), name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.undoIdentifier), "\(name): offered again after a failed Undo")
+            await controls.reopen()
+            await settle()
+            XCTAssertFalse(onScreen.contains(ItemControlsView.undoIdentifier), "\(name): spent once reopened")
+        }
     }
 
     func testAClosedItemShowsReopenInPlaceOfCompleteAndCancelFromEachState() async {
@@ -171,58 +183,90 @@ final class ItemReopenControlsTests: XCTestCase {
         }
     }
 
-    func testAlreadyOpenAndStaleOutcomesWriteNothingMore() async {
-        await host(state: "completed")
-        actions.reopenResults = [.success(.alreadyOpen), .failure(.staleRevision(currentRevision: 9))]
-        await controls.reopen()
-        XCTAssertEqual(controls.outcome, .actionAlreadyOpen)
-        XCTAssertEqual(
-            ItemControlsView.message(for: .actionAlreadyOpen), "This item is already open. Nothing was changed.")
-        XCTAssertNil(controls.reminderAgainPrompt)
-        reader.lifecycleState = "completed"
-        await controls.load()
-        await controls.reopen()
-        XCTAssertEqual(controls.outcome, .actionConflict(.reopen, currentRevision: 9))
-        XCTAssertNil(controls.reminderAgainPrompt)
+    func testAlreadyOpenAndStaleOutcomesShowTheirMessageAndWriteNothingMore() async {
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            try? await setUp()
+            await host(state: "completed", style: style)
+            actions.reopenResults = [.success(.alreadyOpen), .failure(.staleRevision(currentRevision: 9))]
+            reader.lifecycleState = "active"
+            await controls.reopen()
+            await settle()
+            XCTAssertEqual(controls.outcome, .actionAlreadyOpen, name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "\(name): the message is drawn")
+            XCTAssertFalse(onScreen.contains(ItemControlsView.reopenIdentifier), "\(name): the item is open, so no Reopen")
+            XCTAssertFalse(onScreen.contains(ItemControlsView.undoIdentifier), name)
+            XCTAssertFalse(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
+            XCTAssertEqual(
+                ItemControlsView.message(for: .actionAlreadyOpen), "This item is already open. Nothing was changed.")
+
+            reader.lifecycleState = "completed"
+            await controls.load()
+            await settle()
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reopenIdentifier), name)
+            onScreen.remove(ItemControlsView.outcomeIdentifier)
+            await controls.reopen()
+            await settle()
+            XCTAssertEqual(controls.outcome, .actionConflict(.reopen, currentRevision: 9), name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "\(name): the stale message is drawn")
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reopenIdentifier), "\(name): Reopen stays for a retry")
+            XCTAssertFalse(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
+            XCTAssertFalse(onScreen.contains(ItemControlsView.setReminderAgainIdentifier), name)
+            XCTAssertNil(controls.reminderAgainPrompt, name)
+            retainedWindow?.isHidden = true
+        }
     }
 
-    private func reopenCarrying(_ instant: String?) async {
+    private func reopenCarrying(_ instant: String?, style: UIUserInterfaceStyle) async {
         actions.reopenResults = [
             .success(.reopened(ItemReopenReceipt(itemID: "item-1", revision: 4, replayed: false, formerReminderInstant: instant)))
         ]
-        await host(state: "completed")
+        await host(state: "completed", style: style)
         await controls.reopen()
         await settle()
     }
 
     func testAFutureFormerReminderIsOfferedAgainAndPrefillsTheEdit() async {
         let future = Self.clock.addingTimeInterval(7200)
-        await reopenCarrying(ReminderInstant.string(from: future))
-        XCTAssertEqual(ItemControlsView.reminderOffNotice, "Its reminder was turned off.")
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            retainedWindow?.overrideUserInterfaceStyle = style
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            try? await setUp()
+            await reopenCarrying(ReminderInstant.string(from: future), style: style)
+            XCTAssertEqual(ItemControlsView.reminderOffNotice, "Its reminder was turned off.")
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier), name)
+            XCTAssertNil(controls.reminderEdit, "\(name): nothing is opened or scheduled until asked")
+            await controls.setReminderAgain()
             await settle()
-            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier))
-            XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier))
+            XCTAssertEqual(controls.reminderEdit?.draftDate, future, name)
+            XCTAssertEqual(controls.reminderEdit?.reminder == nil, true, "no reminder is stored by opening the edit")
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderAgainDoneIdentifier), "\(name): the edit is drawn")
+            retainedWindow?.isHidden = true
         }
-        XCTAssertNil(controls.reminderEdit, "nothing is opened or scheduled until asked")
-        await controls.setReminderAgain()
-        await settle()
-        XCTAssertEqual(controls.reminderEdit?.draftDate, future)
-        XCTAssertEqual(controls.reminderEdit?.reminder == nil, true, "no reminder is stored by opening the edit")
     }
 
     func testAPastFormerReminderOpensAnEmptyEdit() async {
-        await reopenCarrying(ReminderInstant.string(from: Self.clock.addingTimeInterval(-7200)))
-        XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier))
-        await controls.setReminderAgain()
-        XCTAssertEqual(controls.reminderEdit?.draftDate, Self.clock.addingTimeInterval(3600), "the default, not the past time")
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            try? await setUp()
+            await reopenCarrying(ReminderInstant.string(from: Self.clock.addingTimeInterval(-7200)), style: style)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.setReminderAgainIdentifier), name)
+            await controls.setReminderAgain()
+            await settle()
+            XCTAssertEqual(
+                controls.reminderEdit?.draftDate, Self.clock.addingTimeInterval(3600), "\(name): the default, not the past time")
+            XCTAssertTrue(onScreen.contains(ItemControlsView.reminderAgainDoneIdentifier), "\(name): the edit is drawn")
+            retainedWindow?.isHidden = true
+        }
     }
 
     func testNoFormerReminderOffersNothing() async {
-        await reopenCarrying(nil)
-        XCTAssertNil(controls.reminderAgainPrompt)
-        XCTAssertFalse(onScreen.contains(ItemControlsView.reminderOffIdentifier))
-        XCTAssertFalse(onScreen.contains(ItemControlsView.setReminderAgainIdentifier))
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            try? await setUp()
+            await reopenCarrying(nil, style: style)
+            XCTAssertNil(controls.reminderAgainPrompt, name)
+            XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), name)
+            XCTAssertFalse(onScreen.contains(ItemControlsView.reminderOffIdentifier), name)
+            XCTAssertFalse(onScreen.contains(ItemControlsView.setReminderAgainIdentifier), name)
+            retainedWindow?.isHidden = true
+        }
     }
 }
