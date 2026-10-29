@@ -3916,9 +3916,11 @@
       "covers_parent_criteria": [],
       "depends_on": [
         "F43",
-        "F47",
         "F45",
-        "F56"
+        "F47",
+        "F56",
+        "F59",
+        "F61"
       ],
       "source_pointers": [
         "app/status/StatusText.swift:30",
@@ -4366,7 +4368,8 @@
       "title": "Reopen, Undo and Set a reminder again on the item's controls",
       "file_scope": [
         "app/item-controls/",
-        "ios/Tests/ItemControls/"
+        "ios/Tests/ItemControls/",
+        "app/source-detail/SourceDetailModel.swift (assembled only)"
       ],
       "intent": "Undo after Complete or Cancel, Reopen on closed items, and an offer to set the cancelled reminder again.",
       "acceptance": [
@@ -4400,6 +4403,30 @@
       "source_pointers": [
         "app/retrieval/RetrievalSearchModel.swift",
         "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift:42"
+      ]
+    },
+    {
+      "key": "F61",
+      "parent": null,
+      "title": "Find and fix the duplicate note in a running fixture launch",
+      "file_scope": [
+        "ios/AppAssembly/UITestFixtures/",
+        "ios/UITests/Fixtures/",
+        "ios/Services/Ingress/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/AppAssembly/AppDelegate.swift",
+        "ios/AppAssembly/SceneDelegate.swift",
+        "ios/AppAssembly/AppServices.swift"
+      ],
+      "intent": "Name and fix the path that saves a second capture of the failed-sorting fixture's note in a running app; regression UI test of one Home card per seeded note.",
+      "acceptance": [
+        "See the F61 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/UITestFixtures/UITestFixtureServices.swift",
+        "ios/Services/Assembly/CompositionRoot.swift:1531"
       ]
     }
   ],
@@ -5186,7 +5213,8 @@
       "U08b",
       "U09",
       "F59",
-      "F60"
+      "F60",
+      "F61"
     ],
     "U10b": [
       "U10a"
@@ -5197,7 +5225,9 @@
       "F43",
       "F47",
       "F45",
-      "F56"
+      "F56",
+      "F59",
+      "F61"
     ],
     "F45": [
       "F37",
@@ -5242,7 +5272,8 @@
     ],
     "F60": [
       "F58"
-    ]
+    ],
+    "F61": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5520,6 +5551,10 @@
     {
       "date": "2026-10-28",
       "change": "F57 ownership amendment: also owns core/src/domain/items/mod.rs for the reopen arm in rebuild_state_from_events; a replayed reopen returns the instant recorded at the first reopen. F60 ownership amendment: also owns PrivateRetrievalHit in ios/Services/Authentication/PrivateReadGate.swift (lifecycle_state) and its decoding tests. Acceptance unchanged."
+    },
+    {
+      "date": "2026-10-29",
+      "change": "F59 ownership amendment: SourceDetailModel.assembled hands the existing reminder editor to item controls. F61 added: find and fix the duplicate fixture note seen in a running app. F44 depends on F59 and F61; U10a depends on F61."
     }
   ]
 }

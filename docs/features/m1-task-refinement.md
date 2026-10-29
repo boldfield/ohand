@@ -4584,6 +4584,10 @@ Acceptance:
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
+**Ownership amendment (coordinator, 2026-10-29, after PR #385).** The worker reported the seam correctly. The source detail screen already draws its own reminder editor (`SourceDetailView.swift`, around line 70, from `SourceDetailModel.reminderEditor`), so "Set a reminder again" must reuse that editor, not draw a second one. The only place the two models meet is `SourceDetailModel.assembled` (`app/source-detail/SourceDetailModel.swift`, around line 388). F59 also owns that function, only to build `reminderEditor` first and pass it to `ItemControlsModel.assembled` (for example as a `reminderEditor:` parameter). No other edit to that file.
+
+"Set a reminder again" sets that editor's draft to the former instant when it is still in the future, and brings the editor into view. Item controls draw no editor of their own. Add an integration test in `ios/Tests/ItemControls/` that builds a `SourceDetailModel`, then runs reopen → Set a reminder again → save, and finds exactly one reminder editor and one scheduled reminder. F44 also edits `SourceDetailModel.swift`, next to `assembled`, so F44 now waits for F59.
+
 ### F60
 
 Search shows open items by default, with "Include done"
@@ -4608,3 +4612,30 @@ Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 - `ios/Tests/Authentication/PrivateReadCoreIntegrationTests.swift`, to add decoding cases for a hit with each lifecycle value and with the field absent.
 
 F60's acceptance is unchanged.
+
+### F61
+
+Find and fix the duplicate note in a running fixture launch
+
+Found by F44 on 2026-10-29. In a running app, the F45 `failed-sorting` fixture shows two items with the same text ("Compare the synthetic rejected quotes for the shed roof"): different item IDs, the same capture minute, two Home cards and two Status rows. The seeder saves that note once, through `ServiceCompositionRoot.saveText` with one fresh capture ID (`ios/AppAssembly/UITestFixtures/UITestFixtureServices.swift`). Core import converges on the capture ID, so a second capture ID is being saved somewhere. `StatusProductionWiringTests` seeds the same fixture with no scene and sees one item, so the extra one comes from the scene or launch path, or from ingress. Evidence: the F44 walkthrough on PR #383 (head 41adbce), run 40807161089, and the earlier run 40794470393. F44's walkthrough assertion of exactly one failed note is correct and stays.
+
+It matters beyond tests: if a real capture can be saved twice, the maintainer sees duplicates in the trial.
+
+Owned paths:
+- `ios/AppAssembly/UITestFixtures/` and `ios/UITests/Fixtures/`;
+- if the cause is in product code, only the code on the duplicating path: `ios/Services/Ingress/`, the save and import path of `ios/Services/Assembly/CompositionRoot.swift`, the launch path of `ios/AppAssembly/AppDelegate.swift`, `SceneDelegate.swift` and `AppLauncher` in `AppServices.swift`, and the capture-entry handoff those call. Name every product file touched and why in the PR;
+- tests beside each of those, in `ios/Tests/`.
+
+Dependencies: none. F44 now waits for F61.
+
+Acceptance:
+
+1. **Root cause, with evidence.** The PR names the path that saves the second capture and shows it, for example with a log or test that records both capture IDs and where each came from. Synthetic data only.
+2. **Fixed where it happens.**
+   - If a real capture can be saved twice, fix the product code. Add a test that reproduces the duplicate without the UI-test fixture and passes after the fix.
+   - If only the fixture can do it, fix the fixture, and say in the PR why production cannot reach that path.
+   - Never hide the duplicate: no de-duplication on display, in a read, or in a test assertion.
+3. **A regression UI test** in `ios/UITests/Fixtures/`. Once the `failed-sorting` and `populated` fixtures report ready, each seeded note's text appears on exactly one Home card, counted by distinct card identifier.
+4. **Exact-head macOS CI evidence**, with the `simulator` and both `walkthrough` jobs green.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
