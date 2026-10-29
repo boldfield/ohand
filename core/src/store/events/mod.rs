@@ -694,6 +694,8 @@ fn save_checked_event_in_tx(
             EventPayload::Transcript => (None, None, None, None),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
+            // correction_new_value also holds a reopen event's former reminder instant;
+            // do not null it in a cleanup of the correction columns.
             EventPayload::Reopen {
                 former_reminder_instant,
             } => (None, None, former_reminder_instant.clone(), None),

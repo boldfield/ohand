@@ -640,4 +640,16 @@ fn state_rebuilt_from_events_agrees_after_reopening() {
             .unwrap();
         assert_eq!(rebuilt.lifecycle_state.as_str(), "active");
     }
+    // complete -> reopen -> complete: the rebuild must close the item again.
+    let base = fixture.durable().revision;
+    fixture.applied("end-again", base, LifecycleControl::Complete);
+    let tx = fixture.db.transaction().unwrap();
+    assert_eq!(
+        ohand_core::domain::items::verify_state_integrity(&tx, &fixture.item_id).unwrap(),
+        None
+    );
+    let rebuilt = ohand_core::domain::items::rebuild_state_from_events(&tx, &fixture.item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rebuilt.lifecycle_state.as_str(), "completed");
 }
