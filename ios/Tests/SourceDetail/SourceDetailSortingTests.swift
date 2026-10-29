@@ -54,11 +54,56 @@ private final class ScriptedJobs: FailedInterpretationsControlling, @unchecked S
     }
 }
 
-/// What the core's item status says, shared by every source a test builds, as the durable store is.
-private final class DurableStatus: @unchecked Sendable {
-    var rerunState: String?
-    func read() -> (state: String, jobStatus: String?, rerunState: String?)? {
-        (state: "uninterpreted", jobStatus: nil, rerunState: rerunState)
+/// The core's durable state for the failed-work read, the rerun and the item status, shared by every model and source a
+/// test builds, as the store is. A rerun does what F43 and F56 do: the replaced failure leaves the failed list, the note
+/// stays `uninterpreted`, and its status reports `rerun_state = queued` until the replacement ends.
+private final class FakeCore: FailedInterpretationsControlling, @unchecked Sendable {
+    private(set) var failed: [JobConfigurationFailedInterpretation]
+    private(set) var rerunStates: [String: String] = [:]
+    private(set) var rerunRequests: [[String]] = []
+
+    init(failed: [JobConfigurationFailedInterpretation]) { self.failed = failed }
+
+    func failedInterpretations(limit: Int?, cursor: String?) async throws -> JobConfigurationFailedInterpretations {
+        JobConfigurationFailedInterpretations(failed: failed, nextCursor: nil)
+    }
+
+    func rerunFailedInterpretations(itemIDs: [String]) async throws -> JobConfigurationRerunResult {
+        rerunRequests.append(itemIDs)
+        let moving = failed.filter { itemIDs.contains($0.itemID) }
+        failed.removeAll { itemIDs.contains($0.itemID) }
+        for record in moving { rerunStates[record.itemID] = "queued" }
+        return JobConfigurationRerunResult(moved: moving.count, skipped: 0, skippedItems: [])
+    }
+
+    /// The replacement job was claimed, or ended without failing.
+    func setRerunState(_ state: String?, itemID: String) { rerunStates[itemID] = state }
+
+    func status(itemID: String) -> (state: String, jobStatus: String?, rerunState: String?)? {
+        (state: "uninterpreted", jobStatus: nil, rerunState: rerunStates[itemID])
+    }
+}
+
+private final class QuietPermissions: PermissionsReading, @unchecked Sendable {
+    func refresh() async -> [PermissionEntry] {
+        [PermissionEntry(kind: .notifications, status: .granted, change: .unchanged)]
+    }
+}
+
+private final class NoDrain: ProcessingRetrying {
+    private(set) var count = 0
+    func retryNow() { count += 1 }
+}
+
+private final class IdleHealth: ProcessingHealthReading, @unchecked Sendable {
+    func read() async -> ProcessingHealthOutcome {
+        let json = """
+            {"operation_id":1,"generated_at":"2026-10-22T00:00:00Z","summary":"idle","stalled":false,
+            "stall_reasons":[],"pending_jobs":0,"running_jobs":0,"overdue_jobs":0,
+            "oldest_pending_age_seconds":null,"oldest_overdue_seconds":null,"last_interpretation_success_at":null,
+            "errors":[]}
+            """
+        return .snapshot(try! JSONDecoder().decode(ProcessingHealth.self, from: Data(json.utf8)))
     }
 }
 
@@ -138,61 +183,106 @@ final class SourceDetailSortingTests: XCTestCase {
         XCTAssertEqual(sorting.tryAgainCalls, 1, "a note that is not failed offers no Try again")
     }
 
+    /// A fresh source over the shared core, as opening the note's detail builds one.
+    private func freshSource(_ core: FakeCore) -> ItemSortingSource {
+        ItemSortingSource(jobs: core, processing: { core.status(itemID: $0) }, afterQueued: {})
+    }
+
+    /// Hosts `model` in both appearances and checks that "Sorting…" is rendered and "Try again" is not.
+    private func assertRendersSorting(_ model: SourceDetailModel, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            host(model, style: style)
+            wait("Sorting… is shown \(step), \(style.rawValue)", file: file, line: line) {
+                self.shown.contains(SourceDetailView.sortingIdentifier)
+            }
+            XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier), step, file: file, line: line)
+            XCTAssertFalse(shown.contains(SourceDetailView.sortingFailedIdentifier), step, file: file, line: line)
+        }
+    }
+
     /// The production transition: a permanent failure leaves the note `uninterpreted`; the rerun queues a replacement
     /// without changing that, and the replaced failure leaves the failed-work list. The core then reports `rerun_state`.
     func testARerunPermanentFailureStaysVisibleAsSortingWhileItsReplacementJobRuns() async {
-        let failed = JobConfigurationFailedInterpretations(
-            failed: [failedRecord(Self.itemID, reason: "rejected")], nextCursor: nil)
-        let jobs = ScriptedJobs([failed])
-        let durable = DurableStatus()
-        func freshSource() -> ItemSortingSource {
-            ItemSortingSource(jobs: jobs, processing: { _ in durable.read() }, afterQueued: {})
-        }
-        let model = makeModel(freshSource())
+        let core = FakeCore(failed: [failedRecord(Self.itemID, reason: "rejected")])
+        let model = makeModel(freshSource(core))
         await model.load()
         XCTAssertEqual(model.sorting, .failed(reason: "The request was not accepted"))
-        jobs.pages = [JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)]
-        durable.rerunState = "queued"
 
         await model.tryAgain()
 
+        XCTAssertEqual(core.rerunRequests, [[Self.itemID]])
         XCTAssertEqual(model.sorting, .sorting)
         XCTAssertEqual(model.tryAgainSummary, .done(queued: 1, needsSetting: 0))
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            host(model, style: style)
-            wait("Sorting… and the queued line are shown, \(style.rawValue)") {
-                self.shown.contains(SourceDetailView.sortingIdentifier) && self.shown.contains(SourceDetailView.tryAgainSummaryIdentifier)
-            }
-            XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier))
-        }
+        assertRendersSorting(model, "after Try again on the detail screen")
+        XCTAssertTrue(shown.contains(SourceDetailView.tryAgainSummaryIdentifier))
 
         // Reopening the note (or restarting the app) builds a fresh source and model; the state is durable.
-        let reopened = makeModel(freshSource())
+        let reopened = makeModel(freshSource(core))
         await reopened.load()
         XCTAssertEqual(reopened.sorting, .sorting)
-        for style in [UIUserInterfaceStyle.light, .dark] {
-            host(reopened, style: style)
-            wait("Sorting… is shown on the reopened note, \(style.rawValue)") { self.shown.contains(SourceDetailView.sortingIdentifier) }
-            XCTAssertFalse(shown.contains(SourceDetailView.tryAgainIdentifier))
-        }
-        durable.rerunState = nil
-        let finished = await freshSource().sorting(itemID: Self.itemID)
+        assertRendersSorting(reopened, "on the reopened note")
+
+        core.setRerunState(nil, itemID: Self.itemID)
+        let finished = await freshSource(core).sorting(itemID: Self.itemID)
         XCTAssertEqual(finished, .none, "when the replacement ends without failing, nothing is said")
     }
 
-    func testAReplacementWaitingOnASettingSaysNothingAndOtherRerunStatesSaySorting() async {
+    /// "Try again" on Status, then the note is opened: a fresh source and detail model say "Sorting…" from the core.
+    func testATryAgainOnStatusShowsSortingOnAFreshlyOpenedDetail() async {
+        let core = FakeCore(failed: [failedRecord(Self.itemID, reason: "rejected"), failedRecord("item-other", reason: "timeout")])
+        let drain = NoDrain()
+        let status = StatusModel(
+            health: IdleHealth(), permissions: QuietPermissions(), retrier: drain, failedWork: core,
+            openSystemSettings: {})
+        await status.refresh()
+        XCTAssertEqual(status.failedNotes.map(\.itemID), [Self.itemID, "item-other"])
+
+        await status.retryFailedNotes()
+
+        XCTAssertEqual(core.rerunRequests, [[Self.itemID, "item-other"]])
+        XCTAssertEqual(status.rerunSummary, .done(queued: 2, needsSetting: 0))
+        XCTAssertEqual(drain.count, 1)
+        XCTAssertTrue(status.failedNotes.isEmpty, "the replaced failures leave the list")
+
+        let opened = makeModel(freshSource(core))
+        await opened.load()
+        XCTAssertEqual(opened.sorting, .sorting)
+        assertRendersSorting(opened, "on the note opened after Try again on Status")
+    }
+
+    /// The same, after the note is closed and opened again while the replacement is claimed and running.
+    func testATryAgainOnStatusStillShowsSortingWhenTheNoteIsReopened() async {
+        let core = FakeCore(failed: [failedRecord(Self.itemID, reason: "unavailable")])
+        let status = StatusModel(
+            health: IdleHealth(), permissions: QuietPermissions(), retrier: NoDrain(), failedWork: core,
+            openSystemSettings: {})
+        await status.refresh()
+        await status.retryFailedNotes()
+
+        let first = makeModel(freshSource(core))
+        await first.load()
+        assertRendersSorting(first, "on the first opening")
+        window?.isHidden = true
+        window = nil
+
+        core.setRerunState("running", itemID: Self.itemID)
+        let reopened = makeModel(freshSource(core))
+        await reopened.load()
+        XCTAssertEqual(reopened.sorting, .sorting)
+        assertRendersSorting(reopened, "on the reopened note")
+    }
+
+    func testEveryRerunStateSaysSorting() async {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
         func state(_ rerun: String) async -> SourceDetailSorting {
             await ItemSortingSource(
                 jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: rerun) }, afterQueued: {}
             ).sorting(itemID: Self.itemID)
         }
-        for rerun in ["queued", "running", "retrying_after_transient"] {
+        for rerun in ["queued", "running", "retrying_after_transient", "awaiting_configuration"] {
             let sorting = await state(rerun)
             XCTAssertEqual(sorting, .sorting, rerun)
         }
-        let waiting = await state("awaiting_configuration")
-        XCTAssertEqual(waiting, .none)
     }
 
     func testAFailedNoteBeyondTheFirstFivePagesIsStillFound() async {

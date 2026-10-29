@@ -61,6 +61,11 @@ final class WalkthroughUITests: XCTestCase {
         addTeardownBlock { [app] in app.terminate() }
         XCTAssertTrue(app.launch(fixture: .failedSorting), "the failed-sorting fixture did not reach home")
         XCTAssertTrue(app.waitForFixtureReady(), "the failed-sorting fixture did not finish seeding")
+        let fixtureCard = app.homeCard(containing: "synthetic rejected quotes")
+        XCTAssertTrue(appears(fixtureCard, timeout: screenTimeout), "home shows no card for the fixture's note")
+        let homeCardCount = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH 'home.recents.card.' AND label CONTAINS %@", "synthetic rejected quotes")
+        ).allElementsBoundByIndex.map(\.identifier).reduce(into: Set<String>()) { $0.insert($1) }.count
         dismissKeyboard()
         openFromHome(homeSettings, name: "Settings", shows: settingsHeader)
         let row = app.buttons.matching(
@@ -80,9 +85,9 @@ final class WalkthroughUITests: XCTestCase {
         let failedNoteLabels = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
         ).allElementsBoundByIndex.map { "\($0.identifier)=\($0.label)" }
-        // The failed-sorting fixture (F45, outside this task's paths) can seed its one synthetic note twice, so a count of
-        // exactly one is not asserted here; the labels are reported so a change in that is visible.
-        XCTAssertFalse(failedNoteIdentifiers.isEmpty, "Status shows a failed note: \(failedNoteLabels)")
+        XCTAssertEqual(
+            failedNoteIdentifiers.count, 1,
+            "Status shows exactly one failed note: \(failedNoteLabels); home cards for the fixture's note: \(homeCardCount)")
     }
 
     /// True when the driving script put the simulator in dark appearance. The screenshots are checked against it, so a

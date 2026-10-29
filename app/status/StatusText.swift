@@ -135,6 +135,13 @@ enum StatusText {
         }
     }
 
+    /// A "Try again" over several requests where a later one did not go through: what was sent, then what was not.
+    static func rerunIncomplete(queued: Int, needsSetting: Int, notRun: Int) -> String {
+        let sent = queued > 0 || needsSetting > 0 ? rerunSummary(queued: queued, needsSetting: needsSetting) + " " : ""
+        let rest = notRun == 1 ? "1 note was not run again" : "\(notRun) notes were not run again"
+        return sent + rest + ". Check again in a moment."
+    }
+
     /// One plain line for each machine label the core can record on a failed job. Anything else is not echoed.
     static func failureReason(_ label: String) -> String {
         switch label {

@@ -48,8 +48,9 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
         }
         guard let status = await processing(itemID) else { return .none }
         // A "Try again" leaves the note `uninterpreted` or `abstained` while its replacement job waits or runs; the core
-        // reports that as `rerun_state`, so the answer survives reopening the note and restarting the app.
-        if let rerun = status.rerunState { return rerun == "awaiting_configuration" ? .none : .sorting }
+        // reports that as `rerun_state`, so the answer survives reopening the note and restarting the app. Every value,
+        // including a replacement waiting on a setting, means the note is being sorted again.
+        if status.rerunState != nil { return .sorting }
         let isWorking = status.state == "processing" || status.state == "unprocessed"
         return isWorking && status.jobStatus != "awaiting_configuration" ? .sorting : .none
     }

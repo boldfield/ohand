@@ -39,6 +39,8 @@ private final class FakeFailedWork: FailedInterpretationsControlling, @unchecked
     private(set) var rerunRequests: [[String]] = []
     /// Behaves like the core: at most `MAX_RERUN_BATCH` items per call, the rest ignored and not counted.
     var enforcesCoreBatchCap = false
+    /// When set, the rerun call with this index (0-based) and every later one throws, as a relock part way would.
+    var rerunFailsFromCall: Int?
 
     init(_ listing: Result<[JobConfigurationFailedInterpretation], Error>) { self.listing = listing }
 
@@ -51,6 +53,9 @@ private final class FakeFailedWork: FailedInterpretationsControlling, @unchecked
 
     func rerunFailedInterpretations(itemIDs: [String]) async throws -> JobConfigurationRerunResult {
         rerunRequests.append(itemIDs)
+        if let failingCall = rerunFailsFromCall, rerunRequests.count > failingCall {
+            throw JobConfigurationError.notAuthenticated
+        }
         if enforcesCoreBatchCap {
             let accepted = min(itemIDs.count, 100)
             return JobConfigurationRerunResult(moved: accepted, skipped: 0, skippedItems: [])
@@ -190,6 +195,50 @@ final class StatusFailedNotesTests: XCTestCase {
         XCTAssertEqual(work.rerunRequests.flatMap { $0 }, (1...250).map { "item-\($0)" })
         XCTAssertEqual(model.rerunSummary, .done(queued: 250, needsSetting: 0))
         XCTAssertEqual(drain.count, 1)
+    }
+
+    func testAChunkThatFailsPartWayIsReportedAsNotRunAgain() async {
+        let drain = CountingDrain()
+        let work = FakeFailedWork(.success((1...100).map { failedNote($0) }))
+        work.laterPages = [(101...250).map { failedNote($0) }]
+        work.enforcesCoreBatchCap = true
+        work.rerunFailsFromCall = 1
+        let model = makeModel(work, drain: drain)
+        await model.refresh()
+
+        await model.retryFailedNotes()
+
+        XCTAssertEqual(work.rerunRequests.map(\.count), [100, 100], "the run stops at the chunk that failed")
+        XCTAssertEqual(model.rerunSummary, .incomplete(queued: 100, needsSetting: 0, notRun: 150))
+        XCTAssertEqual(
+            model.rerunSummary?.text, "100 notes queued again. 150 notes were not run again. Check again in a moment.")
+        XCTAssertEqual(drain.count, 1, "the notes that were queued are still sent")
+
+        let none = FakeFailedWork(.success([failedNote(1)]))
+        none.rerunFailsFromCall = 0
+        let failedModel = makeModel(none)
+        await failedModel.refresh()
+        await failedModel.retryFailedNotes()
+        XCTAssertEqual(failedModel.rerunSummary, .failed)
+    }
+
+    func testAPartWayFailureIsShownAsOneLineInBothAppearances() {
+        for style in appearances {
+            let work = FakeFailedWork(.success((1...100).map { failedNote($0) }))
+            work.laterPages = [[failedNote(101)]]
+            work.enforcesCoreBatchCap = true
+            work.rerunFailsFromCall = 1
+            let model = makeModel(work)
+            host(model, style: style)
+            wait("the Try again action is reported, \(style.rawValue)") { self.actions[StatusView.retryNotesIdentifier] != nil }
+
+            actions[StatusView.retryNotesIdentifier]?()
+            wait("the summary is shown, \(style.rawValue)") { self.rendered[StatusView.rerunSummaryIdentifier] != nil }
+
+            XCTAssertEqual(
+                rendered[StatusView.rerunSummaryIdentifier],
+                "100 notes queued again. 1 note was not run again. Check again in a moment.")
+        }
     }
 
     func testReachingThePageCapMarksTheListPartialAndTheShowAllCount() async {

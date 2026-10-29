@@ -48,32 +48,45 @@ struct FailedNote: Equatable, Identifiable {
         recovery = record.recovery
     }
 
+    private static let plainStamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    private static let fractionalStamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     private static func parse(_ stamp: String) -> Date? {
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return plain.date(from: stamp) ?? fractional.date(from: stamp)
+        plainStamp.date(from: stamp) ?? fractionalStamp.date(from: stamp)
     }
 }
 
 /// What a "Try again" for failed notes did, in the two counts the screen reports.
 enum FailedNotesRerunSummary: Equatable {
     case done(queued: Int, needsSetting: Int)
+    /// Some notes were sent and then a later request did not go through; `notRun` notes were not run again.
+    case incomplete(queued: Int, needsSetting: Int, notRun: Int)
     /// The request did not go through; nothing is known to have changed.
     case failed
 
     var text: String {
         switch self {
         case .done(let queued, let needsSetting): return StatusText.rerunSummary(queued: queued, needsSetting: needsSetting)
+        case .incomplete(let queued, let needsSetting, let notRun):
+            return StatusText.rerunIncomplete(queued: queued, needsSetting: needsSetting, notRun: notRun)
         case .failed: return StatusText.rerunFailed
         }
     }
 
     /// True when a setting has to change before some note can run, so the screen links to Processing.
     var needsSetting: Bool {
-        if case .done(_, let count) = self { return count > 0 }
-        return false
+        switch self {
+        case .done(_, let count), .incomplete(_, let count, _): return count > 0
+        case .failed: return false
+        }
     }
 
     init(_ result: JobConfigurationRerunResult) {

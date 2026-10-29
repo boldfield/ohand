@@ -210,8 +210,10 @@ final class StatusModel: ObservableObject {
         var moved = 0
         var skipped = 0
         var skippedItems: [JobConfigurationSkippedItem] = []
-        var ranAnyBatch = false
+        var sentCount = 0
         // The core handles at most `rerunBatchLimit` notes per call, so a longer list goes in chunks and the counts add up.
+        // A chunk that does not go through (a relock part way, for example) stops the run, and the notes not sent are
+        // reported as not run again rather than left out of the counts.
         for start in stride(from: 0, to: itemIDs.count, by: Self.rerunBatchLimit) {
             let batch = Array(itemIDs[start..<min(start + Self.rerunBatchLimit, itemIDs.count)])
             do {
@@ -219,17 +221,22 @@ final class StatusModel: ObservableObject {
                 moved += result.moved
                 skipped += result.skipped
                 skippedItems += result.skippedItems
-                ranAnyBatch = true
+                sentCount += batch.count
             } catch {
                 break
             }
         }
-        if ranAnyBatch {
-            rerunSummary = FailedNotesRerunSummary(
-                JobConfigurationRerunResult(moved: moved, skipped: skipped, skippedItems: skippedItems))
-            if moved > 0 { retrier.retryNow() }
-        } else {
+        if sentCount == 0 {
             rerunSummary = .failed
+        } else {
+            let sent = FailedNotesRerunSummary(
+                JobConfigurationRerunResult(moved: moved, skipped: skipped, skippedItems: skippedItems))
+            if sentCount < itemIDs.count, case .done(let queued, let needsSetting) = sent {
+                rerunSummary = .incomplete(queued: queued, needsSetting: needsSetting, notRun: itemIDs.count - sentCount)
+            } else {
+                rerunSummary = sent
+            }
+            if moved > 0 { retrier.retryNow() }
         }
         await refresh()
     }
