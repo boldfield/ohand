@@ -457,6 +457,10 @@ final class RetrievalSearchViewTests: XCTestCase {
                 && self.renderedText(RetrievalSearchView.includeDoneChipIdentifier) == "Include done: on"
         }
         XCTAssertEqual(searcher.requests.last?.lifecycleStates, ["active", "completed", "cancelled"])
+        forEachAppearance { appearance in
+            XCTAssertNotNil(rendered[RetrievalSearchView.rowIdentifier(closed)], appearance)
+            XCTAssertEqual(renderedText(RetrievalSearchView.includeDoneChipIdentifier), "Include done: on", appearance)
+        }
     }
 
     func testClosedRowsShowDoneAndCancelledMarkersInTheirOwnWords() {
