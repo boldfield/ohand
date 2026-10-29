@@ -1,3 +1,5 @@
+mod rerun;
+
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;

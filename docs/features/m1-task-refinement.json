@@ -5516,6 +5516,10 @@
     {
       "date": "2026-10-28",
       "change": "Maintainer decision: closed (completed or cancelled) items are omitted from Home and default search; search has an explicit Include done. F57 reopen (core), F58 open-only recents and hit lifecycle (core), F59 Undo/Reopen/Set a reminder again (UI), F60 search default and Include done (UI). F48 depends on F58; U10a depends on F59 and F60."
+    },
+    {
+      "date": "2026-10-28",
+      "change": "F57 ownership amendment: also owns core/src/domain/items/mod.rs for the reopen arm in rebuild_state_from_events; a replayed reopen returns the instant recorded at the first reopen. F60 ownership amendment: also owns PrivateRetrievalHit in ios/Services/Authentication/PrivateReadGate.swift (lifecycle_state) and its decoding tests. Acceptance unchanged."
     }
   ]
 }
