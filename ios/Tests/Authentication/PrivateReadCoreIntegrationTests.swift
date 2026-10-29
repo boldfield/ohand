@@ -300,6 +300,24 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         XCTAssertNil(unclassified.itemType)
     }
 
+    func testRetrievalHitDecodesEachLifecycleStateAndItsAbsence() throws {
+        func hitJSON(lifecycleField: String) -> String {
+            """
+            {"item_id": "item-1", "capture_id": "capture-1", "scope": "personal", "item_type": "action",
+             "text": "synthetic text", "text_basis": "original", "original_text": null, "matched": "current",
+             "match_span": null, "captured_at": "2026-10-08T09:30:00Z"\(lifecycleField)}
+            """
+        }
+        let decoder = JSONDecoder()
+        for state in ["active", "completed", "cancelled"] {
+            let hit = try decoder.decode(
+                PrivateRetrievalHit.self, from: Data(hitJSON(lifecycleField: ", \"lifecycle_state\": \"\(state)\"").utf8))
+            XCTAssertEqual(hit.lifecycleState, state)
+        }
+        let absent = try decoder.decode(PrivateRetrievalHit.self, from: Data(hitJSON(lifecycleField: "").utf8))
+        XCTAssertNil(absent.lifecycleState)
+    }
+
     func testRetrievalInFlightWhenTheSessionRelocksIsNotDelivered() throws {
         let launch = try Launch(path: layout.databaseURL.path)
         defer { launch.close() }
