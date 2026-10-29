@@ -21,9 +21,6 @@ final class UITestFixtureLaunch {
     /// Placed far in the future so a reminder stays in the future on any real date.
     static let sortedReminderPhrase = "2099-01-15 11:00:00"
 
-    /// How many times a seeder has been started in this process; a value above one means the launch seeded twice.
-    @MainActor private static var seedRunCount = 0
-
     private let name: String
     private var pendingSeed: (fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer)?
     private var storageRoot: URL?
@@ -95,8 +92,7 @@ final class UITestFixtureLaunch {
             let marker = UITestFixtureStatusMarker()
             marker.show("seeding")
             do {
-                let seeder = try await seedAndWait()
-                marker.showDiagnostics(diagnosticSummary(of: seeder))
+                _ = try await seedAndWait()
                 marker.show("ready")
             } catch {
                 NSLog("UITestFixture \(name) seeding failed: \(error)")
@@ -105,20 +101,10 @@ final class UITestFixtureLaunch {
         }
     }
 
-    /// The seeder runs of this process, the capture IDs the seeder saved, and every capture the store holds, so a
-    /// store that holds a capture the seeder did not save shows where it came from.
-    @MainActor
-    private func diagnosticSummary(of seeder: UITestFixtureSeeder) -> String {
-        let seeded = seeder.savedCaptureIDs.joined(separator: ",")
-        let stored = diagnosticScalar("SELECT group_concat(capture_id || '@' || created_at, ',') FROM captures")
-        return "seeder runs \(Self.seedRunCount); seeded \(seeded); stored \(stored)"
-    }
-
     /// Fills the store and returns once every seeded note has reached the state the fixture names.
     @MainActor
     func seedAndWait() async throws -> UITestFixtureSeeder {
         guard let pendingSeed else { throw UITestFixtureError.seedingFailed("services were not made") }
-        Self.seedRunCount += 1
         let seeder = UITestFixtureSeeder(
             fixture: pendingSeed.fixture, services: pendingSeed.services, sender: pendingSeed.sender,
             recognizer: pendingSeed.recognizer, storageRoot: storageRoot)
@@ -175,8 +161,6 @@ final class UITestFixtureSeeder {
     private var root: ServiceCompositionRoot { services.root }
     /// The notes saved so far, in order, with the status each had when the fixture was ready.
     private(set) var notes: [UITestFixtureSeededNote] = []
-    /// The capture ID of every note saved, in order.
-    private(set) var savedCaptureIDs: [String] = []
 
     init(
         fixture: UITestFixture, services: AppServices, sender: UITestFixtureSender, recognizer: UITestFixtureRecognizer,
@@ -332,10 +316,8 @@ final class UITestFixtureSeeder {
 
     private func saveTyped(_ text: String, expecting expectation: UITestFixtureExpectation, reply: UITestFixtureProviderReply) async throws {
         sender.script(phrase: text, reply: reply)
-        let captureID = UUID().uuidString.lowercased()
-        savedCaptureIDs.append(captureID)
         let outcome = await withCheckedContinuation { continuation in
-            root.saveText(captureID: captureID, text: text, capturedAt: Date()) {
+            root.saveText(captureID: UUID().uuidString.lowercased(), text: text, capturedAt: Date()) {
                 continuation.resume(returning: $0)
             }
         }
@@ -351,7 +333,6 @@ final class UITestFixtureSeeder {
         let captureID = UUID().uuidString.lowercased()
         let fileName = "\(captureID).wav"
         try Self.writeSyntheticClip(to: root.inProgressAudioDirectory.appendingPathComponent(fileName))
-        savedCaptureIDs.append(captureID)
         recognizer.script(captureID: captureID, transcript: transcript)
         sender.script(phrase: transcript, reply: reply)
         let handoff = CompositionRecordingHandoff(

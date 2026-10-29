@@ -69,7 +69,7 @@ final class FixtureLaunchUITests: XCTestCase {
                 file: file, line: line)
             let identifiers = app.homeCardIdentifiers(containing: text)
             XCTAssertEqual(
-                identifiers.count, 1, "'\(text)' is on \(identifiers.sorted()); \(app.fixtureDiagnostics)",
+                identifiers.count, 1, "'\(text)' is on \(identifiers.sorted())",
                 file: file, line: line)
         }
     }
