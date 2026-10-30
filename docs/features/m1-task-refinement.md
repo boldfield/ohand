@@ -4588,6 +4588,8 @@ Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
 "Set a reminder again" sets that editor's draft to the former instant when it is still in the future, and brings the editor into view. Item controls draw no editor of their own. Add an integration test in `ios/Tests/ItemControls/` that builds a `SourceDetailModel`, then runs reopen → Set a reminder again → save, and finds exactly one reminder editor and one scheduled reminder. F44 also edits `SourceDetailModel.swift`, next to `assembled`, so F44 now waits for F59.
 
+**Second ownership amendment (coordinator, 2026-10-29, after PR #387 head 8ab4425).** The worker reported the seam correctly. Bringing the editor into view needs a `ScrollViewReader` that encloses the screen's `ScrollView` and a scroll identity on the drawn `ReminderEditSection`; both are in `app/source-detail/SourceDetailView.swift` (the `ScrollView` around line 66, the section around line 72), and a `ScrollViewReader` inside the content cannot scroll the `ScrollView` that contains it. F59 also owns that file, only for three edits: wrap that `ScrollView` in a `ScrollViewReader`, give the `ReminderEditSection` an `.id`, and scroll to it when `ItemControlsModel.reminderAgainIsOpen` becomes true. No other change to that file. Hosted view tests cannot observe the scroll offset, so the integration test asserts the signal and the single prepared editor, as PR #387 already does; no walkthrough step is added for the scroll. F44's PR #383 also edits `SourceDetailView.swift` and already waits for F59, so it rebases over this change.
+
 ### F60
 
 Search shows open items by default, with "Include done"

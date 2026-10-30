@@ -4369,7 +4369,8 @@
       "file_scope": [
         "app/item-controls/",
         "ios/Tests/ItemControls/",
-        "app/source-detail/SourceDetailModel.swift (assembled only)"
+        "app/source-detail/SourceDetailModel.swift (assembled only)",
+        "app/source-detail/SourceDetailView.swift (ScrollViewReader, editor id and scroll-to only)"
       ],
       "intent": "Undo after Complete or Cancel, Reopen on closed items, and an offer to set the cancelled reminder again.",
       "acceptance": [
@@ -5555,6 +5556,10 @@
     {
       "date": "2026-10-29",
       "change": "F59 ownership amendment: SourceDetailModel.assembled hands the existing reminder editor to item controls. F61 added: find and fix the duplicate fixture note seen in a running app. F44 depends on F59 and F61; U10a depends on F61."
+    },
+    {
+      "date": "2026-10-29",
+      "change": "F59 second ownership amendment: SourceDetailView.swift may be edited only to wrap the ScrollView in a ScrollViewReader, give the ReminderEditSection an id, and scroll to it when reminderAgainIsOpen becomes true. Acceptance unchanged."
     }
   ]
 }
