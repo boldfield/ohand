@@ -36,7 +36,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
 
         for context in connectionOptions.urlContexts {
-            launcher.services?.receive(url: context.url)
+            launcher.receive(url: context.url)
         }
     }
 
@@ -59,7 +59,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
         for context in URLContexts {
-            launcher?.services?.receive(url: context.url)
+            launcher?.receive(url: context.url)
         }
     }
 }
