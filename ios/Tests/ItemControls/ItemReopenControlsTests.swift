@@ -18,7 +18,7 @@ private final class MovingDetailReader: SourceDetailReading, @unchecked Sendable
             failingReads -= 1
             throw TransientReadFailure()
         }
-        CoreItemDetail(
+        return CoreItemDetail(
             itemID: itemID, captureID: "capture-1", revision: revision, itemType: "action", scope: "work",
             sessionTopic: nil, lifecycleState: lifecycleState, capturedAt: "2026-10-01T09:30:00Z", text: "words",
             textBasis: .original, originalText: "words", correctedText: nil, audioReference: nil, transcript: nil,
