@@ -177,7 +177,7 @@ class ProjectConfigChecks(unittest.TestCase):
         project = copy.deepcopy(checks.load_project())
         project["options"]["xcodeVersion"] = "27.0"
         errors = checks.check_workflow_xcode_pin(project)
-        self.assertEqual(len([e for e in errors if "'27.0'" in e]), 3, errors)
+        self.assertEqual(len([e for e in errors if "'27.0'" in e]), 4, errors)
 
     def test_job_without_exactly_one_xcode_step_is_reported(self):
         project = checks.load_project()

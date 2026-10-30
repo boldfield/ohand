@@ -26,7 +26,7 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertIn("swapins swapouts compressor_pages", self.script)
 
     def test_quiet_host_runs_first_in_both_simulator_jobs_and_spares_the_essentials(self):
-        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 2)
+        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 3)
         quiet = (SCRIPTS / "quiet-host.sh").read_text()
         for essential in ("CoreSimulator", "Xcode", "Runner.Listener", "provjobd"):
             self.assertNotIn(f"pkill -x {essential}", quiet)

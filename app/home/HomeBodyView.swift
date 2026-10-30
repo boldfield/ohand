@@ -54,6 +54,8 @@ struct HomeBodyView: View {
     static let sortingLabel = "Just now \u{00B7} sorting\u{2026}"
     static let unsortedTypeTitle = "Not yet sorted"
     static let placeholderCount = 3
+    static let lockedAnnouncement = lockedTitle + ". " + unlockTitle + " to see what you saved before."
+    static let needsTimeAnnouncement = "A reminder needs a time."
 
     @ObservedObject var model: HomeRecentsModel
     /// Opens the item a tapped card shows. The assembly supplies it, so this folder never reaches the navigation model.
@@ -70,7 +72,20 @@ struct HomeBodyView: View {
                 .frame(maxWidth: .infinity)
         }
         .onPreferenceChange(HomeRenderedKey.self) { elements in renderReporter?(elements) }
+        .onAppear {
+            if model.bodyState == .locked { AccessibilityAnnouncer.announce(Self.lockedAnnouncement) }
+            if needsTimeCount > 0 { AccessibilityAnnouncer.announce(Self.needsTimeAnnouncement) }
+        }
+        .onChange(of: model.bodyState) { state in
+            if state == .locked { AccessibilityAnnouncer.announce(Self.lockedAnnouncement) }
+        }
+        .onChange(of: needsTimeCount) { count in
+            if count > 0 { AccessibilityAnnouncer.announce(Self.needsTimeAnnouncement) }
+        }
     }
+
+    /// How many shown notes have a reminder that needs a time; a rise is announced.
+    private var needsTimeCount: Int { model.entries.filter(\.needsTime).count }
 
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
 
