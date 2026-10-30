@@ -136,6 +136,15 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var notSortedRerun: SourceDetailAbstainedRerun?
     /// Builds the Processing settings screen the declined note's "Choose a provider" link opens; nil hides the link.
     var makeProviderSettings: (() -> AnyView)?
+    /// Counts taps on "Set the type yourself"; the screen scrolls to the correction controls and moves focus there.
+    @Published private(set) var setTypeRequests = 0
+    /// Whether "Set the type yourself" has somewhere to go: the correction controls are present.
+    var canSetTypeYourself: Bool { itemControls != nil }
+
+    func setTypeYourself() {
+        guard canSetTypeYourself else { return }
+        setTypeRequests += 1
+    }
 
     let itemID: String
     /// The correction controls shown under the details; absent where no corrections are wired.
@@ -193,6 +202,8 @@ final class SourceDetailModel: ObservableObject {
                 let current = await sortingSource.sorting(itemID: itemID)
                 guard generation == loadGeneration else { return }
                 sorting = audio == .locked ? .none : current
+                // A fresh read supersedes what the last Try again said.
+                notSortedRerun = nil
             } else {
                 sorting = .none
             }
@@ -336,6 +347,7 @@ final class SourceDetailModel: ObservableObject {
     @MainActor func tryAgainNotSorted() async {
         guard let sortingSource, case .notSorted = sorting, !isTryingAgain else { return }
         isTryingAgain = true
+        notSortedRerun = nil
         defer { isTryingAgain = false }
         let outcome = await sortingSource.tryAgainNotSorted(itemID: itemID)
         guard content != nil else { return }
@@ -455,9 +467,10 @@ final class SourceDetailModel: ObservableObject {
                 }
             })
         model.deletion = .assembled(itemID: itemID, root: root)
-        model.makeProviderSettings = { [weak root] in
-            root.map { AnyView(ProviderSettingsView(model: .assembled(root: $0))) } ?? AnyView(EmptyView())
-        }
+        // One settings model for this screen's lifetime: the link's closure runs on every redraw, and a fresh model
+        // would drop an unsaved provider choice.
+        let providerSettings = ProviderSettingsModel.assembled(root: root)
+        model.makeProviderSettings = { AnyView(ProviderSettingsView(model: providerSettings)) }
         model.sortingSource = ItemSortingSource(
             jobs: root.jobConfiguration, abstainedJobs: root.jobConfiguration,
             processing: { [weak root] itemID in

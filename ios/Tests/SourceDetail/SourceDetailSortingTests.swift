@@ -44,6 +44,12 @@ private final class ScriptedSorting: SourceDetailSortingReading, @unchecked Send
     }
 }
 
+private final class NoCorrections: ItemControlsCorrecting, @unchecked Sendable {
+    func correctText(commandID: String, itemID: String, expectedRevision: Int, text: String) async throws -> ItemCorrectionReceipt { fatalError() }
+    func correctType(commandID: String, itemID: String, expectedRevision: Int, itemType: ItemCorrectionItemType) async throws -> ItemCorrectionReceipt { fatalError() }
+    func correctSessionTopic(commandID: String, itemID: String, expectedRevision: Int, sessionTopic: String) async throws -> ItemCorrectionReceipt { fatalError() }
+}
+
 private final class ScriptedJobs: FailedInterpretationsControlling, @unchecked Sendable {
     var pages: [JobConfigurationFailedInterpretations]
     var rerunResult = JobConfigurationRerunResult(moved: 1, skipped: 0, skippedItems: [])
@@ -133,9 +139,12 @@ final class SourceDetailSortingTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    private func makeModel(_ sorting: SourceDetailSortingReading?) -> SourceDetailModel {
+    private func makeModel(_ sorting: SourceDetailSortingReading?, withControls: Bool = true) -> SourceDetailModel {
         let model = SourceDetailModel(itemID: Self.itemID, reader: OneItemReader(), opener: NoAudio())
         model.sortingSource = sorting
+        if withControls {
+            model.itemControls = ItemControlsModel(itemID: Self.itemID, reader: OneItemReader(), corrector: NoCorrections())
+        }
         return model
     }
 
@@ -405,6 +414,62 @@ final class SourceDetailSortingTests: XCTestCase {
                 XCTAssertFalse(shown.contains(SourceDetailView.sortingIdentifier))
             }
         }
+    }
+
+    func testSetTheTypeYourselfIsOfferedOnlyWhereTheCorrectionControlsExist() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]), withControls: false)
+            XCTAssertFalse(model.canSetTypeYourself)
+            host(model, style: style)
+            wait("the line is shown without controls, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.notSortedIdentifier)
+            }
+            XCTAssertFalse(shown.contains(SourceDetailView.notSortedSetTypeIdentifier))
+            XCTAssertFalse(shown.contains(ItemControlsView.sectionIdentifier))
+        }
+    }
+
+    func testSetTheTypeYourselfBringsTheExistingCorrectionControlsIntoPlay() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]))
+            host(model, style: style)
+            wait("the line and the controls are shown, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.notSortedSetTypeIdentifier)
+                    && self.shown.contains(ItemControlsView.sectionIdentifier)
+            }
+            XCTAssertEqual(model.setTypeRequests, 0)
+            model.setTypeYourself()
+            XCTAssertEqual(model.setTypeRequests, 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            XCTAssertTrue(shown.contains(ItemControlsView.sectionIdentifier), "\(style.rawValue)")
+        }
+    }
+
+    func testTheNeedsProviderNoticeClearsOnTryAgainAndOnARead() async {
+        let sorting = ScriptedSorting([.notSorted(label: "negated")])
+        sorting.notSortedOutcome = .needsProvider
+        let model = makeModel(sorting)
+        await model.load()
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .needsProvider)
+        await model.load()
+        XCTAssertNil(model.notSortedRerun, "a fresh read supersedes the old answer")
+        await model.tryAgainNotSorted()
+        sorting.notSortedOutcome = .queued
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .queued)
+    }
+
+    func testARerunThatCouldNotRunSaysSo() async {
+        let sorting = ScriptedSorting([.notSorted(label: "negated")])
+        sorting.notSortedOutcome = .notRun
+        let model = makeModel(sorting)
+        await model.load()
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .notRun)
+        host(model, style: .light)
+        wait("the could not try again line is shown") { self.shown.contains(SourceDetailView.notSortedNoticeIdentifier) }
+        XCTAssertEqual(SourceDetailView.couldNotTryAgainText, "Couldn't try again. Try once more in a moment")
     }
 
     func testAnUnknownLabelGetsTheGenericLineAndNeverEchoesTheLabel() {

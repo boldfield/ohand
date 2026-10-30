@@ -27,6 +27,7 @@ struct SourceDetailView: View {
     static let needsProviderText = "Choose a provider in Processing first"
     static let processingLinkLabel = "Open Processing"
     /// The scroll identity of the correction controls, which "Set the type yourself" brings into view.
+    static let couldNotTryAgainText = "Couldn't try again. Try once more in a moment"
     static let controlsScrollIdentity = "source-detail.controls"
     static let sortingText = "Sorting…"
     /// The scroll identity of the reminder editor, which Set a reminder again brings into view.
@@ -72,6 +73,7 @@ struct SourceDetailView: View {
     /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
     /// never sets it, so it still says "Not here".
     @State private var deletedHere = false
+    @AccessibilityFocusState private var controlsHaveFocus: Bool
     /// A change to this item arrived while one of this screen's own controls was working; the item is read again once
     /// they settle.
     @State private var readAgainIsPending = false
@@ -86,9 +88,11 @@ struct SourceDetailView: View {
                     VStack(alignment: .leading, spacing: DSSpacing.lg) {
                         if let content = model.content {
                             detailCard(content)
-                            sortingLine(scrollProxy)
+                            sortingLine
                             if let controls = model.itemControls {
-                                ItemControlsView(model: controls, renderReporter: renderReporter).id(Self.controlsScrollIdentity)
+                                ItemControlsView(model: controls, renderReporter: renderReporter)
+                                    .id(Self.controlsScrollIdentity)
+                                    .accessibilityFocused($controlsHaveFocus)
                             }
                             history(content)
                             if let reminderEditor = model.reminderEditor {
@@ -118,6 +122,12 @@ struct SourceDetailView: View {
                 }
                 // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
                 // waits for the next turn of the main queue, so it stays out of the update that removes the button.
+                .onReceive(model.$setTypeRequests.dropFirst()) { _ in
+                    DispatchQueue.main.async {
+                        scrollProxy.scrollTo(Self.controlsScrollIdentity, anchor: .top)
+                        controlsHaveFocus = true
+                    }
+                }
                 .onReceive(
                     model.itemControls.publisher.flatMap { $0.$reminderAgainIsOpen.dropFirst() }.filter { $0 }
                 ) { _ in
@@ -172,7 +182,7 @@ struct SourceDetailView: View {
     }
 
     /// One line under the card: why sorting failed with a "Try again", "Sorting…" while it runs, otherwise nothing.
-    @ViewBuilder private func sortingLine(_ scrollProxy: ScrollViewProxy) -> some View {
+    @ViewBuilder private var sortingLine: some View {
         switch model.sorting {
         case .none:
             EmptyView()
@@ -189,10 +199,19 @@ struct SourceDetailView: View {
                     .disabled(model.isTryingAgain)
                     .reported(Self.notSortedTryAgainIdentifier, renderReporter, layoutReporter)
                 // The type picker is part of the correction controls below; this brings them into view.
-                Button(Self.setTypeLabel) { scrollProxy.scrollTo(Self.controlsScrollIdentity, anchor: .top) }
-                    .font(DSFont.rowLabel)
-                    .frame(minHeight: DSLayout.rowMinimumHeight)
-                    .reported(Self.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+                if model.canSetTypeYourself {
+                    Button(Self.setTypeLabel) { model.setTypeYourself() }
+                        .font(DSFont.rowLabel)
+                        .frame(minHeight: DSLayout.rowMinimumHeight)
+                        .reported(Self.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+                }
+                if model.notSortedRerun == .notRun {
+                    Text(Self.couldNotTryAgainText)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.notSortedNoticeIdentifier, renderReporter, layoutReporter)
+                }
                 if model.notSortedRerun == .needsProvider {
                     Text(Self.needsProviderText)
                         .font(DSFont.footer)
