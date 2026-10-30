@@ -127,6 +127,9 @@ final class ItemControlsModel: ObservableObject {
     @Published private(set) var reminderAgainIsOpen = false
     /// The ending (`complete` or `cancel`) done on this screen that Undo reverses; nil once reopened.
     @Published private(set) var undoableEnding: ItemLifecycleAction?
+    /// The revision the ending's own receipt reported. Undo names it when the read after the ending failed, so a
+    /// transient read failure never takes Undo away; a stale revision is refused by the core and nothing is written.
+    private var undoableEndingRevision: Int?
 
     let itemID: String
     private let reader: SourceDetailReading
@@ -181,7 +184,17 @@ final class ItemControlsModel: ObservableObject {
     }
 
     /// Whether Undo is offered: this screen completed or cancelled the item, and it can still be reopened.
-    var canUndo: Bool { undoableEnding != nil && canReopen }
+    var canUndo: Bool { undoableEnding != nil && reopenRevision != nil }
+
+    /// The revision a reopen names: the stored one once it has been read, or, for Undo while the read after the
+    /// ending is unreadable, the revision the ending's receipt reported. Nil when no reopen can be sent now.
+    private var reopenRevision: Int? {
+        if canReopen, let snapshot { return snapshot.revision }
+        guard undoableEnding != nil, let undoableEndingRevision, lifecycle != nil, !isWorking,
+            refreshFailure == .unreadable, snapshot?.isDeleted == false
+        else { return nil }
+        return undoableEndingRevision
+    }
 
     /// Whether Set a reminder again can prepare the host's reminder editor.
     var canSetReminderAgain: Bool { reminderAgainPrompt != nil && reminderEditor != nil && !reminderAgainIsOpen }
@@ -385,8 +398,16 @@ final class ItemControlsModel: ObservableObject {
     /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
     /// retries of the same action, so a repeat after an unknown outcome stores once.
     @MainActor private func perform(_ action: ItemLifecycleAction) async {
-        guard action == .reopen ? canReopen : canAct, let lifecycle, let snapshot else { return }
-        if action == .notNow || action == .stopSuggesting, snapshot.suggestionsStopped { return }
+        guard let lifecycle, let snapshot else { return }
+        let revision: Int
+        if action == .reopen {
+            guard let reopenRevision else { return }
+            revision = reopenRevision
+        } else {
+            guard canAct else { return }
+            if action == .notNow || action == .stopSuggesting, snapshot.suggestionsStopped { return }
+            revision = snapshot.revision
+        }
         isWorking = true
         outcome = nil
         reminderAgainPrompt = nil
@@ -398,12 +419,12 @@ final class ItemControlsModel: ObservableObject {
             commandID = makeCommandID()
             heldActionCommand = (action, commandID)
         }
-        let revision = snapshot.revision
         do {
             if action == .reopen {
                 let result = try await lifecycle.reopen(commandID: commandID, itemID: itemID, expectedRevision: revision)
                 heldActionCommand = nil
                 undoableEnding = nil
+                undoableEndingRevision = nil
                 switch result {
                 case .reopened(let receipt):
                     outcome = .actionDone(.reopen)
@@ -431,10 +452,12 @@ final class ItemControlsModel: ObservableObject {
                 isWorking = false
                 return
             }
-            _ = receipt
             heldActionCommand = nil
             outcome = .actionDone(action)
-            if action == .complete || action == .cancel { undoableEnding = action }
+            if action == .complete || action == .cancel {
+                undoableEnding = action
+                undoableEndingRevision = receipt.revision
+            }
         } catch let error as ItemLifecycleControlError {
             switch error {
             case .staleRevision(let current):

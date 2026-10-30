@@ -5,11 +5,19 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
+private struct TransientReadFailure: Error {}
+
 /// A detail reader whose stored lifecycle the test moves, standing in for the core.
 private final class MovingDetailReader: SourceDetailReading, @unchecked Sendable {
     var revision = 3
     var lifecycleState = "active"
+    /// How many of the next reads fail as unreadable.
+    var failingReads = 0
     func detail(itemID: String) async throws -> CoreItemDetail {
+        if failingReads > 0 {
+            failingReads -= 1
+            throw TransientReadFailure()
+        }
         CoreItemDetail(
             itemID: itemID, captureID: "capture-1", revision: revision, itemType: "action", scope: "work",
             sessionTopic: nil, lifecycleState: lifecycleState, capturedAt: "2026-10-01T09:30:00Z", text: "words",
@@ -179,6 +187,39 @@ final class ItemReopenControlsTests: XCTestCase {
             await controls.reopen()
             await settle()
             XCTAssertFalse(onScreen.contains(ItemControlsView.undoIdentifier), "\(name): spent once reopened")
+        }
+    }
+
+    func testUndoStaysOfferedWhenTheReadAfterCompleteOrCancelFails() async {
+        await eachAppearance { name in
+            for ending in ["complete", "cancel"] {
+                reader.failingReads = 1
+                if ending == "complete" { await controls.complete() } else { await controls.cancel() }
+                await settle()
+                XCTAssertEqual(controls.outcome, .actionDone(ending == "complete" ? .complete : .cancel), "\(name) \(ending)")
+                XCTAssertEqual(controls.refreshFailure, .unreadable, "\(name) \(ending)")
+                XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "\(name) \(ending): the confirmation is drawn")
+                XCTAssertTrue(
+                    onScreen.contains(ItemControlsView.refreshFailureIdentifier), "\(name) \(ending): the read failure is drawn")
+                XCTAssertTrue(onScreen.contains(ItemControlsView.undoIdentifier), "\(name) \(ending): Undo is still offered")
+
+                // A failed Undo keeps it offered, and the retry reuses the same command at the receipt's revision.
+                actions.reopenResults = [.failure(.unreadable)]
+                await controls.reopen()
+                await settle()
+                XCTAssertEqual(controls.outcome, .actionFailed(.reopen), "\(name) \(ending)")
+                XCTAssertTrue(onScreen.contains(ItemControlsView.undoIdentifier), "\(name) \(ending): offered again")
+
+                await controls.reopen()
+                await settle()
+                XCTAssertEqual(controls.outcome, .actionDone(.reopen), "\(name) \(ending)")
+                XCTAssertNil(controls.refreshFailure, "\(name) \(ending)")
+                XCTAssertEqual(controls.snapshot?.lifecycleState, "active", "\(name) \(ending)")
+                XCTAssertFalse(onScreen.contains(ItemControlsView.undoIdentifier), "\(name) \(ending): Undo is spent")
+                XCTAssertFalse(onScreen.contains(ItemControlsView.refreshFailureIdentifier), "\(name) \(ending)")
+            }
+            XCTAssertEqual(
+                actions.calls, ["complete:3", "reopen:4", "reopen:4", "cancel:5", "reopen:6", "reopen:6"], name)
         }
     }
 
