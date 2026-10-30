@@ -387,15 +387,17 @@ final class SourceDetailModel: ObservableObject {
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> SourceDetailModel {
         let model = SourceDetailModel(
             itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
+        let reminderEditor = ReminderEditModel.assembled(itemID: itemID, root: root)
+        model.reminderEditor = reminderEditor
+        // Set a reminder again prepares this same editor; the controls draw none of their own.
         model.itemControls = ItemControlsModel.assembled(
-            itemID: itemID, root: root, onCorrected: { [weak model] in
+            itemID: itemID, root: root, reminderEditor: reminderEditor, onCorrected: { [weak model] in
                 Task {
                     await model?.load()
                     // The type or lifecycle may have changed what the reminder section should say.
                     await model?.reminderEditor?.load()
                 }
             })
-        model.reminderEditor = .assembled(itemID: itemID, root: root)
         model.deletion = .assembled(itemID: itemID, root: root)
         return model
     }
