@@ -102,6 +102,8 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         onMain { await controls.setReminderAgain() }
         let former = try XCTUnwrap(ReminderInstant.date(from: Self.formerInstant))
         XCTAssertEqual(editor.draftDate, former, "the screen's editor starts from the former time")
+        // The signal the source detail scrolls its editor into view on; a hosted test cannot see the scroll offset.
+        XCTAssertTrue(controls.reminderAgainIsOpen, "the screen is told to bring its editor into view")
         settle("the button is spent") { !onScreen.contains(ItemControlsView.setReminderAgainIdentifier) }
         XCTAssertTrue(editorIsDrawn, "the screen's editor is the one prepared")
         XCTAssertEqual(
