@@ -42,6 +42,8 @@ struct HomeRecentEntry: Identifiable, Equatable {
     let isVoice: Bool
     /// True for a capture saved in this session that has not been interpreted yet.
     let isSorting: Bool
+    /// True when the note's reminder was asked for and has no time. Content-free.
+    var needsTime = false
 }
 
 enum HomeRecentsSection: Equatable {
@@ -242,7 +244,8 @@ final class HomeRecentsModel: ObservableObject {
             HomeRecentEntry(
                 id: item.itemID, itemType: item.itemType, text: item.displayText,
                 capturedAt: Self.date(from: item.capturedAt) ?? now(), isVoice: item.sourceKind == .voice,
-                isSorting: item.itemType == nil && justSaved[item.itemID] != nil)
+                isSorting: item.itemType == nil && justSaved[item.itemID] != nil,
+                needsTime: item.reminderNeedsTime)
         }
         let leadingSorting = loaded.filter(\.isSorting)
         return pending + leadingSorting + loaded.filter { !$0.isSorting }

@@ -177,6 +177,37 @@ final class HomeRecentsModelTests: XCTestCase {
         XCTAssertEqual(model.section(for: model.entries[1], calendar: calendar), .earlier)
     }
 
+    func testAnEntryNeedsATimeOnlyWhenTheCoreFlagsItsReminder() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [
+                CoreRecentItem(
+                    itemID: "flagged", revision: 1, itemType: "action", displayText: "Call Joe",
+                    capturedAt: "2026-10-19T11:00:00Z", sourceKind: .text, reminderNeedsTime: true),
+                item("plain"),
+            ], nextCursor: nil)
+        let model = makeModel()
+        await waitForFirstPage(model)
+
+        XCTAssertEqual(model.entries.map(\.id), ["flagged", "plain"])
+        XCTAssertEqual(model.entries.map(\.needsTime), [true, false])
+    }
+
+    func testTheRecentItemFlagDecodesFromTheCoreAndIsFalseWhenAbsent() throws {
+        let present = Data(
+            """
+            {"item_id":"a","revision":1,"item_type":null,"display_text":"x","captured_at":"2026-10-19T11:00:00Z",
+            "source_kind":"text","reminder_needs_time":true}
+            """.utf8)
+        let absent = Data(
+            """
+            {"item_id":"b","revision":1,"item_type":null,"display_text":null,"captured_at":"2026-10-19T11:00:00Z",
+            "source_kind":"voice"}
+            """.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(CoreRecentItem.self, from: present).reminderNeedsTime)
+        XCTAssertFalse(try JSONDecoder().decode(CoreRecentItem.self, from: absent).reminderNeedsTime)
+    }
+
     func testUnlockingThenSuccessLoadsTheFirstPage() async {
         source.isQuietAttemptInFlight = true
         source.pages[nil] = CoreRecentItemsPage(items: [item("a")], nextCursor: nil)

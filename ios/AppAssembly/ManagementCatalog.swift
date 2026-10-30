@@ -99,7 +99,7 @@ enum ManagementCatalog {
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
         ManagementEntry(id: "privacy-settings", title: "Privacy", systemImage: "hand.raised") { context in AnyView(PrivacySettingsView(model: context.privacySettings)) },
         ManagementEntry(id: "permissions-settings", title: "Permissions", systemImage: "checkmark.shield") { context in context.permissionsSettings.map { AnyView(PermissionsSettingsView(model: $0)) } ?? AnyView(EmptyView()) },
-        ManagementEntry(id: "status-settings", title: "Status", systemImage: "waveform.path.ecg") { context in context.statusModel.map { model in AnyView(StatusView(model: model, makeProviderSettings: { AnyView(ProviderSettingsView(model: context.providerSettings)) })) } ?? AnyView(EmptyView()) },
+        ManagementEntry(id: "status-settings", title: "Status", systemImage: "waveform.path.ecg") { context in context.statusModel.map { model in AnyView(StatusView(model: model, makeProviderSettings: { AnyView(ProviderSettingsView(model: context.providerSettings)) }, makeItemPane: { ManagementCatalog.destinations.view(for: .item($0), context: context) })) } ?? AnyView(EmptyView()) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.

@@ -93,6 +93,10 @@ enum StatusText {
         case .unrecognized: return "Its schedule could not be read."
         }
     }
+    static func remindersNeedTimeHeadline(count: Int) -> String {
+        count == 1 ? "1 reminder needs a time" : "\(count) reminders need a time"
+    }
+    static let remindersNeedTimeDetail = "You asked to be reminded but didn't say when. Open the note to set a time."
     static let notificationsNotAskedHeadline = "Notifications have not been asked for yet"
     static let notificationsNotAskedDetail =
         "Reminders are saved. Oh And asks the first time one needs to be shown."

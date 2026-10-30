@@ -58,6 +58,10 @@ struct RootReminderSchedulingReader: ReminderSchedulingReading {
     let root: ServiceCompositionRoot
 
     func lastReport() -> NotificationPermissionReport? { root.lastReminderReport }
+
+    func currentReport() async -> NotificationPermissionReport? {
+        (try? await root.reconcileReminders(trigger: .explicit)) ?? root.lastReminderReport
+    }
 }
 
 /// The status screen's own record of the permission status it last saw, under keys of its own. The Permissions screen

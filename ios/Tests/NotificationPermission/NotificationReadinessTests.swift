@@ -59,12 +59,25 @@ final class NotificationReadinessTests: XCTestCase {
     }
 
     func testRemindersThatWereNeverWantedAreNotApplicable() {
-        for state in ["not_requested", "not_scheduled_yet", "unsupported_recurrence", "cancelled"] {
+        for state in ["not_requested", "unsupported_recurrence", "cancelled"] {
             let facts = ReminderFacts(
                 itemID: "a", requestState: state, scheduleState: nil, deliveryState: nil,
                 acknowledgmentState: nil, unschedulableReason: nil)
             XCTAssertEqual(outlook(.denied, facts), .notApplicable, state)
         }
+    }
+
+    func testAReminderWithNoTimeNeedsATimeWhateverThePermissionAndIsNotCountedAsUnscheduled() {
+        let facts = ReminderFacts(
+            itemID: "a", requestState: "not_scheduled_yet", scheduleState: nil, deliveryState: nil,
+            acknowledgmentState: nil, unschedulableReason: nil)
+        for permission in [NotificationPermissionState.usable, .denied, .notRequested] {
+            XCTAssertEqual(outlook(permission, facts), .needsTime, "\(permission)")
+        }
+        let report = NotificationReadiness.evaluate(permission: .denied, reminders: [facts, ReminderFixtures.resolved("b")])
+        XCTAssertEqual(report.needsTimeCount, 1)
+        XCTAssertEqual(report.unscheduledCount, 0)
+        XCTAssertEqual(report.undeliverableCount, 1, "only the resolved reminder is blocked by the permission")
     }
 
     func testDeliveryAndAcknowledgmentFactsPassThroughUntouched() {
