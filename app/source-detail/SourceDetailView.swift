@@ -97,11 +97,12 @@ struct SourceDetailView: View {
                     }
                     .padding(.bottom, DSSpacing.lg)
                 }
-                // Set a reminder again prepares the editor drawn above; bring it into view once it is ready.
+                // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
+                // waits for the next turn of the main queue, so it stays out of the update that removes the button.
                 .onReceive(
                     model.itemControls.publisher.flatMap { $0.$reminderAgainIsOpen.dropFirst() }.filter { $0 }
                 ) { _ in
-                    withAnimation { scrollProxy.scrollTo(Self.reminderEditorScrollIdentity, anchor: .top) }
+                    DispatchQueue.main.async { scrollProxy.scrollTo(Self.reminderEditorScrollIdentity, anchor: .top) }
                 }
             }
         }
