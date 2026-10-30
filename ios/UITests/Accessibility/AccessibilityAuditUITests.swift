@@ -8,6 +8,7 @@ import XCTest
 /// at the largest accessibility size (`ACCESSIBILITY_CONTENT_SIZE=default|xxxl`, passed as `TEST_RUNNER_ACCESSIBILITY_CONTENT_SIZE`)
 /// and names the directory for the audit log and screenshots (`TEST_RUNNER_ACCESSIBILITY_OUTPUT_DIR`). Any audit issue fails
 /// the test; the only exemptions are in `isExempt`, each for one named element and listed in docs/validation/accessibility.md.
+@available(iOS 17.0, *)
 final class AccessibilityAuditUITests: XCTestCase {
     private var app: XCUIApplication!
     private var sizeName = "default"
