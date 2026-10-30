@@ -17,7 +17,17 @@ struct SourceDetailView: View {
     static let sortingFailedIdentifier = "source-detail.sorting-failed"
     static let tryAgainIdentifier = "source-detail.sorting.try-again"
     static let tryAgainSummaryIdentifier = "source-detail.sorting.summary"
+    static let notSortedIdentifier = "source-detail.not-sorted"
+    static let notSortedTryAgainIdentifier = "source-detail.not-sorted.try-again"
+    static let notSortedSetTypeIdentifier = "source-detail.not-sorted.set-type"
+    static let notSortedNoticeIdentifier = "source-detail.not-sorted.notice"
+    static let notSortedProcessingIdentifier = "source-detail.not-sorted.processing"
     static let tryAgainLabel = "Try again"
+    static let setTypeLabel = "Set the type yourself"
+    static let needsProviderText = "Choose a provider in Processing first"
+    static let processingLinkLabel = "Open Processing"
+    /// The scroll identity of the correction controls, which "Set the type yourself" brings into view.
+    static let controlsScrollIdentity = "source-detail.controls"
     static let sortingText = "Sorting…"
     /// The scroll identity of the reminder editor, which Set a reminder again brings into view.
     static let reminderEditorScrollIdentity = "source-detail.reminder-editor"
@@ -76,8 +86,10 @@ struct SourceDetailView: View {
                     VStack(alignment: .leading, spacing: DSSpacing.lg) {
                         if let content = model.content {
                             detailCard(content)
-                            sortingLine
-                            if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
+                            sortingLine(scrollProxy)
+                            if let controls = model.itemControls {
+                                ItemControlsView(model: controls, renderReporter: renderReporter).id(Self.controlsScrollIdentity)
+                            }
                             history(content)
                             if let reminderEditor = model.reminderEditor {
                                 ReminderEditSection(model: reminderEditor).id(Self.reminderEditorScrollIdentity)
@@ -160,10 +172,42 @@ struct SourceDetailView: View {
     }
 
     /// One line under the card: why sorting failed with a "Try again", "Sorting…" while it runs, otherwise nothing.
-    @ViewBuilder private var sortingLine: some View {
+    @ViewBuilder private func sortingLine(_ scrollProxy: ScrollViewProxy) -> some View {
         switch model.sorting {
         case .none:
             EmptyView()
+        case .notSorted(let label):
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(SourceDetailSorting.notSortedText(label: label))
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .reported(Self.notSortedIdentifier, renderReporter, layoutReporter)
+                Button(Self.tryAgainLabel) { Task { await model.tryAgainNotSorted() } }
+                    .font(DSFont.rowLabel)
+                    .frame(minHeight: DSLayout.rowMinimumHeight)
+                    .disabled(model.isTryingAgain)
+                    .reported(Self.notSortedTryAgainIdentifier, renderReporter, layoutReporter)
+                // The type picker is part of the correction controls below; this brings them into view.
+                Button(Self.setTypeLabel) { scrollProxy.scrollTo(Self.controlsScrollIdentity, anchor: .top) }
+                    .font(DSFont.rowLabel)
+                    .frame(minHeight: DSLayout.rowMinimumHeight)
+                    .reported(Self.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+                if model.notSortedRerun == .needsProvider {
+                    Text(Self.needsProviderText)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.notSortedNoticeIdentifier, renderReporter, layoutReporter)
+                    if let makeProviderSettings = model.makeProviderSettings {
+                        NavigationLink(Self.processingLinkLabel) { makeProviderSettings() }
+                            .font(DSFont.rowLabel)
+                            .frame(minHeight: DSLayout.rowMinimumHeight)
+                            .reported(Self.notSortedProcessingIdentifier, renderReporter, layoutReporter)
+                    }
+                }
+            }
+            .padding(.horizontal, DSSpacing.md)
         case .sorting:
             VStack(alignment: .leading, spacing: DSSpacing.xxs) {
                 Text(Self.sortingText)

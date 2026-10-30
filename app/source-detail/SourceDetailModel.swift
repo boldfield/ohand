@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import OhAndCoreBridge
 import OhAndServices
+import SwiftUI
 
 /// Reads one item's detail. `ItemDetailService` is the production implementation: it needs an authenticated read
 /// session and discards an answer that arrives after a relock.
@@ -131,6 +132,10 @@ final class SourceDetailModel: ObservableObject {
     /// What the last "Try again" on this note did.
     @Published private(set) var tryAgainSummary: FailedNotesRerunSummary?
     @Published private(set) var isTryingAgain = false
+    /// What the last "Try again" on this declined note did, until the note is read again as sorted or failed.
+    @Published private(set) var notSortedRerun: SourceDetailAbstainedRerun?
+    /// Builds the Processing settings screen the declined note's "Choose a provider" link opens; nil hides the link.
+    var makeProviderSettings: (() -> AnyView)?
 
     let itemID: String
     /// The correction controls shown under the details; absent where no corrections are wired.
@@ -323,6 +328,25 @@ final class SourceDetailModel: ObservableObject {
     @MainActor private func dropSorting() {
         sorting = .none
         tryAgainSummary = nil
+        notSortedRerun = nil
+    }
+
+    /// Runs this declined note again, then reads its sorting once more. A queued run is shown as "Sorting…" even if the
+    /// read does not yet report the new job.
+    @MainActor func tryAgainNotSorted() async {
+        guard let sortingSource, case .notSorted = sorting, !isTryingAgain else { return }
+        isTryingAgain = true
+        defer { isTryingAgain = false }
+        let outcome = await sortingSource.tryAgainNotSorted(itemID: itemID)
+        guard content != nil else { return }
+        notSortedRerun = outcome
+        let current = await sortingSource.sorting(itemID: itemID)
+        guard content != nil else { return }
+        if outcome == .queued, case .notSorted = current {
+            sorting = .sorting
+        } else {
+            sorting = current
+        }
     }
 
     /// Runs this note's failed sorting again, then reads its sorting once more.
@@ -431,8 +455,11 @@ final class SourceDetailModel: ObservableObject {
                 }
             })
         model.deletion = .assembled(itemID: itemID, root: root)
+        model.makeProviderSettings = { [weak root] in
+            root.map { AnyView(ProviderSettingsView(model: .assembled(root: $0))) } ?? AnyView(EmptyView())
+        }
         model.sortingSource = ItemSortingSource(
-            jobs: root.jobConfiguration,
+            jobs: root.jobConfiguration, abstainedJobs: root.jobConfiguration,
             processing: { [weak root] itemID in
                 await withCheckedContinuation {
                     (continuation: CheckedContinuation<(state: String, jobStatus: String?, rerunState: String?)?, Never>) in
@@ -443,7 +470,7 @@ final class SourceDetailModel: ObservableObject {
                     root.itemStatus(itemID: itemID) { result in
                         let status = try? result.get()
                         continuation.resume(
-                            returning: status.map { (state: $0.processingState, jobStatus: $0.processingJobStatus, rerunState: $0.rerunState) })
+                            returning: status.map { (state: $0.processingState, jobStatus: $0.processingJobStatus, rerunState: $0.rerunState, abstentionReason: $0.abstentionReason) })
                     }
                 }
             },
