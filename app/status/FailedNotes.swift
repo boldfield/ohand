@@ -14,6 +14,23 @@ extension JobConfigurationService: FailedInterpretationsControlling {}
 /// Reads the first line of a note's text. `nil` when it cannot be read now (locked, deleted, no text yet).
 protocol FailedNoteTextReading: AnyObject, Sendable {
     func firstLine(itemID: String) async -> String?
+    /// The first line and capture time together; `nil` when the note cannot be read now (locked, deleted).
+    func summary(itemID: String) async -> NoteSummary?
+}
+
+/// What a listed note shows besides its reason: the first line of its text and when it was saved.
+struct NoteSummary: Equatable {
+    /// `nil` when the note has no text to show yet.
+    let firstLine: String?
+    let capturedAt: Date?
+}
+
+extension FailedNoteTextReading {
+    /// A reader that only knows the text has no capture time.
+    func summary(itemID: String) async -> NoteSummary? {
+        guard let line = await firstLine(itemID: itemID) else { return nil }
+        return NoteSummary(firstLine: line, capturedAt: nil)
+    }
 }
 
 /// The existing private item read, narrowed to one line of text.
@@ -25,7 +42,17 @@ final class ItemDetailFirstLineReader: FailedNoteTextReading, @unchecked Sendabl
     }
 
     func firstLine(itemID: String) async -> String? {
-        guard let detail = try? await reader.detail(itemID: itemID), let text = detail.text else { return nil }
+        guard let detail = try? await reader.detail(itemID: itemID) else { return nil }
+        return Self.firstLine(of: detail)
+    }
+
+    func summary(itemID: String) async -> NoteSummary? {
+        guard let detail = try? await reader.detail(itemID: itemID) else { return nil }
+        return NoteSummary(firstLine: Self.firstLine(of: detail), capturedAt: FailedNote.parse(detail.capturedAt))
+    }
+
+    private static func firstLine(of detail: CoreItemDetail) -> String? {
+        guard let text = detail.text else { return nil }
         let line = text.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) }
         return line?.isEmpty == false ? line : nil
     }
@@ -59,7 +86,7 @@ struct FailedNote: Equatable, Identifiable {
         return formatter
     }()
 
-    private static func parse(_ stamp: String) -> Date? {
+    static func parse(_ stamp: String) -> Date? {
         plainStamp.date(from: stamp) ?? fractionalStamp.date(from: stamp)
     }
 }
@@ -93,4 +120,13 @@ enum FailedNotesRerunSummary: Equatable {
         self = .done(
             queued: result.moved, needsSetting: result.skippedItems.filter { $0.reason == .noProviderAllowed }.count)
     }
+}
+
+/// One note whose reminder was asked for and has no time, as the Status screen lists it. Read only while unlocked.
+struct NeedsTimeNote: Equatable, Identifiable {
+    let itemID: String
+    let firstLine: String?
+    let capturedAt: Date?
+
+    var id: String { itemID }
 }

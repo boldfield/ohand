@@ -44,6 +44,10 @@ pub struct RecentItem {
     pub display_text: Option<String>,
     pub captured_at: String,
     pub source_kind: RecentSourceKind,
+    /// True only when the item has a reminder whose request state is `not_scheduled_yet`: the
+    /// person asked to be reminded and no time was ever set. Content-free. The listing only
+    /// returns active items, so this is never true for a completed, cancelled or deleted one.
+    pub reminder_needs_time: bool,
 }
 
 /// A page of recent items and the cursor of the next page, if there is one.
@@ -140,7 +144,10 @@ pub fn recent_items(
                     (SELECT a.text FROM transcript_attachments a WHERE a.item_id = i.item_id),
                     c.text),
                 c.capture_instant,
-                c.audio_reference IS NOT NULL
+                c.audio_reference IS NOT NULL,
+                EXISTS (SELECT 1 FROM reminders r
+                         WHERE r.item_id = i.item_id
+                           AND r.request_state = 'not_scheduled_yet')
            FROM items i
            JOIN captures c ON c.capture_id = i.capture_id
           WHERE i.item_id = ?",
@@ -160,6 +167,7 @@ pub fn recent_items(
                 } else {
                     RecentSourceKind::Text
                 },
+                reminder_needs_time: row.get(5)?,
             })
         })?;
         items.push(item);

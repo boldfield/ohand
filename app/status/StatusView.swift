@@ -39,6 +39,7 @@ struct StatusView: View {
     static let unlockIdentifier = "status.unlock"
     static let showAllIdentifier = "status.show-all"
     static func noteIdentifier(_ itemID: String) -> String { "status.failed-note.\(itemID)" }
+    static func needsTimeNoteIdentifier(_ itemID: String) -> String { "status.needs-time-note.\(itemID)" }
     static func rowIdentifier(_ kind: StatusFactKind) -> String { "status.row.\(kind.rawValue)" }
 
     static let infoParagraphs = [
@@ -49,6 +50,8 @@ struct StatusView: View {
     @ObservedObject var model: StatusModel
     /// The Provider settings screen this one links to when a destination needs the person.
     var makeProviderSettings: () -> AnyView = { AnyView(EmptyView()) }
+    /// The item's detail screen, where the reminder editor sets a time. Back returns here.
+    var makeItemPane: (String) -> AnyView = { _ in AnyView(EmptyView()) }
     /// Lets a hosted test see what the screen shows; production leaves it unset.
     var renderReporter: (([String: String]) -> Void)?
     /// Lets a hosted test run what a tap on each button runs; production leaves it unset.
@@ -103,6 +106,11 @@ struct StatusView: View {
                     .accessibilityIdentifier(Self.rowIdentifier(fact.kind))
                     .preference(key: StatusRenderedKey.self, value: [Self.rowIdentifier(fact.kind): "\(fact.headline) | \(fact.detail)"])
                     if fact.kind == .processing { failedNotesRows(for: fact) }
+                    if fact.kind == .remindersNeedTime {
+                        ForEach(model.needsTimeNotes) { note in
+                            NeedsTimeNoteRow(note: note, makeItemPane: makeItemPane)
+                        }
+                    }
                 }
             }
             if model.facts.contains(where: { $0.actions.contains(.retry) }) {
@@ -187,6 +195,46 @@ struct FailedNoteRow: View {
             value: [StatusView.noteIdentifier(note.itemID): "\(firstLine) | \(captured) | \(note.reason)"]
         )
         .task { await model.ensureFirstLine(itemID: note.itemID) }
+    }
+}
+
+/// One note whose reminder has no time: the first line of its text and when it was saved. Tapping it opens the note,
+/// where the reminder editor sets the time.
+struct NeedsTimeNoteRow: View {
+    let note: NeedsTimeNote
+    let makeItemPane: (String) -> AnyView
+
+    private var firstLine: String { note.firstLine ?? StatusText.notePlaceholder }
+    private var captured: String { StatusText.capturedLabel(note.capturedAt) }
+    /// Where the row leads.
+    var destination: AnyView { makeItemPane(note.itemID) }
+
+    var body: some View {
+        NavigationLink {
+            destination
+        } label: {
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(firstLine)
+                    .font(DSFont.rowLabel)
+                    .foregroundColor(DSColor.ink.color)
+                    .lineLimit(2)
+                Text(captured)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+            }
+            .padding(.horizontal, DSSpacing.md)
+            .padding(.vertical, DSSpacing.xs)
+            .frame(maxWidth: .infinity, minHeight: DSLayout.rowMinimumHeight, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier(StatusView.needsTimeNoteIdentifier(note.itemID))
+        .preference(
+            key: StatusRenderedKey.self,
+            value: [StatusView.needsTimeNoteIdentifier(note.itemID): "\(firstLine) | \(captured)"]
+        )
     }
 }
 
