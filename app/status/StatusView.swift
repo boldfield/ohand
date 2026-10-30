@@ -1,3 +1,4 @@
+import OhAndServices
 import SwiftUI
 import UIKit
 
@@ -158,6 +159,10 @@ struct StatusView: View {
         .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0.byIdentifier) }
         .task { await model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.refresh() }
+        }
+        // An edit, completion or deletion made in a note opened from here changes what Status counts.
+        .onReceive(NotificationCenter.default.publisher(for: ItemChangeSignal.didChangeNotification)) { _ in
             Task { await model.refresh() }
         }
     }

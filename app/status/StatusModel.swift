@@ -20,6 +20,13 @@ extension JobRunnerService: ProcessingRetrying {
 /// The most recent reminder pass, as the app's composition root recorded it. `nil` before the first pass.
 protocol ReminderSchedulingReading {
     func lastReport() -> NotificationPermissionReport?
+    /// Runs a reminder pass now and returns its report, so a deleted, completed or cancelled note is no longer counted.
+    /// Falls back to the last recorded report when the pass cannot run.
+    func currentReport() async -> NotificationPermissionReport?
+}
+
+extension ReminderSchedulingReading {
+    func currentReport() async -> NotificationPermissionReport? { lastReport() }
 }
 
 /// Used when no reminder pass source exists (tests, previews): the status says scheduling has not been checked.
@@ -145,7 +152,7 @@ final class StatusModel: ObservableObject {
     @MainActor func refresh() async {
         let outcome = await health.read()
         let entries = await permissions.refresh()
-        let report = scheduling.lastReport()
+        let report = await scheduling.currentReport()
         facts = Self.facts(health: outcome, notifications: entries.first { $0.kind == .notifications }, scheduling: report)
         await refreshNeedsTimeNotes(report)
         await refreshFailedNotes()
@@ -203,16 +210,17 @@ final class StatusModel: ObservableObject {
             needsTimeNotes = []
             return
         }
-        // The core lists reminders oldest first; the newest are read.
-        let newestFirst = report.readiness.reminders.filter { $0.outlook == .needsTime }.reversed()
+        // Every candidate is read before the limit applies, so the five listed are the newest captures, whatever order
+        // the reminders were created in.
+        let candidates = report.readiness.reminders.filter { $0.outlook == .needsTime }.reversed()
         var notes: [NeedsTimeNote] = []
-        for status in newestFirst.prefix(Self.listedNoteLimit) {
+        for status in candidates {
             guard let summary = await noteText.summary(itemID: status.facts.itemID) else { continue }
             notes.append(NeedsTimeNote(itemID: status.facts.itemID, firstLine: summary.firstLine, capturedAt: summary.capturedAt))
         }
         // Newest capture first; notes with no known capture time keep the core's order after the dated ones.
         let dated = notes.filter { $0.capturedAt != nil }.sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) }
-        needsTimeNotes = dated + notes.filter { $0.capturedAt == nil }
+        needsTimeNotes = Array((dated + notes.filter { $0.capturedAt == nil }).prefix(Self.listedNoteLimit))
     }
 
     /// Reads one listed note's first line once, through the private item read. Row views call it as they appear.

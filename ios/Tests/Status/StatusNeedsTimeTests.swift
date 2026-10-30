@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import XCTest
 import OhAndCoreBridge
+import OhAndServices
 @testable import OhAndServices
 @testable import OhAnd
 
@@ -24,6 +25,14 @@ private final class ChangingScheduling: ReminderSchedulingReading {
     var report: NotificationPermissionReport?
     init(_ report: NotificationPermissionReport?) { self.report = report }
     func lastReport() -> NotificationPermissionReport? { report }
+    /// What a reminder pass run now would report. `nil` means the last recorded report is still current.
+    var nextPass: NotificationPermissionReport?
+    private(set) var passesRun = 0
+    func currentReport() async -> NotificationPermissionReport? {
+        passesRun += 1
+        if let nextPass { report = nextPass }
+        return report
+    }
 }
 
 /// Reads notes as the private read does: readable while unlocked, nothing while locked or for a deleted note.
@@ -180,7 +189,53 @@ final class StatusNeedsTimeTests: XCTestCase {
         XCTAssertTrue(model.needsTimeNotes.isEmpty)
     }
 
+    func testRefreshRunsAReminderPassSoADeletedOrCompletedNoteLeavesWithoutAnyoneReplacingTheReport() async {
+        let scripted = notes(count: 2)
+        let scheduling = ChangingScheduling(pass([needsTime("item-1"), needsTime("item-2")]))
+        let model = makeModel(scheduling, notes: scripted)
+        await model.refresh()
+        XCTAssertEqual(model.needsTimeNotes.count, 2)
+
+        // The person deleted item 2 and completed item 1. Only a fresh pass knows; nothing sets `report` by hand.
+        scripted.deleted = ["item-2"]
+        scheduling.nextPass = pass([])
+        await model.refresh()
+        XCTAssertNil(model.facts.first { $0.kind == .remindersNeedTime })
+        XCTAssertTrue(model.needsTimeNotes.isEmpty)
+        XCTAssertEqual(scheduling.passesRun, 2)
+    }
+
+    func testTheFiveListedAreTheNewestCapturesWhateverOrderTheRemindersWereCreatedIn() async {
+        let scripted = notes(count: 7)
+        // Reminder order (creation) is the reverse of capture order for item-1: a late reinterpretation of the oldest note.
+        let reminders = (2...7).map { needsTime("item-\($0)") } + [needsTime("item-1")]
+        let model = makeModel(ChangingScheduling(pass(reminders)), notes: scripted)
+        await model.refresh()
+        XCTAssertEqual(model.needsTimeNotes.map(\.itemID), ["item-7", "item-6", "item-5", "item-4", "item-3"])
+
+        // And a newer capture whose reminder was created first is not pushed out.
+        let reordered = [needsTime("item-7")] + (1...6).map { needsTime("item-\($0)") }
+        let second = makeModel(ChangingScheduling(pass(reordered)), notes: scripted)
+        await second.refresh()
+        XCTAssertEqual(second.needsTimeNotes.map(\.itemID), ["item-7", "item-6", "item-5", "item-4", "item-3"])
+    }
+
     // MARK: hosted
+
+    func testTheHostedScreenRefreshesWhenAnItemChangesAndDropsTheEntry() {
+        let scripted = notes(count: 1)
+        let scheduling = ChangingScheduling(pass([needsTime("item-1")]))
+        let model = makeModel(scheduling, notes: scripted)
+        host(model, style: .light)
+        wait("the entry is listed") { self.noteKeys.count == 1 }
+
+        // The note is opened, its reminder cancelled there, and the person comes back: the change signal fires.
+        scheduling.nextPass = pass([])
+        NotificationCenter.default.post(
+            name: ItemChangeSignal.didChangeNotification, object: nil, userInfo: nil)
+        wait("the entry is gone after the change") { self.noteKeys.isEmpty && model.needsTimeNotes.isEmpty }
+        XCTAssertNil(model.facts.first { $0.kind == .remindersNeedTime })
+    }
 
     func testLockedHostedScreenShowsTheCountWithNoNote() {
         for style in appearances {
