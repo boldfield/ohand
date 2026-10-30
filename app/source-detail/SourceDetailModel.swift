@@ -126,6 +126,11 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var failure: SourceDetailFailure?
     @Published private(set) var isLoading = false
     @Published private(set) var audio: SourceAudioState = .none
+    /// Whether the note is being sorted or its sorting failed. `.none` when the host wires no sorting read.
+    @Published private(set) var sorting: SourceDetailSorting = .none
+    /// What the last "Try again" on this note did.
+    @Published private(set) var tryAgainSummary: FailedNotesRerunSummary?
+    @Published private(set) var isTryingAgain = false
 
     let itemID: String
     /// The correction controls shown under the details; absent where no corrections are wired.
@@ -134,6 +139,8 @@ final class SourceDetailModel: ObservableObject {
     var reminderEditor: ReminderEditModel?
     /// The per-item delete control, when the app assembles one.
     var deletion: ItemDeletionModel?
+    /// Reads the note's sorting and runs a failed one again, when the host provides it.
+    var sortingSource: SourceDetailSortingReading?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -177,6 +184,13 @@ final class SourceDetailModel: ObservableObject {
                 guard generation == loadGeneration else { return }
             }
             adopt(detail, availability: availability)
+            if let sortingSource, detail.lifecycleState != "deleted" {
+                let current = await sortingSource.sorting(itemID: itemID)
+                guard generation == loadGeneration else { return }
+                sorting = audio == .locked ? .none : current
+            } else {
+                sorting = .none
+            }
         } catch {
             guard generation == loadGeneration else { return }
             reject(error)
@@ -196,6 +210,7 @@ final class SourceDetailModel: ObservableObject {
         endAudio()
         content = nil
         audio = .none
+        dropSorting()
         switch error as? ItemDetailError {
         case .some(.notAuthenticated), .some(.relocked): failure = .locked
         case .some(.notFound), .some(.invalidItemID): failure = .notFound
@@ -305,7 +320,24 @@ final class SourceDetailModel: ObservableObject {
         session = nil
     }
 
+    @MainActor private func dropSorting() {
+        sorting = .none
+        tryAgainSummary = nil
+    }
+
+    /// Runs this note's failed sorting again, then reads its sorting once more.
+    @MainActor func tryAgain() async {
+        guard let sortingSource, case .failed = sorting, !isTryingAgain else { return }
+        isTryingAgain = true
+        defer { isTryingAgain = false }
+        let summary = await sortingSource.tryAgain(itemID: itemID)
+        guard content != nil else { return }
+        tryAgainSummary = summary
+        sorting = await sortingSource.sorting(itemID: itemID)
+    }
+
     @MainActor private func dropText() {
+        dropSorting()
         content = nil
         failure = .locked
     }
@@ -399,6 +431,23 @@ final class SourceDetailModel: ObservableObject {
                 }
             })
         model.deletion = .assembled(itemID: itemID, root: root)
+        model.sortingSource = ItemSortingSource(
+            jobs: root.jobConfiguration,
+            processing: { [weak root] itemID in
+                await withCheckedContinuation {
+                    (continuation: CheckedContinuation<(state: String, jobStatus: String?, rerunState: String?)?, Never>) in
+                    guard let root else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    root.itemStatus(itemID: itemID) { result in
+                        let status = try? result.get()
+                        continuation.resume(
+                            returning: status.map { (state: $0.processingState, jobStatus: $0.processingJobStatus, rerunState: $0.rerunState) })
+                    }
+                }
+            },
+            afterQueued: { [weak root] in root?.jobRunner.requestDrain() })
         return model
     }
 }

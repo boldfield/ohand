@@ -48,6 +48,48 @@ final class WalkthroughUITests: XCTestCase {
         try walk(prefix: "\(widthName)-\(appearanceName)")
     }
 
+    /// Status with one failed note, opened through F45's `failed-sorting` fixture (unlocked, one rejected note). The row
+    /// assertion is what makes the picture evidence: a Status screen without the failed note would fail here.
+    func testWalkthroughStatusWithOneFailedNote() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let appearanceName = try XCTUnwrap(
+            environment["WALKTHROUGH_APPEARANCE"], "WALKTHROUGH_APPEARANCE (light or dark) is not set")
+        XCTAssertTrue(["light", "dark"].contains(appearanceName), "unknown appearance \(appearanceName)")
+        expectsDark = appearanceName == "dark"
+        let widthName = UIDevice.current.userInterfaceIdiom == .pad ? "regular" : "compact"
+        // The fixture app must not be running when the full walkthrough launches the real app next.
+        addTeardownBlock { [app] in app.terminate() }
+        XCTAssertTrue(app.launch(fixture: .failedSorting), "the failed-sorting fixture did not reach home")
+        XCTAssertTrue(app.waitForFixtureReady(), "the failed-sorting fixture did not finish seeding")
+        let fixtureCard = app.homeCard(containing: "synthetic rejected quotes")
+        XCTAssertTrue(appears(fixtureCard, timeout: screenTimeout), "home shows no card for the fixture's note")
+        let homeCardCount = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH 'home.recents.card.' AND label CONTAINS %@", "synthetic rejected quotes")
+        ).allElementsBoundByIndex.map(\.identifier).reduce(into: Set<String>()) { $0.insert($1) }.count
+        dismissKeyboard()
+        openFromHome(homeSettings, name: "Settings", shows: settingsHeader)
+        let row = app.buttons.matching(
+            NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "Status", "Status, ")
+        ).firstMatch
+        XCTAssertTrue(appears(row, timeout: screenTimeout), "settings row Status not found")
+        tapWhenHittable(row, step: "settings row Status", elementName: "the Status row")
+        let failedNote = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")).firstMatch
+        XCTAssertTrue(appears(failedNote, timeout: screenTimeout), "Status shows no failed note")
+        capture("\(widthName)-\(appearanceName)", "status failed note")
+        // One row can expose several accessibility elements under its identifier; count the distinct identifiers.
+        let failedNoteIdentifiers = Set(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
+            ).allElementsBoundByIndex.map(\.identifier))
+        let failedNoteLabels = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "status.failed-note.")
+        ).allElementsBoundByIndex.map { "\($0.identifier)=\($0.label)" }
+        XCTAssertEqual(
+            failedNoteIdentifiers.count, 1,
+            "Status shows exactly one failed note: \(failedNoteLabels); home cards for the fixture's note: \(homeCardCount)")
+    }
+
     /// True when the driving script put the simulator in dark appearance. The screenshots are checked against it, so a
     /// run in which the appearance did not take effect fails instead of producing mislabelled pictures.
     private var expectsDark = false
