@@ -499,6 +499,100 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Accessibility audits at the default and the largest accessibility content size on one iPhone simulator. Any audit
+  # issue fails the job; the audit log and the screenshots of both sizes are in the artifact.
+  accessibility:
+    name: Accessibility audits (default and largest text)
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop unneeded host work
+        shell: bash
+        run: ios/scripts/quiet-host.sh
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          # Next bump: Xcode 27 once the hosted image carries it.
+          xcode-version: '26.6'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Select simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios/.evidence
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
+          if python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
+              --max-runtime "${sdk_version}" --family iPhone > ios/.evidence/simulator.txt; then
+            cat ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          fi
+          cat ios/.evidence/simulator.txt
+
+      - name: Generate Xcode project
+        if: steps.simulator.outputs.udid != ''
+        run: cd ios && ./scripts/generate.sh
+
+      # Compile before the simulator is booted, as the walkthrough does.
+      - name: Build accessibility UI tests (no simulator booted yet)
+        if: steps.simulator.outputs.udid != ''
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme OhAndAccessibilityUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived/Accessibility \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/accessibility-build.log
+
+      - name: Stop the build service before the first boot
+        shell: bash
+        run: |
+          pkill -x XCBBuildService || true
+          pkill -x SourceKitService || true
+          vm_stat | head -4
+
+      - name: Accessibility audits
+        if: steps.simulator.outputs.udid != ''
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence
+
+      - name: Show host pressure
+        if: always()
+        shell: bash
+        run: cat ios/.evidence/host-pressure.txt || true
+
+      - name: Upload audit log and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-accessibility
+          path: ios/.evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test
     runs-on: macos-26

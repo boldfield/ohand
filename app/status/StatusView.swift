@@ -158,6 +158,9 @@ struct StatusView: View {
         .onPreferenceChange(StatusRenderedKey.self) { renderReporter?($0) }
         .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0.byIdentifier) }
         .task { await model.refresh() }
+        .onChange(of: model.failedNotes.count) { count in
+            if count > 0 { AccessibilityAnnouncer.announce(count == 1 ? "1 note failed to sort." : "\(count) notes failed to sort.") }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refresh() }
         }
