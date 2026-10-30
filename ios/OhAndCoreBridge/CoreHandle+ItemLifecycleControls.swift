@@ -11,6 +11,7 @@ public struct ItemLifecycleControlCommand: Equatable, Sendable {
         case cancel = "cancel_item"
         case notNow = "not_now"
         case stopSuggesting = "stop_suggesting"
+        case reopen = "reopen"
     }
 
     public let commandID: String
@@ -50,6 +51,9 @@ public struct ItemLifecycleControlCommand: Equatable, Sendable {
 /// - `command_conflict`: the command ID was already used for a different control; nothing changed;
 /// - `item_deleted`: the item is deleted; nothing changed;
 /// - `item_ended`: the item was already completed or cancelled (`lifecycle` says which); nothing changed.
+/// A reopen answers `reopened` (`itemID`, `revision`, `replayed`, and `formerReminderInstant`, the stored instant of the
+/// reminder the ending cancelled, if it had one) or `already_open` (the item was active; nothing changed). Stale,
+/// conflicting and deleted reopens answer as above.
 /// An unknown item is a failure with code `not_found`, not an answer.
 public struct ItemLifecycleControlAnswer: Decodable, Equatable, Sendable {
     public let outcome: String
@@ -58,10 +62,11 @@ public struct ItemLifecycleControlAnswer: Decodable, Equatable, Sendable {
     public let replayed: Bool?
     public let currentRevision: Int?
     public let lifecycle: String?
+    public let formerReminderInstant: String?
 
     public init(
         outcome: String, itemID: String? = nil, revision: Int? = nil, replayed: Bool? = nil,
-        currentRevision: Int? = nil, lifecycle: String? = nil
+        currentRevision: Int? = nil, lifecycle: String? = nil, formerReminderInstant: String? = nil
     ) {
         self.outcome = outcome
         self.itemID = itemID
@@ -69,6 +74,7 @@ public struct ItemLifecycleControlAnswer: Decodable, Equatable, Sendable {
         self.replayed = replayed
         self.currentRevision = currentRevision
         self.lifecycle = lifecycle
+        self.formerReminderInstant = formerReminderInstant
     }
 
     enum CodingKeys: String, CodingKey {
@@ -78,6 +84,7 @@ public struct ItemLifecycleControlAnswer: Decodable, Equatable, Sendable {
         case replayed
         case currentRevision = "current_revision"
         case lifecycle
+        case formerReminderInstant = "former_reminder_instant"
     }
 }
 

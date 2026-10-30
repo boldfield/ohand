@@ -19,6 +19,8 @@ struct SourceDetailView: View {
     static let tryAgainSummaryIdentifier = "source-detail.sorting.summary"
     static let tryAgainLabel = "Try again"
     static let sortingText = "Sorting…"
+    /// The scroll identity of the reminder editor, which Set a reminder again brings into view.
+    static let reminderEditorScrollIdentity = "source-detail.reminder-editor"
 
     static let lockedText = "Your saved items are locked. Go back and open the item again to unlock it."
     static let notFoundText = "This item is not available. It may have been deleted."
@@ -69,35 +71,46 @@ struct SourceDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.sm) {
             if !isInItemPane { header }
-            ScrollView {
-                VStack(alignment: .leading, spacing: DSSpacing.lg) {
-                    if let content = model.content {
-                        detailCard(content)
-                        sortingLine
-                        if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
-                        history(content)
-                        if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
-                    } else if let failure = model.failure {
-                        // Once the person has deleted this item, the deletion result below is the whole answer.
-                        if !deletedHere {
-                            emptyState(
-                                title: Self.title(for: failure), message: Self.text(for: failure),
-                                identifier: Self.identifier(for: failure))
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: DSSpacing.lg) {
+                        if let content = model.content {
+                            detailCard(content)
+                            sortingLine
+                            if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
+                            history(content)
+                            if let reminderEditor = model.reminderEditor {
+                                ReminderEditSection(model: reminderEditor).id(Self.reminderEditorScrollIdentity)
+                            }
+                        } else if let failure = model.failure {
+                            // Once the person has deleted this item, the deletion result below is the whole answer.
+                            if !deletedHere {
+                                emptyState(
+                                    title: Self.title(for: failure), message: Self.text(for: failure),
+                                    identifier: Self.identifier(for: failure))
+                            }
+                        } else {
+                            ProgressView()
+                                .tint(DSColor.accent.color)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, DSSpacing.xl)
+                                .accessibilityLabel("Loading")
+                                .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
                         }
-                    } else {
-                        ProgressView()
-                            .tint(DSColor.accent.color)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, DSSpacing.xl)
-                            .accessibilityLabel("Loading")
-                            .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
+                        if let deletion = model.deletion {
+                            DeletionWatchingSection(
+                                model: deletion, deletedHere: $deletedHere, onRecorded: { Task { await model.load() } })
+                        }
                     }
-                    if let deletion = model.deletion {
-                        DeletionWatchingSection(
-                            model: deletion, deletedHere: $deletedHere, onRecorded: { Task { await model.load() } })
-                    }
+                    .padding(.bottom, DSSpacing.lg)
                 }
-                .padding(.bottom, DSSpacing.lg)
+                // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
+                // waits for the next turn of the main queue, so it stays out of the update that removes the button.
+                .onReceive(
+                    model.itemControls.publisher.flatMap { $0.$reminderAgainIsOpen.dropFirst() }.filter { $0 }
+                ) { _ in
+                    DispatchQueue.main.async { scrollProxy.scrollTo(Self.reminderEditorScrollIdentity, anchor: .top) }
+                }
             }
         }
         .padding(.horizontal, sideMargin)

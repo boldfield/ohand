@@ -22,6 +22,11 @@ struct ItemControlsView: View {
     static let actionsIdentifier = "item-controls.actions"
     static let actionsFooterIdentifier = "item-controls.actions.footer"
     static let endedNoticeIdentifier = "item-controls.ended"
+    static let reopenIdentifier = "item-controls.action.reopen"
+    static let undoIdentifier = "item-controls.action.undo"
+    static let reminderOffIdentifier = "item-controls.reminder-off"
+    static let setReminderAgainIdentifier = "item-controls.action.set-reminder-again"
+    static let reminderOffNotice = "Its reminder was turned off."
     /// Reported as shown while the fields can be edited and as gone while they are disabled.
     static let editableIdentifier = "item-controls.editable"
 
@@ -80,6 +85,8 @@ struct ItemControlsView: View {
             return "This item changed after you opened it, so nothing was done. "
                 + "The newer values are shown; choose again if you still want to."
         case .actionItemEnded(let lifecycle): return Self.endedNotice(lifecycle) + " Nothing was changed."
+        case .actionDone(.reopen): return "Reopened."
+        case .actionAlreadyOpen: return "This item is already open. Nothing was changed."
         case .actionFailed: return "That could not be done right now. Try again."
         }
     }
@@ -127,6 +134,15 @@ struct ItemControlsView: View {
                     .foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
                     .rendered(Self.outcomeIdentifier, renderReporter)
+            }
+            if model.canUndo {
+                Button("Undo") { Task { await model.reopen() } }
+                    .buttonStyle(DSPillButtonStyle(style: .secondary))
+                    .accessibilityIdentifier(Self.undoIdentifier)
+                    .rendered(Self.undoIdentifier, renderReporter)
+            }
+            if model.reminderAgainPrompt != nil, model.refreshFailure != .locked {
+                reminderAgainControl
             }
             if let failure = model.refreshFailure {
                 Text(Self.message(for: failure))
@@ -187,6 +203,21 @@ struct ItemControlsView: View {
         }
     }
 
+    @ViewBuilder private var reminderAgainControl: some View {
+        Text(Self.reminderOffNotice)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
+            .fixedSize(horizontal: false, vertical: true)
+            .rendered(Self.reminderOffIdentifier, renderReporter)
+        // The editor itself is the host screen's; these controls only prepare it.
+        if model.canSetReminderAgain {
+            Button("Set a reminder again") { Task { await model.setReminderAgain() } }
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .accessibilityIdentifier(Self.setReminderAgainIdentifier)
+                .rendered(Self.setReminderAgainIdentifier, renderReporter)
+        }
+    }
+
     @ViewBuilder private var actionsControl: some View {
         if let snapshot = model.snapshot, snapshot.lifecycleState != "active", snapshot.lifecycleState != "deleted" {
             Text(Self.endedNotice(snapshot.lifecycleState))
@@ -198,18 +229,26 @@ struct ItemControlsView: View {
             Text("Finish or quiet")
                 .font(DSFont.groupHeading)
                 .foregroundColor(DSColor.inkMuted.color)
-            Button("Complete") { Task { await model.complete() } }
-                .buttonStyle(DSPillButtonStyle(style: .secondary))
-                .disabled(!model.canAct)
-                .accessibilityIdentifier(Self.completeIdentifier)
-            Button("Cancel item") { Task { await model.cancel() } }
-                .buttonStyle(DSPillButtonStyle(style: .secondary))
-                .disabled(!model.canAct)
-                .accessibilityIdentifier(Self.cancelIdentifier)
-            Text(Self.completeCancelExplanation)
-                .font(DSFont.footer)
-                .foregroundColor(DSColor.inkMuted.color)
-                .fixedSize(horizontal: false, vertical: true)
+            if model.isClosed {
+                Button("Reopen") { Task { await model.reopen() } }
+                    .buttonStyle(DSPillButtonStyle(style: .secondary))
+                    .disabled(!model.canReopen)
+                    .accessibilityIdentifier(Self.reopenIdentifier)
+                    .rendered(Self.reopenIdentifier, renderReporter)
+            } else {
+                Button("Complete") { Task { await model.complete() } }
+                    .buttonStyle(DSPillButtonStyle(style: .secondary))
+                    .disabled(!model.canAct)
+                    .accessibilityIdentifier(Self.completeIdentifier)
+                Button("Cancel item") { Task { await model.cancel() } }
+                    .buttonStyle(DSPillButtonStyle(style: .secondary))
+                    .disabled(!model.canAct)
+                    .accessibilityIdentifier(Self.cancelIdentifier)
+                Text(Self.completeCancelExplanation)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button("Not now") { Task { await model.notNow() } }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
                 .disabled(!model.canQuietSuggestions)

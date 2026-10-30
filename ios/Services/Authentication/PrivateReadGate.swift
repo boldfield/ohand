@@ -117,6 +117,8 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
     public let matchSpan: CoreRetrievalMatchSpan?
     /// The capture instant as stored (RFC 3339).
     public let capturedAt: String
+    /// `active`, `completed` or `cancelled`; `nil` when the core did not send it.
+    public let lifecycleState: String?
 
     enum CodingKeys: String, CodingKey {
         case itemID = "item_id"
@@ -129,6 +131,7 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
         case matched
         case matchSpan = "match_span"
         case capturedAt = "captured_at"
+        case lifecycleState = "lifecycle_state"
     }
 }
 

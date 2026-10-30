@@ -262,4 +262,45 @@ final class RetrievalModelsTests: XCTestCase {
         XCTAssertNil(try hit("").lifecycleState)
         XCTAssertNil(try hit(#""lifecycle_state": null,"#).lifecycleState)
     }
+
+    // MARK: open by default
+
+    func testEverySearchNamesOnlyOpenItemsUnlessDoneIsIncluded() {
+        XCTAssertEqual(RetrievalSearchRequest(query: "roofer").privateFilters(calendar: calendar).lifecycleStates, ["active"])
+        let dated = RetrievalSearchRequest(since: day(2026, 10, 1), until: day(2026, 10, 8))
+        XCTAssertEqual(dated.privateFilters(calendar: calendar).lifecycleStates, ["active"], "date-bounded")
+        let topical = RetrievalSearchRequest(sessionTopic: "garage", onlyWithSessionTopic: true)
+        XCTAssertEqual(topical.privateFilters(calendar: calendar).lifecycleStates, ["active"], "topic")
+        let included = RetrievalSearchRequest(query: "roofer", includeDone: true)
+        XCTAssertEqual(included.privateFilters(calendar: calendar).lifecycleStates, ["active", "completed", "cancelled"])
+    }
+
+    func testTheClosedCountQueryAsksForCompletedAndCancelledWithALimitOfOne() {
+        let counting = RetrievalSearchRequest(query: "roofer", closedOnly: true)
+        let filters = counting.privateFilters(calendar: calendar)
+        XCTAssertEqual(filters.lifecycleStates, ["completed", "cancelled"])
+        XCTAssertEqual(filters.limit, 1)
+    }
+
+    func testIncludingDoneIsNotACriterionOnItsOwn() {
+        XCTAssertFalse(RetrievalSearchRequest(includeDone: true).hasCriteria)
+    }
+
+    func testRowsCarryTheirLifecycleAndMarkClosedOnes() throws {
+        func page(_ field: String) throws -> RetrievalPage {
+            let json = """
+                {"total_accessible": 1, "hits": [{"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "personal",
+                \(field) "text": "t", "text_basis": "original", "original_text": null, "matched": "current",
+                "match_span": null, "captured_at": "2026-10-08T12:30:00Z"}]}
+                """
+            return try RetrievalPage.make(from: try answer(json), for: RetrievalSearchRequest(query: "t"))
+        }
+        XCTAssertNil(try page(#""lifecycle_state": "active","#).rows[0].lifecycle?.markerText)
+        XCTAssertEqual(try page(#""lifecycle_state": "completed","#).rows[0].lifecycle?.markerText, "Done")
+        XCTAssertEqual(try page(#""lifecycle_state": "cancelled","#).rows[0].lifecycle?.markerText, "Cancelled")
+        XCTAssertNil(try page("").rows[0].lifecycle)
+        XCTAssertThrowsError(try page(#""lifecycle_state": "mystery","#)) {
+            XCTAssertEqual($0 as? RetrievalSearchFailure, .unreadable)
+        }
+    }
 }

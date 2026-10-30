@@ -17,6 +17,15 @@ private final class ScriptedViewSearcher: RetrievalSearching {
         completions.append(completion)
     }
 
+    private(set) var countRequests: [RetrievalSearchRequest] = []
+    /// What the count-only query reports for closed matches.
+    var closedCount = 0
+
+    func countClosedMatches(for request: RetrievalSearchRequest, completion: @escaping (Int) -> Void) {
+        countRequests.append(request)
+        completion(closedCount)
+    }
+
     func answerLatest(_ result: Result<RetrievalPage, RetrievalSearchFailure>) {
         completions[completions.count - 1](result)
     }
@@ -83,12 +92,20 @@ final class RetrievalSearchViewTests: XCTestCase {
 
     private func row(
         _ itemID: String, text: String, itemType: RetrievalItemType?, basis: CoreRetrievalTextBasis = .original,
-        originalText: String? = nil, scopeName: String = "Personal"
+        originalText: String? = nil, scopeName: String = "Personal", lifecycle: RetrievalLifecycle? = nil
     ) -> RetrievalResultRow {
         RetrievalResultRow(
             reference: RetrievalItemReference(candidate: itemID)!, text: text, originalText: originalText, basis: basis,
             matched: .current, snippet: RetrievalSnippet(text: text, span: nil), scopeName: scopeName,
-            capturedAt: Date(timeIntervalSince1970: 1_791_462_600), itemType: itemType)
+            capturedAt: Date(timeIntervalSince1970: 1_791_462_600), itemType: itemType, lifecycle: lifecycle)
+    }
+
+    private func forEachAppearance(_ body: (String) -> Void) {
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            retainedWindow?.overrideUserInterfaceStyle = style
+            settle()
+            body(name)
+        }
     }
 
     private func runSearch(answering result: Result<RetrievalPage, RetrievalSearchFailure>) {
@@ -417,5 +434,74 @@ final class RetrievalSearchViewTests: XCTestCase {
         XCTAssertEqual(renderedText(RetrievalSearchView.onlyWithTopicIdentifier), "Only items with a session topic: on")
         XCTAssertEqual(
             renderedText(RetrievalSearchView.topicChipIdentifier), "synthetic garden", "the topic chip shows the topic")
+    }
+
+    // MARK: Include done
+
+    func testTheDefaultSearchAsksForOpenItemsAndTheChipIsOff() {
+        forEachAppearance { appearance in
+            XCTAssertEqual(renderedText(RetrievalSearchView.includeDoneChipIdentifier), "Include done: off", appearance)
+        }
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 0, rows: [], offset: 0)))
+        XCTAssertEqual(searcher.requests.last?.lifecycleStates, ["active"])
+    }
+
+    func testTheToggleSearchesAgainWithClosedItemsIncluded() {
+        let open = row(Self.firstID, text: "synthetic open words", itemType: .idea)
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 1, rows: [open], offset: 0)))
+        model.setIncludeDone(true)
+        let closed = row(Self.secondID, text: "synthetic closed words", itemType: .idea, lifecycle: .completed)
+        searcher.answerLatest(.success(RetrievalPage(totalAccessible: 2, rows: [open, closed], offset: 0)))
+        settle(until: "the closed row is drawn and the chip is on") {
+            self.rendered[RetrievalSearchView.rowIdentifier(closed)] != nil
+                && self.renderedText(RetrievalSearchView.includeDoneChipIdentifier) == "Include done: on"
+        }
+        XCTAssertEqual(searcher.requests.last?.lifecycleStates, ["active", "completed", "cancelled"])
+        forEachAppearance { appearance in
+            XCTAssertNotNil(rendered[RetrievalSearchView.rowIdentifier(closed)], appearance)
+            XCTAssertEqual(renderedText(RetrievalSearchView.includeDoneChipIdentifier), "Include done: on", appearance)
+        }
+    }
+
+    func testClosedRowsShowDoneAndCancelledMarkersInTheirOwnWords() {
+        let done = row(Self.firstID, text: "synthetic finished words", itemType: .action, lifecycle: .completed)
+        let dropped = row(Self.secondID, text: "synthetic dropped words", itemType: .action, lifecycle: .cancelled)
+        let open = row("2b6c1f3e-5d4a-4b8e-9c1d-2a3b4c5d6e7f", text: "synthetic open words", itemType: .action, lifecycle: .active)
+        model.setIncludeDone(true)
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 3, rows: [done, dropped, open], offset: 0)))
+        forEachAppearance { appearance in
+            XCTAssertEqual(renderedText(RetrievalSearchView.rowMarkerIdentifier(done)), "Done", appearance)
+            XCTAssertEqual(renderedText(RetrievalSearchView.rowMarkerIdentifier(dropped)), "Cancelled", appearance)
+            XCTAssertNil(rendered[RetrievalSearchView.rowMarkerIdentifier(open)], "an open row has no marker")
+        }
+    }
+
+    func testEmptyStateWithDoneOffOffersTheCountedHintAndWithDoneOnSaysNothingClosedMatched() {
+        searcher.closedCount = 2
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 0, rows: [], offset: 0)))
+        settle(until: "the hint is drawn") { self.rendered[RetrievalSearchView.closedHintIdentifier] != nil }
+        forEachAppearance { appearance in
+            XCTAssertEqual(renderedText(RetrievalSearchView.emptyIdentifier), RetrievalSearchView.emptyText, appearance)
+            XCTAssertEqual(renderedText(RetrievalSearchView.closedHintIdentifier), "2 done items also match.", appearance)
+            XCTAssertNotNil(rendered[RetrievalSearchView.closedHintActionIdentifier], appearance)
+        }
+        XCTAssertEqual(searcher.countRequests.last?.query, "synthetic")
+
+        model.setIncludeDone(true)
+        searcher.answerLatest(.success(RetrievalPage(totalAccessible: 0, rows: [], offset: 0)))
+        settle(until: "the empty copy for included done is drawn") {
+            self.renderedText(RetrievalSearchView.emptyIdentifier) == RetrievalSearchView.emptyIncludingDoneText
+        }
+        forEachAppearance { appearance in
+            XCTAssertEqual(
+                renderedText(RetrievalSearchView.emptyIdentifier), RetrievalSearchView.emptyIncludingDoneText, appearance)
+            XCTAssertNil(rendered[RetrievalSearchView.closedHintIdentifier], "no hint while done is included")
+        }
+    }
+
+    func testTheHintIsOneLineWithTheCountAndIsAbsentWhenNothingClosedMatches() {
+        XCTAssertEqual(RetrievalSearchView.closedHintText(count: 1), "1 done item also matches.")
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 0, rows: [], offset: 0)))
+        XCTAssertNil(rendered[RetrievalSearchView.closedHintIdentifier])
     }
 }

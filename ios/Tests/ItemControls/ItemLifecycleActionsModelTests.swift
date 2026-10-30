@@ -36,6 +36,16 @@ private final class RecordingActions: ItemControlsLifecycleActing, @unchecked Se
     func stopSuggesting(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemLifecycleControlReceipt {
         try next("stop", commandID, expectedRevision)
     }
+    var reopenResults: [Result<ItemReopenResult, ItemLifecycleControlError>] = []
+    func reopen(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemReopenResult {
+        calls.append("reopen:\(commandID):\(expectedRevision)")
+        if reopenResults.isEmpty {
+            return .reopened(
+                ItemReopenReceipt(
+                    itemID: itemID, revision: expectedRevision + 1, replayed: false, formerReminderInstant: nil))
+        }
+        return try reopenResults.removeFirst().get()
+    }
 }
 
 @MainActor

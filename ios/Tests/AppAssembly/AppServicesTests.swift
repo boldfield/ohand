@@ -411,6 +411,51 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(started, [false])
     }
 
+    /// Building the services turns the main run loop, so the scene can ask for a launch before the build returns. That
+    /// request must join the build: a second build and start would save a second copy of whatever a start seeds.
+    func testALaunchRequestedWhileTheServicesAreBuildingJoinsTheBuild() throws {
+        var started: [Bool] = []
+        var builds = 0
+        var launcher: AppLauncher!
+        launcher = AppLauncher(
+            makeServices: { [unowned self] in
+                builds += 1
+                launcher.launch()
+                launcher.sceneWillEnterForeground()
+                return try self.makeServices()
+            },
+            startServices: { _, isActive in started.append(isActive) },
+            isApplicationActive: { false })
+
+        launcher.launch()
+
+        XCTAssertNotNil(launcher.services)
+        XCTAssertEqual(builds, 1)
+        XCTAssertEqual(started, [false])
+    }
+
+    /// A cold launch from the shortcut URL connects the scene while the build runs; the URL must reach the built services.
+    func testAURLReceivedWhileTheServicesAreBuildingReachesTheBuiltServices() throws {
+        var builds = 0
+        var launcher: AppLauncher!
+        launcher = AppLauncher(
+            makeServices: { [unowned self] in
+                builds += 1
+                launcher.launch()
+                launcher.receive(url: URL(string: "ohand-capture://capture?mode=voice")!)
+                return try self.makeServices()
+            },
+            startServices: { _, _ in },
+            isApplicationActive: { true })
+
+        launcher.launch()
+
+        let services = try XCTUnwrap(launcher.services)
+        XCTAssertEqual(builds, 1)
+        XCTAssertEqual(services.captureEntry.mode, .voice)
+        XCTAssertEqual(services.captureEntry.presentation?.source, .shortcutURL)
+    }
+
     func testAFailureToBuildLeavesNoServicesAndALaterRetrySucceeds() throws {
         struct Unavailable: Error {}
         var attempts = 0

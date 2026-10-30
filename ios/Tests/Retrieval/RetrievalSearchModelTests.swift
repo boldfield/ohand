@@ -18,6 +18,19 @@ private final class FakeRetrievalSearcher: RetrievalSearching {
     func answer(at index: Int, _ result: Result<RetrievalPage, RetrievalSearchFailure>) {
         completions[index](result)
     }
+
+    /// Closed-match counts are asked for apart from searches; a test answers them when it wants the hint.
+    private(set) var countRequests: [RetrievalSearchRequest] = []
+    private var countCompletions: [(Int) -> Void] = []
+
+    func countClosedMatches(for request: RetrievalSearchRequest, completion: @escaping (Int) -> Void) {
+        countRequests.append(request)
+        countCompletions.append(completion)
+    }
+
+    func answerCount(at index: Int, _ count: Int) {
+        countCompletions[index](count)
+    }
 }
 
 final class RetrievalSearchModelTests: XCTestCase {
@@ -536,5 +549,58 @@ final class RetrievalSearchModelTests: XCTestCase {
         model.presentsItemsInPane = false
         XCTAssertNil(model.selectedReference, "losing the pane, at compact width, drops the selection")
         XCTAssertTrue(selected.isEmpty)
+    }
+
+    // MARK: Include done
+
+    func testSearchesAskForOpenItemsOnlyAndDoneIsOffAtLaunch() {
+        XCTAssertFalse(model.includeDone)
+        model.query = "roofer"
+        model.search()
+        XCTAssertFalse(searcher.requests[0].includeDone)
+        XCTAssertEqual(searcher.requests[0].lifecycleStates, ["active"])
+    }
+
+    func testTurningDoneOnRunsTheShownSearchAgainWithClosedItemsIncluded() {
+        showResults([row(Self.firstID)])
+        model.setIncludeDone(true)
+        XCTAssertEqual(searcher.requests.count, 2)
+        XCTAssertTrue(searcher.requests[1].includeDone)
+        XCTAssertEqual(searcher.requests[1].query, "roofer")
+        XCTAssertEqual(searcher.requests[1].lifecycleStates, ["active", "completed", "cancelled"])
+    }
+
+    func testTurningDoneOnBeforeAnySearchRunsNothing() {
+        model.setIncludeDone(true)
+        XCTAssertTrue(searcher.requests.isEmpty)
+        XCTAssertTrue(model.includeDone)
+    }
+
+    func testClosedMatchesAreCountedOnlyWhileDoneIsOff() {
+        showResults([row(Self.firstID)])
+        XCTAssertEqual(searcher.countRequests.count, 1)
+        XCTAssertTrue(searcher.countRequests[0].query == "roofer")
+        searcher.answerCount(at: 0, 3)
+        settle()
+        XCTAssertEqual(model.closedMatchCount, 3)
+
+        model.setIncludeDone(true)
+        XCTAssertEqual(model.closedMatchCount, 0)
+        deliver(.success(page([row(Self.firstID)])), at: searcher.requests.count - 1)
+        XCTAssertEqual(searcher.countRequests.count, 1, "no count is asked for while closed items are included")
+    }
+
+    func testACountThatArrivesAfterANewSearchIsIgnored() {
+        showResults([row(Self.firstID)])
+        model.search()
+        searcher.answerCount(at: 0, 5)
+        settle()
+        XCTAssertEqual(model.closedMatchCount, 0)
+    }
+
+    func testClearingTurnsDoneOffAgain() {
+        model.setIncludeDone(true)
+        model.clear()
+        XCTAssertFalse(model.includeDone)
     }
 }

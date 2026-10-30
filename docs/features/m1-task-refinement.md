@@ -4539,6 +4539,11 @@ Acceptance:
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
+**Ownership amendment (coordinator, 2026-10-28, after PR #380 round 1).** The worker reported the missing seam correctly. Two changes; nothing else changes:
+
+1. **Owned path.** F57 also owns `core/src/domain/items/mod.rs`, only to add a `"reopen"` arm to the lifecycle replay in `rebuild_state_from_events` (around line 616) that sets `LifecycleState::Active`, plus tests. Without it, complete→reopen rebuilds as `completed` and `verify_state_integrity` reports a mismatch. Tests: `verify_state_integrity` passes after complete→reopen, cancel→reopen and complete→reopen→complete. No other edit to that file.
+2. **The replayed instant is fixed at the first reopen.** This states what acceptance 1 (idempotent by command ID) and 3 (the instant is read from the stored reminder) already require together. A retried `reopen` with the same command ID returns exactly the response the first one returned, including the former instant. That holds even after the person has used "Set a reminder again" and the reminder row now carries a new instant or state. Record the instant when the reopen is applied, in the reopen event's payload or the command journal, and replay from that record. Do not rebuild it from the current reminders row. Add a test: reopen, set a new reminder, retry the same reopen command, and get the original instant.
+
 ### F58
 
 Home and search show only open items unless closed ones are asked for
@@ -4579,6 +4584,12 @@ Acceptance:
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
+**Ownership amendment (coordinator, 2026-10-29, after PR #385).** The worker reported the seam correctly. The source detail screen already draws its own reminder editor (`SourceDetailView.swift`, around line 70, from `SourceDetailModel.reminderEditor`), so "Set a reminder again" must reuse that editor, not draw a second one. The only place the two models meet is `SourceDetailModel.assembled` (`app/source-detail/SourceDetailModel.swift`, around line 388). F59 also owns that function, only to build `reminderEditor` first and pass it to `ItemControlsModel.assembled` (for example as a `reminderEditor:` parameter). No other edit to that file.
+
+"Set a reminder again" sets that editor's draft to the former instant when it is still in the future, and brings the editor into view. Item controls draw no editor of their own. Add an integration test in `ios/Tests/ItemControls/` that builds a `SourceDetailModel`, then runs reopen → Set a reminder again → save, and finds exactly one reminder editor and one scheduled reminder. F44 also edits `SourceDetailModel.swift`, next to `assembled`, so F44 now waits for F59.
+
+**Second ownership amendment (coordinator, 2026-10-29, after PR #387 head 8ab4425).** The worker reported the seam correctly. Bringing the editor into view needs a `ScrollViewReader` that encloses the screen's `ScrollView` and a scroll identity on the drawn `ReminderEditSection`; both are in `app/source-detail/SourceDetailView.swift` (the `ScrollView` around line 66, the section around line 72), and a `ScrollViewReader` inside the content cannot scroll the `ScrollView` that contains it. F59 also owns that file, only for three edits: wrap that `ScrollView` in a `ScrollViewReader`, give the `ReminderEditSection` an `.id`, and scroll to it when `ItemControlsModel.reminderAgainIsOpen` becomes true. No other change to that file. Hosted view tests cannot observe the scroll offset, so the integration test asserts the signal and the single prepared editor, as PR #387 already does; no walkthrough step is added for the scroll. F44's PR #383 also edits `SourceDetailView.swift` and already waits for F59, so it rebases over this change.
+
 ### F60
 
 Search shows open items by default, with "Include done"
@@ -4595,5 +4606,38 @@ Acceptance:
 2. **An explicit "Include done" control** beside the existing filters. When on, it passes `active`, `completed` and `cancelled`. It is off at every launch and is not persisted. When it is on, the empty-results copy says nothing closed was found. When it is off and the core reports closed matches, say so in one line: "N done items also match. Include done". That needs a second count-only query. If that query costs more than a bounded `limit` of 1, use a plain hint instead.
 3. **Closed rows are marked.** With "Include done" on, completed rows show a checkmark and "Done", and cancelled rows show "Cancelled", in muted text. The marker is part of the accessibility label.
 4. **Hosted view tests** cover the default, the toggle, the markers, and both empty states, in both appearances. Exact-head macOS CI evidence is required.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+**Ownership amendment (coordinator, 2026-10-28, after the first claim blocked).** The worker was right. The search screen decodes `PrivateRetrievalHit` (`ios/Services/Authentication/PrivateReadGate.swift`, around line 104), not `CoreRetrievalHit`. F58 added `lifecycle_state` only to `CoreRetrievalHit`, so rows cannot be marked. F60 also owns, only for this seam:
+- `ios/Services/Authentication/PrivateReadGate.swift`, to add `lifecycleState: String?` to `PrivateRetrievalHit`, decoded from `lifecycle_state`, with absence decoding as nil, the same as F58's `CoreRetrievalHit`. No other edit to that file; the request side already forwards `lifecycleStates`.
+- `ios/Tests/Authentication/PrivateReadCoreIntegrationTests.swift`, to add decoding cases for a hit with each lifecycle value and with the field absent.
+
+F60's acceptance is unchanged.
+
+### F61
+
+Find and fix the duplicate note in a running fixture launch
+
+Found by F44 on 2026-10-29. In a running app, the F45 `failed-sorting` fixture shows two items with the same text ("Compare the synthetic rejected quotes for the shed roof"): different item IDs, the same capture minute, two Home cards and two Status rows. The seeder saves that note once, through `ServiceCompositionRoot.saveText` with one fresh capture ID (`ios/AppAssembly/UITestFixtures/UITestFixtureServices.swift`). Core import converges on the capture ID, so a second capture ID is being saved somewhere. `StatusProductionWiringTests` seeds the same fixture with no scene and sees one item, so the extra one comes from the scene or launch path, or from ingress. Evidence: the F44 walkthrough on PR #383 (head 41adbce), run 40807161089, and the earlier run 40794470393. F44's walkthrough assertion of exactly one failed note is correct and stays.
+
+It matters beyond tests: if a real capture can be saved twice, the maintainer sees duplicates in the trial.
+
+Owned paths:
+- `ios/AppAssembly/UITestFixtures/` and `ios/UITests/Fixtures/`;
+- if the cause is in product code, only the code on the duplicating path: `ios/Services/Ingress/`, the save and import path of `ios/Services/Assembly/CompositionRoot.swift`, the launch path of `ios/AppAssembly/AppDelegate.swift`, `SceneDelegate.swift` and `AppLauncher` in `AppServices.swift`, and the capture-entry handoff those call. Name every product file touched and why in the PR;
+- tests beside each of those, in `ios/Tests/`.
+
+Dependencies: none. F44 now waits for F61.
+
+Acceptance:
+
+1. **Root cause, with evidence.** The PR names the path that saves the second capture and shows it, for example with a log or test that records both capture IDs and where each came from. Synthetic data only.
+2. **Fixed where it happens.**
+   - If a real capture can be saved twice, fix the product code. Add a test that reproduces the duplicate without the UI-test fixture and passes after the fix.
+   - If only the fixture can do it, fix the fixture, and say in the PR why production cannot reach that path.
+   - Never hide the duplicate: no de-duplication on display, in a read, or in a test assertion.
+3. **A regression UI test** in `ios/UITests/Fixtures/`. Once the `failed-sorting` and `populated` fixtures report ready, each seeded note's text appears on exactly one Home card, counted by distinct card identifier.
+4. **Exact-head macOS CI evidence**, with the `simulator` and both `walkthrough` jobs green.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
