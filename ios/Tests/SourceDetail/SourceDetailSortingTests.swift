@@ -23,9 +23,16 @@ private final class NoAudio: SourceAudioOpening, @unchecked Sendable {
 private final class ScriptedSorting: SourceDetailSortingReading, @unchecked Sendable {
     var states: [SourceDetailSorting]
     var summary: FailedNotesRerunSummary = .done(queued: 1, needsSetting: 0)
+    var notSortedOutcome: SourceDetailAbstainedRerun = .queued
     private(set) var tryAgainCalls = 0
+    private(set) var notSortedCalls = 0
 
     init(_ states: [SourceDetailSorting]) { self.states = states }
+
+    func tryAgainNotSorted(itemID: String) async -> SourceDetailAbstainedRerun {
+        notSortedCalls += 1
+        return notSortedOutcome
+    }
 
     func sorting(itemID: String) async -> SourceDetailSorting {
         states.count > 1 ? states.removeFirst() : (states.first ?? .none)
@@ -35,6 +42,12 @@ private final class ScriptedSorting: SourceDetailSortingReading, @unchecked Send
         tryAgainCalls += 1
         return summary
     }
+}
+
+private final class NoCorrections: ItemControlsCorrecting, @unchecked Sendable {
+    func correctText(commandID: String, itemID: String, expectedRevision: Int, text: String) async throws -> ItemCorrectionReceipt { fatalError() }
+    func correctType(commandID: String, itemID: String, expectedRevision: Int, itemType: ItemCorrectionItemType) async throws -> ItemCorrectionReceipt { fatalError() }
+    func correctSessionTopic(commandID: String, itemID: String, expectedRevision: Int, sessionTopic: String) async throws -> ItemCorrectionReceipt { fatalError() }
 }
 
 private final class ScriptedJobs: FailedInterpretationsControlling, @unchecked Sendable {
@@ -79,8 +92,8 @@ private final class FakeCore: FailedInterpretationsControlling, @unchecked Senda
     /// The replacement job was claimed, or ended without failing.
     func setRerunState(_ state: String?, itemID: String) { rerunStates[itemID] = state }
 
-    func status(itemID: String) -> (state: String, jobStatus: String?, rerunState: String?)? {
-        (state: "uninterpreted", jobStatus: nil, rerunState: rerunStates[itemID])
+    func status(itemID: String) -> (state: String, jobStatus: String?, rerunState: String?, abstentionReason: String?)? {
+        (state: "uninterpreted", jobStatus: nil, rerunState: rerunStates[itemID], abstentionReason: nil)
     }
 }
 
@@ -126,9 +139,12 @@ final class SourceDetailSortingTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    private func makeModel(_ sorting: SourceDetailSortingReading?) -> SourceDetailModel {
+    private func makeModel(_ sorting: SourceDetailSortingReading?, withControls: Bool = true) -> SourceDetailModel {
         let model = SourceDetailModel(itemID: Self.itemID, reader: OneItemReader(), opener: NoAudio())
         model.sortingSource = sorting
+        if withControls {
+            model.itemControls = ItemControlsModel(itemID: Self.itemID, reader: OneItemReader(), corrector: NoCorrections())
+        }
         return model
     }
 
@@ -276,7 +292,7 @@ final class SourceDetailSortingTests: XCTestCase {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
         func state(_ rerun: String) async -> SourceDetailSorting {
             await ItemSortingSource(
-                jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: rerun) }, afterQueued: {}
+                jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: rerun, abstentionReason: nil) }, afterQueued: {}
             ).sorting(itemID: Self.itemID)
         }
         for rerun in ["queued", "running", "retrying_after_transient", "awaiting_configuration"] {
@@ -304,7 +320,7 @@ final class SourceDetailSortingTests: XCTestCase {
 
     func testAnUninterpretedNoteThatWasNeverRunAgainShowsNothing() async {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
-        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil, rerunState: nil) }, afterQueued: {})
+        let source = ItemSortingSource(jobs: jobs, processing: { _ in (state: "uninterpreted", jobStatus: nil, rerunState: nil, abstentionReason: nil) }, afterQueued: {})
         let state = await source.sorting(itemID: Self.itemID)
         XCTAssertEqual(state, .none)
     }
@@ -347,7 +363,7 @@ final class SourceDetailSortingTests: XCTestCase {
     func testTheSourceSaysSortingOnlyForWorkInProgress() async {
         let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
         func state(_ processing: String, _ job: String?) async -> SourceDetailSorting {
-            await ItemSortingSource(jobs: jobs, processing: { _ in (state: processing, jobStatus: job, rerunState: nil) }, afterQueued: {})
+            await ItemSortingSource(jobs: jobs, processing: { _ in (state: processing, jobStatus: job, rerunState: nil, abstentionReason: nil) }, afterQueued: {})
                 .sorting(itemID: Self.itemID)
         }
         let inProgress = await state("processing", nil)
@@ -370,5 +386,189 @@ final class SourceDetailSortingTests: XCTestCase {
 
         XCTAssertEqual(model.tryAgainSummary?.text, "1 note can't run until a setting changes.")
         XCTAssertEqual(model.sorting, .failed(reason: "No provider was allowed when it was saved"))
+    }
+
+    // MARK: declined notes
+
+    private static let notSortedCopy: [(label: String?, text: String)] = [
+        ("uncertain_target", "Not sorted: it wasn't clear what this note is about"),
+        ("negated", "Not sorted: the note says not to do something"),
+        ("ambiguous", "Not sorted: it was too unclear to sort"),
+        ("unsupported_operation", "Not sorted: changing an existing note this way isn't supported yet"),
+        ("other", "Not sorted: it couldn't tell how to sort this"),
+        (nil, "Not sorted: it couldn't tell how to sort this"),
+    ]
+
+    func testEachAbstentionLabelHasItsFixedLineWithTryAgainAndSetTypeInBothAppearances() {
+        for (label, text) in Self.notSortedCopy {
+            XCTAssertEqual(SourceDetailSorting.notSortedText(label: label), text)
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let model = makeModel(ScriptedSorting([.notSorted(label: label)]))
+                host(model, style: style)
+                wait("the not sorted line is shown for \(label ?? "nil"), \(style.rawValue)") {
+                    self.shown.contains(SourceDetailView.notSortedIdentifier)
+                        && self.shown.contains(SourceDetailView.notSortedTryAgainIdentifier)
+                        && self.shown.contains(SourceDetailView.notSortedSetTypeIdentifier)
+                }
+                XCTAssertFalse(shown.contains(SourceDetailView.sortingFailedIdentifier))
+                XCTAssertFalse(shown.contains(SourceDetailView.sortingIdentifier))
+            }
+        }
+    }
+
+    func testSetTheTypeYourselfIsOfferedOnlyWhereTheCorrectionControlsExist() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]), withControls: false)
+            XCTAssertFalse(model.canSetTypeYourself)
+            host(model, style: style)
+            wait("the line is shown without controls, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.notSortedIdentifier)
+            }
+            XCTAssertFalse(shown.contains(SourceDetailView.notSortedSetTypeIdentifier))
+            XCTAssertFalse(shown.contains(ItemControlsView.sectionIdentifier))
+        }
+    }
+
+    func testSetTheTypeYourselfBringsTheExistingCorrectionControlsIntoPlay() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]))
+            host(model, style: style)
+            wait("the line and the controls are shown, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.notSortedSetTypeIdentifier)
+                    && self.shown.contains(ItemControlsView.sectionIdentifier)
+            }
+            XCTAssertEqual(model.setTypeRequests, 0)
+            model.setTypeYourself()
+            XCTAssertEqual(model.setTypeRequests, 1)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            XCTAssertTrue(shown.contains(ItemControlsView.sectionIdentifier), "\(style.rawValue)")
+        }
+    }
+
+    func testTheNeedsProviderNoticeClearsOnTryAgainAndOnARead() async {
+        let sorting = ScriptedSorting([.notSorted(label: "negated")])
+        sorting.notSortedOutcome = .needsProvider
+        let model = makeModel(sorting)
+        await model.load()
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .needsProvider)
+        await model.load()
+        XCTAssertNil(model.notSortedRerun, "a fresh read supersedes the old answer")
+        await model.tryAgainNotSorted()
+        sorting.notSortedOutcome = .queued
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .queued)
+    }
+
+    func testARerunThatCouldNotRunSaysSo() async {
+        let sorting = ScriptedSorting([.notSorted(label: "negated")])
+        sorting.notSortedOutcome = .notRun
+        let model = makeModel(sorting)
+        await model.load()
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.notSortedRerun, .notRun)
+        host(model, style: .light)
+        wait("the could not try again line is shown") { self.shown.contains(SourceDetailView.notSortedNoticeIdentifier) }
+        XCTAssertEqual(SourceDetailView.couldNotTryAgainText, "Couldn't try again. Try once more in a moment")
+    }
+
+    func testAnUnknownLabelGetsTheGenericLineAndNeverEchoesTheLabel() {
+        XCTAssertEqual(
+            SourceDetailSorting.notSortedText(label: "free text from a model"),
+            "Not sorted: it couldn't tell how to sort this")
+    }
+
+    func testProcessedAndFailedNotesShowNoNotSortedLine() {
+        for state in [SourceDetailSorting.none, .failed(reason: "The request was not accepted")] {
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                host(makeModel(ScriptedSorting([state])), style: style)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+                XCTAssertFalse(shown.contains(SourceDetailView.notSortedIdentifier), "\(state), \(style.rawValue)")
+                XCTAssertFalse(shown.contains(SourceDetailView.notSortedTryAgainIdentifier))
+            }
+        }
+    }
+
+    func testTryAgainOnADeclinedNoteQueuesAndTheScreenSaysSorting() async {
+        let sorting = ScriptedSorting([.notSorted(label: "ambiguous"), .sorting])
+        let model = makeModel(sorting)
+        await model.load()
+
+        await model.tryAgainNotSorted()
+
+        XCTAssertEqual(sorting.notSortedCalls, 1)
+        XCTAssertEqual(model.notSortedRerun, .queued)
+        XCTAssertEqual(model.sorting, .sorting)
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(sorting.notSortedCalls, 1, "a note that is sorting offers no second Try again")
+        assertRendersSorting(model, "after Try again on a declined note")
+    }
+
+    func testAQueuedRunShowsSortingEvenWhenTheReadStillSaysDeclined() async {
+        let sorting = ScriptedSorting([.notSorted(label: nil)])
+        let model = makeModel(sorting)
+        await model.load()
+        await model.tryAgainNotSorted()
+        XCTAssertEqual(model.sorting, .sorting)
+    }
+
+    func testTryAgainWithNoProviderSaysSoAndLinksToProcessingInBothAppearances() async {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let sorting = ScriptedSorting([.notSorted(label: "negated")])
+            sorting.notSortedOutcome = .needsProvider
+            let model = makeModel(sorting)
+            model.makeProviderSettings = { AnyView(Text("Processing")) }
+            await model.load()
+
+            await model.tryAgainNotSorted()
+
+            XCTAssertEqual(model.notSortedRerun, .needsProvider)
+            XCTAssertEqual(model.sorting, .notSorted(label: "negated"))
+            host(model, style: style)
+            wait("the provider notice and link are shown, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.notSortedNoticeIdentifier)
+                    && self.shown.contains(SourceDetailView.notSortedProcessingIdentifier)
+            }
+        }
+        XCTAssertEqual(SourceDetailView.needsProviderText, "Choose a provider in Processing first")
+    }
+
+    func testTheSourceReportsTheThreeRerunOutcomes() async {
+        let outcomes: [(JobConfigurationAbstainedRerunOutcome, SourceDetailAbstainedRerun)] = [
+            (.queued, .queued), (.noProviderAllowed, .needsProvider), (.notAbstained, .notRun),
+        ]
+        for (core, expected) in outcomes {
+            let stub = StubAbstained(outcome: core)
+            var drains = 0
+            let source = ItemSortingSource(
+                jobs: ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)]),
+                abstainedJobs: stub, processing: { _ in nil }, afterQueued: { drains += 1 })
+            let result = await source.tryAgainNotSorted(itemID: Self.itemID)
+            XCTAssertEqual(result, expected)
+            XCTAssertEqual(stub.requests, [Self.itemID])
+            XCTAssertEqual(drains, core == .queued ? 1 : 0)
+        }
+    }
+
+    func testTheStatusLabelMapsToANotSortedStateAndARerunStateWins() async {
+        let jobs = ScriptedJobs([JobConfigurationFailedInterpretations(failed: [], nextCursor: nil)])
+        let declined = await ItemSortingSource(
+            jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: nil, abstentionReason: "negated") },
+            afterQueued: {}).sorting(itemID: Self.itemID)
+        let rerunning = await ItemSortingSource(
+            jobs: jobs, processing: { _ in (state: "abstained", jobStatus: nil, rerunState: "queued", abstentionReason: "negated") },
+            afterQueued: {}).sorting(itemID: Self.itemID)
+        XCTAssertEqual(declined, .notSorted(label: "negated"))
+        XCTAssertEqual(rerunning, .sorting)
+    }
+}
+
+private final class StubAbstained: AbstainedInterpretationRerunning, @unchecked Sendable {
+    let outcome: JobConfigurationAbstainedRerunOutcome
+    private(set) var requests: [String] = []
+    init(outcome: JobConfigurationAbstainedRerunOutcome) { self.outcome = outcome }
+    func rerunAbstainedInterpretation(itemID: String) async throws -> JobConfigurationAbstainedRerunOutcome {
+        requests.append(itemID)
+        return outcome
     }
 }
