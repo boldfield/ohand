@@ -462,7 +462,7 @@ final class SourceDetailModel: ObservableObject {
             jobs: root.jobConfiguration, abstainedJobs: root.jobConfiguration,
             processing: { [weak root] itemID in
                 await withCheckedContinuation {
-                    (continuation: CheckedContinuation<(state: String, jobStatus: String?, rerunState: String?)?, Never>) in
+                    (continuation: CheckedContinuation<(state: String, jobStatus: String?, rerunState: String?, abstentionReason: String?)?, Never>) in
                     guard let root else {
                         continuation.resume(returning: nil)
                         return
