@@ -57,4 +57,40 @@ final class FixtureLaunchUITests: XCTestCase {
         XCTAssertTrue(app.waitForFixtureReady())
         XCTAssertTrue(app.homeCard(containing: "Synthetic waiting note about the garden gate").waitForExistence(timeout: seedingTimeout))
     }
+
+    // MARK: Each seeded note is saved once
+
+    /// Once the fixture is ready, each seeded note's text is on exactly one home card. The cards are counted by distinct
+    /// identifier, which is the item ID, so a note saved under a second capture ID shows as a second identifier.
+    private func assertEachNoteHasOneCard(_ texts: [String], file: StaticString = #filePath, line: UInt = #line) {
+        for text in texts {
+            XCTAssertTrue(
+                app.homeCard(containing: text).waitForExistence(timeout: seedingTimeout), "no card for '\(text)'",
+                file: file, line: line)
+            let identifiers = app.homeCardIdentifiers(containing: text)
+            XCTAssertEqual(
+                identifiers.count, 1, "'\(text)' is on \(identifiers.sorted())",
+                file: file, line: line)
+        }
+    }
+
+    func testFailedSortingSavesItsNoteOnce() {
+        XCTAssertTrue(app.launch(fixture: .failedSorting))
+        XCTAssertTrue(app.waitForFixtureReady())
+        assertEachNoteHasOneCard(["Compare the synthetic rejected quotes for the shed roof"])
+    }
+
+    func testPopulatedSavesEachNoteOnce() {
+        XCTAssertTrue(app.launch(fixture: .populated))
+        XCTAssertTrue(app.waitForFixtureReady())
+        assertEachNoteHasOneCard([
+            "Synthetic typed note about the garden hose",
+            "Synthetic typed idea about a herb planter",
+            "Synthetic typed action to sweep the porch",
+            "to call mom",
+            "Synthetic spoken note about the bookshelf",
+            "Synthetic spoken idea about a window box",
+            "Synthetic spoken action to water the ferns",
+        ])
+    }
 }
