@@ -324,6 +324,7 @@ final class AppLauncher: ObservableObject {
     /// for the core), so the scene can connect and ask for a launch before the build returns.
     private var isBuilding = false
     private var foregroundArrivedWhileBuilding = false
+    private var urlsReceivedWhileBuilding: [URL] = []
 
     init(
         makeServices: @escaping () throws -> AppServices = { try AppServices.production() },
@@ -352,6 +353,16 @@ final class AppLauncher: ObservableObject {
         }
     }
 
+    /// Hands a capture-entry URL to the services. One that arrives during a build is held and delivered once, after the
+    /// build starts, so a cold launch from a URL still reaches the services that were being built.
+    func receive(url: URL) {
+        if let services {
+            services.receive(url: url)
+        } else if isBuilding {
+            urlsReceivedWhileBuilding.append(url)
+        }
+    }
+
     private func launch(deliveringForeground: Bool) {
         guard services == nil else { return }
         // A request that arrives during a build joins it, so one process never builds, starts or seeds twice.
@@ -361,8 +372,11 @@ final class AppLauncher: ObservableObject {
         }
         isBuilding = true
         foregroundArrivedWhileBuilding = deliveringForeground
+        urlsReceivedWhileBuilding = []
         let built = try? makeServices()
         isBuilding = false
+        let heldURLs = urlsReceivedWhileBuilding
+        urlsReceivedWhileBuilding = []
         guard let built else { return }
         services = built
         let isActive = isApplicationActive()
@@ -370,6 +384,9 @@ final class AppLauncher: ObservableObject {
         // A build that came after the scene's foreground event missed that event.
         if isActive || foregroundArrivedWhileBuilding {
             built.sceneWillEnterForeground()
+        }
+        for url in heldURLs {
+            built.receive(url: url)
         }
     }
 }
