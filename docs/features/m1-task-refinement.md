@@ -4062,6 +4062,8 @@ Acceptance:
    - `make check` and `make test` pass.
    - The exact-head macOS CI evidence that AGENTS.md requires.
 
+**Ownership amendment (coordinator, 2026-10-30).** The worker reported the seam correctly: nothing in `app/status/` can open an item, and `StatusView` is built in `ios/AppAssembly/ManagementCatalog.swift` (the `status-settings` entry in `settingsSections`, around line 102). Do it the way Search does, not through the navigation model: give `StatusView` an additive `makeItemPane: (String) -> AnyView` parameter with a default, make the row a `NavigationLink` whose destination is `makeItemPane(itemID)`, and have the catalog entry pass `{ ManagementCatalog.destinations.view(for: .item($0), context: context) }`, as the Search entry does. F48 also owns that one `status-settings` line in `ManagementCatalog.swift`; no other change to that file, and no change to `AppServices.swift`, `StatusModel`'s construction or `ManagementNavigationModel`. Back returns to Status. The hosted Status test asserts the row's link and destination identity, not a push on the navigation model.
+
 
 ### F49
 

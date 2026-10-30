@@ -4103,7 +4103,8 @@
         "core/src/ffi/recent_items.rs",
         "ios/OhAndCoreBridge/CoreHandle+RecentItems.swift",
         "ios/Services/RecentItems/",
-        "ios/Tests/RecentItems/"
+        "ios/Tests/RecentItems/",
+        "ios/AppAssembly/ManagementCatalog.swift (the status-settings entry line only)"
       ],
       "intent": "\"Remind me later to call Joe\" keeps a reminder with no time and nothing tells the person; show such reminders in Status and mark their Home rows.",
       "acceptance": [
@@ -5560,6 +5561,10 @@
     {
       "date": "2026-10-29",
       "change": "F59 second ownership amendment: SourceDetailView.swift may be edited only to wrap the ScrollView in a ScrollViewReader, give the ReminderEditSection an id, and scroll to it when reminderAgainIsOpen becomes true. Acceptance unchanged."
+    },
+    {
+      "date": "2026-10-30",
+      "change": "F48 ownership amendment: the status-settings entry line in ManagementCatalog.swift may pass a makeItemPane closure to StatusView (the Search idiom) so a Status row opens the note's detail. No AppServices or navigation-model change. Acceptance unchanged."
     }
   ]
 }
