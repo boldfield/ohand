@@ -119,7 +119,14 @@ struct ReminderEditSection: View {
     }
 
     private var actions: some View {
-        HStack(spacing: DSSpacing.sm) {
+        // Side by side while both fit; stacked when large text leaves no room, so no title is cut.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: DSSpacing.sm) { actionButtons }
+            VStack(alignment: .leading, spacing: DSSpacing.sm) { actionButtons }
+        }
+    }
+
+    @ViewBuilder private var actionButtons: some View {
             Button { Task { await model.save() } } label: { Text("Save time") }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
                 .disabled(!model.canSave)
@@ -132,7 +139,6 @@ struct ReminderEditSection: View {
                     .accessibilityIdentifier(Self.cancelIdentifier)
                     .reportReminderRendered(Self.cancelIdentifier, text: "Cancel reminder")
             }
-        }
     }
 
     /// Every known zone, with the one in use first so a stored zone the system list lacks is still selectable.

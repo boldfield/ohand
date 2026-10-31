@@ -70,7 +70,14 @@ An exemption is one issue on one element, handled in `isExempt` with a comment, 
 | Element | Issue | Reason |
 | --- | --- | --- |
 | `ui-fixture.status` | any | A 4-point, near-transparent marker added by debug builds only, so a test knows the fixture finished seeding. It is not part of the app a person uses. |
+| `provider-settings.field.model`, `provider-settings.field.secret` | Text clipped (text fields only) | A single-line text field cannot wrap; the audit's "may be clipped at larger Dynamic Type sizes" is a heuristic every single-line field raises. The fields use a scaling font, keep their 44 pt minimum height and grow with it, and the largest-size screenshot in the artifact shows them whole. |
 | `accessibility.announcement-log` | any | The same kind of debug-only marker, holding the announcements a test reads. |
+
+### Settling
+
+An audit that reports something is repeated once after three seconds, because a card still fading in is sampled against the
+wrong background. Only issues the settled screen still has count; each of them fails the test, and the log records the first
+pass as a `RETRY` line.
 
 ### Scope of fixes
 

@@ -95,7 +95,7 @@ struct VoiceRecoveryView: View {
                 if model.rows.isEmpty && model.notices.isEmpty {
                     Text(model.isChecking ? "Checking for unfinished recordings\u{2026}" : "No unfinished recordings.")
                         .font(.callout)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(DSColor.inkMuted.color)
                         .accessibilityIdentifier(model.isChecking ? Self.checkingIdentifier : Self.emptyIdentifier)
                         .reportFrame(model.isChecking ? Self.checkingIdentifier : Self.emptyIdentifier)
                 }

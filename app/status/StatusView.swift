@@ -117,6 +117,7 @@ struct StatusView: View {
             if model.facts.contains(where: { $0.actions.contains(.retry) }) {
                 Button(StatusText.retryLabel, action: retryAction)
                     .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                     .padding(.horizontal, DSSpacing.md)
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.retryIdentifier)
@@ -143,6 +144,7 @@ struct StatusView: View {
             if model.facts.contains(where: { $0.actions.contains(.openSettings) }) {
                 Button(StatusText.openSettingsLabel) { model.openSettings() }
                     .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                     .padding(.horizontal, DSSpacing.md)
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.openSettingsIdentifier)
@@ -150,6 +152,7 @@ struct StatusView: View {
             }
             Button(StatusText.refreshLabel) { Task { await model.refresh() } }
                 .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.rowMinimumHeight)
                 .accessibilityIdentifier(Self.refreshIdentifier)
