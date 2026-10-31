@@ -456,15 +456,17 @@ final class SourceDetailSortingTests: XCTestCase {
                 let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]), withControls: false)
                 let controls = ItemControlsModel(itemID: Self.itemID, reader: controlsReader, corrector: NoCorrections())
                 model.itemControls = controls
+                await model.load()
+                await controls.load()
+                XCTAssertEqual(model.sorting, .notSorted(label: "ambiguous"))
+                XCTAssertFalse(controls.canEdit, "\(blocked), \(style.rawValue)")
+                XCTAssertFalse(model.canSetTypeYourself, "\(blocked), \(style.rawValue)")
                 host(model, style: style)
                 wait("the line and Try again are shown, \(blocked), \(style.rawValue)") {
                     self.shown.contains(SourceDetailView.notSortedIdentifier)
                         && self.shown.contains(SourceDetailView.notSortedTryAgainIdentifier)
                 }
-                await controls.load()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-                XCTAssertFalse(controls.canEdit, "\(blocked), \(style.rawValue)")
-                XCTAssertFalse(model.canSetTypeYourself, "\(blocked), \(style.rawValue)")
                 XCTAssertFalse(
                     shown.contains(SourceDetailView.notSortedSetTypeIdentifier), "\(blocked), \(style.rawValue)")
 
