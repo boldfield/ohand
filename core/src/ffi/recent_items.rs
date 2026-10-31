@@ -14,13 +14,16 @@
 //!
 //! The outcome event is `{"operation_id", "items", "next_cursor"}`. `items` is newest capture
 //! first, then item id. `next_cursor` is `null` on the last page. Each item is `{"item_id",
-//! "revision", "item_type", "display_text", "captured_at", "source_kind"}`: `revision` is the
+//! "revision", "item_type", "display_text", "captured_at", "source_kind", "reminder_needs_time"}`: `revision` is the
 //! item's current revision, `item_type` is `null` while the item is unclassified,
 //! `display_text` is the interpreted title when the item has one and otherwise the item's current
 //! source text (latest text correction, else the on-device transcript, else the captured text; the
 //! core records no interpreted title yet, so today it is always the source text) and is `null`
 //! for an audio capture with no transcript yet, `captured_at` is the capture instant as stored
-//! (RFC 3339) and `source_kind` is `text`, or `voice` for a capture with audio.
+//! (RFC 3339), `source_kind` is `text`, or `voice` for a capture with audio, and `reminder_needs_time` is a
+//! content-free flag that is true only when the item's reminder has request state
+//! `not_scheduled_yet` (asked for, no time set); it is false for every other reminder state and for
+//! an item with no reminder.
 //!
 //! The scope and deletion rules are retrieval's: a deleted (tombstoned) item never appears and a
 //! work-only read never returns a personal item. Failures are normalized and never echo the
@@ -112,6 +115,7 @@ fn read_recent_items(database: &Database, request: &Validated) -> Result<Value, 
                 "display_text": item.display_text,
                 "captured_at": item.captured_at,
                 "source_kind": item.source_kind.as_str(),
+                "reminder_needs_time": item.reminder_needs_time,
             })
         })
         .collect();

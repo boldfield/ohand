@@ -309,6 +309,7 @@ fn lists_newest_capture_first_with_the_documented_fields() {
             "display_text": "Water the ferns",
             "captured_at": "2026-10-07T09:00:00+00:00",
             "source_kind": "text",
+            "reminder_needs_time": false,
         })
     );
     assert!(items[0]["revision"].is_i64());
@@ -591,5 +592,107 @@ fn sub_millisecond_captures_order_and_page_at_full_precision() {
         "read_scopes": ["personal", "work"], "limit": 1, "cursor": first["next_cursor"]
     }));
     assert_eq!(item_ids(&second), vec![older]);
+    session.close();
+}
+
+fn set_reminder(store_path: &str, item_id: &str, request_state: &str) {
+    let database = Database::open(store_path, Arc::new(SystemClock)).unwrap();
+    database
+        .conn()
+        .execute(
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state,
+                                    delivery_state, acknowledgment_state, created_at, updated_at)
+             VALUES (?, ?, ?, 'not_scheduled', 'unknown', 'not_acknowledged',
+                     '2026-10-08T09:30:02Z', '2026-10-08T09:30:02Z')",
+            rusqlite::params![format!("reminder-{item_id}"), item_id, request_state],
+        )
+        .unwrap();
+}
+
+fn change_reminder_state(store_path: &str, item_id: &str, request_state: &str) {
+    let database = Database::open(store_path, Arc::new(SystemClock)).unwrap();
+    database
+        .conn()
+        .execute(
+            "UPDATE reminders SET request_state = ? WHERE item_id = ?",
+            rusqlite::params![request_state, item_id],
+        )
+        .unwrap();
+}
+
+fn needs_time_flags(session: &Session) -> std::collections::BTreeMap<String, bool> {
+    let body = session.succeed(&json!({"read_scopes": ["personal", "work"], "limit": 100}));
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["item_id"].as_str().unwrap().to_string(),
+                item["reminder_needs_time"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_needs_time_flag_is_true_only_for_a_reminder_that_was_never_given_a_time() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let seeded = &fixture.seeded;
+    let session = Session::over(&fixture.store_path);
+    let none_set = needs_time_flags(&session);
+    assert!(none_set.values().all(|flag| !flag), "no reminder: false");
+
+    let states = [
+        (&seeded.typed, "not_scheduled_yet"),
+        (&seeded.corrected, "resolved"),
+        (&seeded.voice, "unsupported_recurrence"),
+        (&seeded.work, "unschedulable"),
+        (&seeded.oldest, "cancelled"),
+    ];
+    for (item_id, state) in states {
+        set_reminder(&fixture.store_path, item_id, state);
+    }
+    let flags = needs_time_flags(&session);
+    assert!(flags[&seeded.typed]);
+    for (item_id, state) in states.iter().skip(1) {
+        assert!(!flags[*item_id], "{state} is not a missing time");
+    }
+    assert!(!flags[&seeded.mixed_offset], "an item with no reminder");
+    session.close();
+}
+
+#[test]
+fn the_needs_time_flag_clears_when_a_time_is_set_the_reminder_is_cancelled_or_the_item_ends() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let seeded = &fixture.seeded;
+    let session = Session::over(&fixture.store_path);
+    set_reminder(&fixture.store_path, &seeded.typed, "not_scheduled_yet");
+    set_reminder(&fixture.store_path, &seeded.oldest, "not_scheduled_yet");
+    set_reminder(&fixture.store_path, &seeded.work, "not_scheduled_yet");
+    set_reminder(&fixture.store_path, &seeded.deleted, "not_scheduled_yet");
+    let flags = needs_time_flags(&session);
+    assert!(flags[&seeded.typed] && flags[&seeded.oldest] && flags[&seeded.work]);
+    assert!(
+        !flags.contains_key(&seeded.deleted),
+        "a deleted item is not listed, so it carries no marker"
+    );
+
+    change_reminder_state(&fixture.store_path, &seeded.typed, "resolved");
+    change_reminder_state(&fixture.store_path, &seeded.oldest, "cancelled");
+    end_item(
+        &fixture.store_path,
+        &seeded.work,
+        LifecycleControl::Complete,
+    );
+    let flags = needs_time_flags(&session);
+    assert!(!flags[&seeded.typed], "a time was set and resolved");
+    assert!(!flags[&seeded.oldest], "the reminder was cancelled");
+    assert!(
+        !flags.contains_key(&seeded.work),
+        "a completed item is not listed"
+    );
     session.close();
 }

@@ -41,6 +41,9 @@ public enum ReminderOutlook: Equatable, Sendable {
     case unscheduled(ReminderUnscheduledReason)
     /// Wanted, but the permission prevents the OS from alerting, whatever is installed.
     case undeliverable(ReminderUndeliverableReason)
+    /// Asked for, and no time was ever set (request state `not_scheduled_yet`). Nothing is scheduled and nothing will
+    /// alert until the person sets a time; the permission and the system's capacity are not the cause.
+    case needsTime
 }
 
 public struct ReminderStatus: Equatable, Sendable {
@@ -64,6 +67,8 @@ public struct NotificationReadinessReport: Equatable, Sendable {
     public var undeliverableCount: Int {
         count { if case .undeliverable = $0 { return true } else { return false } }
     }
+
+    public var needsTimeCount: Int { count { $0 == .needsTime } }
 
     private func count(_ matches: (ReminderOutlook) -> Bool) -> Int {
         reminders.filter { matches($0.outlook) }.count
@@ -107,6 +112,8 @@ public enum NotificationReadiness {
             case "permission_denied": return .unscheduled(.permissionDenied)
             default: return .unscheduled(.unrecognized)
             }
+        case "not_scheduled_yet":
+            return .needsTime
         default:
             return .notApplicable
         }

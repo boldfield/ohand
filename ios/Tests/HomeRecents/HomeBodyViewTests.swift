@@ -43,10 +43,12 @@ final class HomeBodyViewTests: XCTestCase {
         ISO8601DateFormatter().string(from: referenceNow.addingTimeInterval(-hours * 3600))
     }
 
-    private func item(_ identifier: String, type: String?, text: String, hoursBefore hours: Double) -> CoreRecentItem {
+    private func item(
+        _ identifier: String, type: String?, text: String, hoursBefore hours: Double, needsTime: Bool = false
+    ) -> CoreRecentItem {
         CoreRecentItem(
             itemID: identifier, revision: 1, itemType: type, displayText: text,
-            capturedAt: timestamp(hoursBefore: hours), sourceKind: .text)
+            capturedAt: timestamp(hoursBefore: hours), sourceKind: .text, reminderNeedsTime: needsTime)
     }
 
     private var todayItem: CoreRecentItem { item("today-1", type: "note", text: Self.todayText, hoursBefore: 1) }
@@ -57,6 +59,7 @@ final class HomeBodyViewTests: XCTestCase {
     @discardableResult
     private func show(
         size: CGSize = HomeBodyViewTests.phone, sizeClass: UserInterfaceSizeClass = .compact,
+        style: UIUserInterfaceStyle = .unspecified,
         waitingFor identifiers: [String] = [], thenSettling: Bool = false,
         file: StaticString = #filePath, line: UInt = #line
     ) async -> HomeRecentsModel {
@@ -67,6 +70,7 @@ final class HomeBodyViewTests: XCTestCase {
         let root = HomeBodyView(model: shownModel, openItem: { [unowned self] in openedItems.append($0) }, renderReporter: { [unowned self] in rendered = $0 })
             .environment(\.horizontalSizeClass, sizeClass)
         let shown = UIWindow(frame: CGRect(origin: .zero, size: size))
+        shown.overrideUserInterfaceStyle = style
         shown.rootViewController = UIHostingController(rootView: root)
         shown.makeKeyAndVisible()
         window = shown
@@ -269,6 +273,33 @@ final class HomeBodyViewTests: XCTestCase {
         XCTAssertLessThan(frame(todayCard).maxY, frame(HomeBodyView.earlierHeadingIdentifier).minY + 0.5)
         XCTAssertLessThan(frame(HomeBodyView.earlierHeadingIdentifier).maxY, frame(earlierCard).minY + 0.5)
         XCTAssertEqual(source.readCursors, [nil])
+    }
+
+    func testACardWhoseReminderHasNoTimeShowsNeedsATimeAndOthersDoNot() async {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            model?.shutDown()
+            window?.isHidden = true
+            rendered = [:]
+            openedItems = []
+            source = FakeHomeRecentsSource()
+            source.isAuthenticated = true
+            let marked = item("marked-1", type: "action", text: "Call Joe", hoursBefore: 1, needsTime: true)
+            source.pages[nil] = CoreRecentItemsPage(items: [marked, todayItem], nextCursor: nil)
+            let markerIdentifier = HomeBodyView.cardNeedsTimeIdentifierPrefix + "marked-1"
+            await show(
+                style: style, waitingFor: [Self.cardIdentifier("marked-1"), Self.cardIdentifier("today-1"), markerIdentifier])
+
+            XCTAssertEqual(rendered[markerIdentifier]?.text, "Needs a time", "\(style.rawValue)")
+            XCTAssertNil(
+                rendered[HomeBodyView.cardNeedsTimeIdentifierPrefix + "today-1"], "a note with no such reminder has no marker")
+            XCTAssertTrue(
+                frame(markerIdentifier).minY >= frame(Self.cardIdentifier("marked-1")).minY
+                    && frame(markerIdentifier).maxY <= frame(Self.cardIdentifier("marked-1")).maxY + 0.5,
+                "the marker sits inside its card")
+
+            tap(Self.cardIdentifier("marked-1"))
+            XCTAssertEqual(openedItems, ["marked-1"], "tapping the row opens the note as before")
+        }
     }
 
     func testRegularWidthShowsALargeTodayOverTwoColumns() async {

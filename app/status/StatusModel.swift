@@ -20,6 +20,13 @@ extension JobRunnerService: ProcessingRetrying {
 /// The most recent reminder pass, as the app's composition root recorded it. `nil` before the first pass.
 protocol ReminderSchedulingReading {
     func lastReport() -> NotificationPermissionReport?
+    /// Runs a reminder pass now and returns its report, so a deleted, completed or cancelled note is no longer counted.
+    /// Falls back to the last recorded report when the pass cannot run.
+    func currentReport() async -> NotificationPermissionReport?
+}
+
+extension ReminderSchedulingReading {
+    func currentReport() async -> NotificationPermissionReport? { lastReport() }
 }
 
 /// Used when no reminder pass source exists (tests, previews): the status says scheduling has not been checked.
@@ -46,6 +53,8 @@ enum StatusFactKind: String, CaseIterable {
     case capture
     case processing
     case notifications
+    /// Reminders that were asked for and have no time. Present only while there are some.
+    case remindersNeedTime
     case sync
     case remoteInterpretation
 }
@@ -98,6 +107,9 @@ final class StatusModel: ObservableObject {
     @Published private(set) var failedNotesArePartial = false
     /// The first line of each listed note's text, by item. A note whose text cannot be read has no entry.
     @Published private(set) var firstLines: [String: String] = [:]
+    /// The newest notes whose reminder has no time, up to `listedNoteLimit`. Empty while locked or when none can be read;
+    /// the fact's headline still counts them.
+    @Published private(set) var needsTimeNotes: [NeedsTimeNote] = []
     @Published private(set) var rerunSummary: FailedNotesRerunSummary?
     @Published private(set) var isRerunning = false
 
@@ -140,8 +152,9 @@ final class StatusModel: ObservableObject {
     @MainActor func refresh() async {
         let outcome = await health.read()
         let entries = await permissions.refresh()
-        facts = Self.facts(
-            health: outcome, notifications: entries.first { $0.kind == .notifications }, scheduling: scheduling.lastReport())
+        let report = await scheduling.currentReport()
+        facts = Self.facts(health: outcome, notifications: entries.first { $0.kind == .notifications }, scheduling: report)
+        await refreshNeedsTimeNotes(report)
         await refreshFailedNotes()
         hasLoaded = true
         if !facts.contains(where: { $0.actions.contains(.retry) }) { retryRequested = false }
@@ -188,6 +201,26 @@ final class StatusModel: ObservableObject {
             failedNotesAccess = (error as? JobConfigurationError) == .notAuthenticated ? .locked : .unreadable
             if failedNotesAccess == .locked { rerunSummary = nil }
         }
+    }
+
+    /// Reads the newest few notes whose reminder has no time through the private item read. A note that cannot be read
+    /// now (locked, deleted) is left out, so a locked session lists nothing and the fact keeps only its count.
+    @MainActor private func refreshNeedsTimeNotes(_ report: NotificationPermissionReport?) async {
+        guard let noteText, let report else {
+            needsTimeNotes = []
+            return
+        }
+        // Every candidate is read before the limit applies, so the five listed are the newest captures, whatever order
+        // the reminders were created in.
+        let candidates = report.readiness.reminders.filter { $0.outlook == .needsTime }.reversed()
+        var notes: [NeedsTimeNote] = []
+        for status in candidates {
+            guard let summary = await noteText.summary(itemID: status.facts.itemID) else { continue }
+            notes.append(NeedsTimeNote(itemID: status.facts.itemID, firstLine: summary.firstLine, capturedAt: summary.capturedAt))
+        }
+        // Newest capture first; notes with no known capture time keep the core's order after the dated ones.
+        let dated = notes.filter { $0.capturedAt != nil }.sorted { ($0.capturedAt ?? .distantPast) > ($1.capturedAt ?? .distantPast) }
+        needsTimeNotes = Array((dated + notes.filter { $0.capturedAt == nil }).prefix(Self.listedNoteLimit))
     }
 
     /// Reads one listed note's first line once, through the private item read. Row views call it as they appear.
@@ -248,18 +281,33 @@ final class StatusModel: ObservableObject {
     static func facts(
         health: ProcessingHealthOutcome?, notifications: PermissionEntry?, scheduling: NotificationPermissionReport?
     ) -> [StatusFact] {
-        [
+        var facts: [StatusFact] = [
             StatusFact(
                 kind: .capture, tone: .good, headline: StatusText.captureHeadline,
                 detail: StatusText.captureDetail, actions: []),
             processingFact(health),
             notificationsFact(notifications, scheduling),
+        ]
+        facts += remindersNeedTimeFacts(scheduling)
+        facts += [
             StatusFact(
                 kind: .sync, tone: .waiting, headline: StatusText.syncHeadline,
                 detail: StatusText.syncDetail, actions: []),
             StatusFact(
                 kind: .remoteInterpretation, tone: .waiting, headline: StatusText.remoteHeadline,
                 detail: StatusText.remoteDetail, actions: []),
+        ]
+        return facts
+    }
+
+    /// The reminders that were asked for and have no time. Neither the permission nor the system's capacity is the cause,
+    /// so this is its own fact, separate from the notifications one.
+    private static func remindersNeedTimeFacts(_ report: NotificationPermissionReport?) -> [StatusFact] {
+        guard let count = report?.readiness.needsTimeCount, count > 0 else { return [] }
+        return [
+            StatusFact(
+                kind: .remindersNeedTime, tone: .needsAttention, headline: StatusText.remindersNeedTimeHeadline(count: count),
+                detail: StatusText.remindersNeedTimeDetail, actions: [])
         ]
     }
 

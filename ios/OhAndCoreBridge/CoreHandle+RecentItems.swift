@@ -20,10 +20,13 @@ public struct CoreRecentItem: Decodable, Equatable, Sendable {
     /// The capture instant as stored (RFC 3339).
     public let capturedAt: String
     public let sourceKind: CoreRecentItemSourceKind
+    /// True only when the item's reminder was asked for and never given a time (request state `not_scheduled_yet`).
+    /// Content-free. Absent from an older core's answer, which decodes as false.
+    public let reminderNeedsTime: Bool
 
     public init(
         itemID: String, revision: Int, itemType: String?, displayText: String?, capturedAt: String,
-        sourceKind: CoreRecentItemSourceKind
+        sourceKind: CoreRecentItemSourceKind, reminderNeedsTime: Bool = false
     ) {
         self.itemID = itemID
         self.revision = revision
@@ -31,6 +34,18 @@ public struct CoreRecentItem: Decodable, Equatable, Sendable {
         self.displayText = displayText
         self.capturedAt = capturedAt
         self.sourceKind = sourceKind
+        self.reminderNeedsTime = reminderNeedsTime
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        itemID = try container.decode(String.self, forKey: .itemID)
+        revision = try container.decode(Int.self, forKey: .revision)
+        itemType = try container.decodeIfPresent(String.self, forKey: .itemType)
+        displayText = try container.decodeIfPresent(String.self, forKey: .displayText)
+        capturedAt = try container.decode(String.self, forKey: .capturedAt)
+        sourceKind = try container.decode(CoreRecentItemSourceKind.self, forKey: .sourceKind)
+        reminderNeedsTime = try container.decodeIfPresent(Bool.self, forKey: .reminderNeedsTime) ?? false
     }
 
     enum CodingKeys: String, CodingKey {
@@ -40,6 +55,7 @@ public struct CoreRecentItem: Decodable, Equatable, Sendable {
         case displayText = "display_text"
         case capturedAt = "captured_at"
         case sourceKind = "source_kind"
+        case reminderNeedsTime = "reminder_needs_time"
     }
 }
 

@@ -39,6 +39,8 @@ struct HomeBodyView: View {
     static let placeholderIdentifier = "home.recents.placeholder"
     static let placeholderCardIdentifierPrefix = "home.recents.placeholder."
     static let cardCaptionIdentifierPrefix = "home.recents.caption."
+    static let cardNeedsTimeIdentifierPrefix = "home.recents.needs-time."
+    static let needsTimeLabel = "Needs a time"
     static let cardDotIdentifierPrefix = "home.recents.dot."
     static let lockedCardIdentifier = "home.recents.locked"
     static let unlockButtonIdentifier = "home.recents.unlock"
@@ -217,6 +219,18 @@ struct HomeBodyView: View {
                     .foregroundColor(DSColor.ink.color)
                     .lineLimit(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if entry.needsTime {
+                    HStack(spacing: DSSpacing.xxs) {
+                        Image(systemName: "clock.badge.questionmark")
+                            .accessibilityHidden(true)
+                        Text(Self.needsTimeLabel)
+                    }
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.ink.color)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.needsTimeLabel)
+                    .reportHomeRendered(Self.cardNeedsTimeIdentifierPrefix + entry.id, text: Self.needsTimeLabel)
+                }
             }
         }
         .contentShape(Rectangle())

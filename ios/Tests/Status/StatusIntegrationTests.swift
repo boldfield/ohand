@@ -194,7 +194,8 @@ final class StatusIntegrationTests: XCTestCase {
             self.rendered[StatusView.rowIdentifier(.processing)]?.contains(StatusText.processingUnknownHeadline) == true
         }
 
-        for kind in StatusFactKind.allCases {
+        // The reminders-without-a-time row appears only while there is such a reminder (StatusNeedsTimeTests).
+        for kind in StatusFactKind.allCases where kind != .remindersNeedTime {
             XCTAssertNotNil(rendered[StatusView.rowIdentifier(kind)], "\(kind) row is shown")
         }
         XCTAssertTrue(rendered[StatusView.rowIdentifier(.capture)]?.contains(StatusText.captureHeadline) == true)

@@ -4248,7 +4248,8 @@
       "title": "Say on a note's detail screen why it was not sorted, and offer to try again or set the type yourself",
       "file_scope": [
         "app/source-detail/",
-        "ios/Tests/SourceDetail/"
+        "ios/Tests/SourceDetail/",
+        "app/item-controls/ItemControlsView.swift (scroll identity on the Type control only)"
       ],
       "intent": "An abstained note's detail screen shows a fixed-copy reason line, a Try again that runs F54a's rerun, and the existing type correction.",
       "acceptance": [
@@ -5565,6 +5566,10 @@
     {
       "date": "2026-10-30",
       "change": "F48 ownership amendment: the status-settings entry line in ManagementCatalog.swift may pass a makeItemPane closure to StatusView (the Search idiom) so a Status row opens the note's detail. No AppServices or navigation-model change. Acceptance unchanged."
+    },
+    {
+      "date": "2026-10-31",
+      "change": "F54b ownership amendment: ItemControlsView.swift may gain a scroll identity on the Type control so Set the type yourself scrolls to the picker through SourceDetailView's existing ScrollViewReader; visibility gated on ItemControlsModel.canEdit. Acceptance unchanged."
     }
   ]
 }
