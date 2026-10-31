@@ -136,10 +136,10 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var notSortedRerun: SourceDetailAbstainedRerun?
     /// Builds the Processing settings screen the declined note's "Choose a provider" link opens; nil hides the link.
     var makeProviderSettings: (() -> AnyView)?
-    /// Counts taps on "Set the type yourself"; the screen scrolls to the correction controls and moves focus there.
+    /// Counts taps on "Set the type yourself"; the screen scrolls to the Type control of the correction controls.
     @Published private(set) var setTypeRequests = 0
-    /// Whether "Set the type yourself" has somewhere to go: the correction controls are present.
-    var canSetTypeYourself: Bool { itemControls != nil }
+    /// Whether "Set the type yourself" has somewhere to go: the correction controls are loaded and editable.
+    var canSetTypeYourself: Bool { itemControls?.canEdit == true }
 
     func setTypeYourself() {
         guard canSetTypeYourself else { return }

@@ -26,9 +26,8 @@ struct SourceDetailView: View {
     static let setTypeLabel = "Set the type yourself"
     static let needsProviderText = "Choose a provider in Processing first"
     static let processingLinkLabel = "Open Processing"
-    /// The scroll identity of the correction controls, which "Set the type yourself" brings into view.
     static let couldNotTryAgainText = "Couldn't try again. Try once more in a moment"
-    static let controlsScrollIdentity = "source-detail.controls"
+    static let couldNotTryAgainIdentifier = "source-detail.not-sorted.could-not"
     static let sortingText = "Sorting…"
     /// The scroll identity of the reminder editor, which Set a reminder again brings into view.
     static let reminderEditorScrollIdentity = "source-detail.reminder-editor"
@@ -65,6 +64,8 @@ struct SourceDetailView: View {
     var renderReporter: ((String, Bool) -> Void)?
     /// Told where an identified element sits, in window coordinates; layout tests use it to check for clipping.
     var layoutReporter: ((String, CGRect) -> Void)?
+    /// Told the identity of each scroll this screen asks for; tests use it to check where the screen scrolls to.
+    var scrollReporter: ((String) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
     /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
@@ -73,7 +74,6 @@ struct SourceDetailView: View {
     /// True once the person deleted this item from this screen. An item that was already deleted when the screen opened
     /// never sets it, so it still says "Not here".
     @State private var deletedHere = false
-    @AccessibilityFocusState private var controlsHaveFocus: Bool
     /// A change to this item arrived while one of this screen's own controls was working; the item is read again once
     /// they settle.
     @State private var readAgainIsPending = false
@@ -91,8 +91,6 @@ struct SourceDetailView: View {
                             sortingLine
                             if let controls = model.itemControls {
                                 ItemControlsView(model: controls, renderReporter: renderReporter)
-                                    .id(Self.controlsScrollIdentity)
-                                    .accessibilityFocused($controlsHaveFocus)
                             }
                             history(content)
                             if let reminderEditor = model.reminderEditor {
@@ -120,14 +118,15 @@ struct SourceDetailView: View {
                     }
                     .padding(.bottom, DSSpacing.lg)
                 }
-                // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
-                // waits for the next turn of the main queue, so it stays out of the update that removes the button.
+                // "Set the type yourself" brings the existing Type control of the correction controls into view.
                 .onReceive(model.$setTypeRequests.dropFirst()) { _ in
                     DispatchQueue.main.async {
-                        scrollProxy.scrollTo(Self.controlsScrollIdentity, anchor: .top)
-                        controlsHaveFocus = true
+                        scrollReporter?(ItemControlsView.typeScrollIdentity)
+                        scrollProxy.scrollTo(ItemControlsView.typeScrollIdentity, anchor: .top)
                     }
                 }
+                // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
+                // waits for the next turn of the main queue, so it stays out of the update that removes the button.
                 .onReceive(
                     model.itemControls.publisher.flatMap { $0.$reminderAgainIsOpen.dropFirst() }.filter { $0 }
                 ) { _ in
@@ -199,18 +198,16 @@ struct SourceDetailView: View {
                     .disabled(model.isTryingAgain)
                     .reported(Self.notSortedTryAgainIdentifier, renderReporter, layoutReporter)
                 // The type picker is part of the correction controls below; this brings them into view.
-                if model.canSetTypeYourself {
-                    Button(Self.setTypeLabel) { model.setTypeYourself() }
-                        .font(DSFont.rowLabel)
-                        .frame(minHeight: DSLayout.rowMinimumHeight)
-                        .reported(Self.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+                if let controls = model.itemControls {
+                    SetTypeYourselfButton(
+                        controls: controls, model: model, renderReporter: renderReporter, layoutReporter: layoutReporter)
                 }
                 if model.notSortedRerun == .notRun {
                     Text(Self.couldNotTryAgainText)
                         .font(DSFont.footer)
                         .foregroundColor(DSColor.inkMuted.color)
                         .fixedSize(horizontal: false, vertical: true)
-                        .reported(Self.notSortedNoticeIdentifier, renderReporter, layoutReporter)
+                        .reported(Self.couldNotTryAgainIdentifier, renderReporter, layoutReporter)
                 }
                 if model.notSortedRerun == .needsProvider {
                     Text(Self.needsProviderText)
@@ -503,5 +500,23 @@ struct SourceDetailScreen: View {
 
     var body: some View {
         SourceDetailView(model: model, renderReporter: renderReporter)
+    }
+}
+
+/// "Set the type yourself": shown only while the correction controls are loaded and editable, so it never points at a
+/// Type control that is absent or paused.
+private struct SetTypeYourselfButton: View {
+    @ObservedObject var controls: ItemControlsModel
+    let model: SourceDetailModel
+    var renderReporter: ((String, Bool) -> Void)?
+    var layoutReporter: ((String, CGRect) -> Void)?
+
+    var body: some View {
+        if controls.canEdit {
+            Button(SourceDetailView.setTypeLabel) { model.setTypeYourself() }
+                .font(DSFont.rowLabel)
+                .frame(minHeight: DSLayout.rowMinimumHeight)
+                .reported(SourceDetailView.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+        }
     }
 }

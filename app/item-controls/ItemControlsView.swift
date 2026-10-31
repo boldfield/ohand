@@ -7,6 +7,8 @@ struct ItemControlsView: View {
     static let textFieldIdentifier = "item-controls.text.field"
     static let textSaveIdentifier = "item-controls.text.save"
     static let typePickerIdentifier = "item-controls.type.picker"
+    /// The scroll identity of the Type control, which a host screen can scroll to through its own scroll proxy.
+    static let typeScrollIdentity = "item-controls.type.scroll"
     static let typeApplyIdentifier = "item-controls.type.apply"
     static let topicFieldIdentifier = "item-controls.topic.field"
     static let topicSaveIdentifier = "item-controls.topic.save"
@@ -201,6 +203,7 @@ struct ItemControlsView: View {
                 .disabled(!model.canApplyType)
                 .accessibilityIdentifier(Self.typeApplyIdentifier)
         }
+        .id(Self.typeScrollIdentity)
     }
 
     @ViewBuilder private var reminderAgainControl: some View {

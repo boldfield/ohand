@@ -148,7 +148,9 @@ final class SourceDetailSortingTests: XCTestCase {
         return model
     }
 
-    private func host(_ model: SourceDetailModel, style: UIUserInterfaceStyle) {
+    private func host(
+        _ model: SourceDetailModel, style: UIUserInterfaceStyle, scrollReporter: ((String) -> Void)? = nil
+    ) {
         window?.rootViewController = nil
         window?.isHidden = true
         window = nil
@@ -159,7 +161,8 @@ final class SourceDetailSortingTests: XCTestCase {
             model: model, renderReporter: { [unowned self] identifier, isShown in
                 guard current == generation else { return }
                 if isShown { shown.insert(identifier) } else { shown.remove(identifier) }
-            })
+            },
+            scrollReporter: scrollReporter)
         let hosted = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         hosted.overrideUserInterfaceStyle = style
         hosted.rootViewController = UIHostingController(rootView: NavigationStack { screen })
@@ -429,19 +432,19 @@ final class SourceDetailSortingTests: XCTestCase {
         }
     }
 
-    func testSetTheTypeYourselfBringsTheExistingCorrectionControlsIntoPlay() {
+    func testSetTheTypeYourselfScrollsToTheTypeControlInBothAppearances() {
         for style in [UIUserInterfaceStyle.light, .dark] {
             let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]))
-            host(model, style: style)
+            var scrolledTo: [String] = []
+            host(model, style: style, scrollReporter: { scrolledTo.append($0) })
             wait("the line and the controls are shown, \(style.rawValue)") {
                 self.shown.contains(SourceDetailView.notSortedSetTypeIdentifier)
                     && self.shown.contains(ItemControlsView.sectionIdentifier)
             }
-            XCTAssertEqual(model.setTypeRequests, 0)
+            XCTAssertEqual(scrolledTo, [])
             model.setTypeYourself()
-            XCTAssertEqual(model.setTypeRequests, 1)
-            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
-            XCTAssertTrue(shown.contains(ItemControlsView.sectionIdentifier), "\(style.rawValue)")
+            wait("the screen scrolls to the Type control, \(style.rawValue)") { !scrolledTo.isEmpty }
+            XCTAssertEqual(scrolledTo, [ItemControlsView.typeScrollIdentity], "\(style.rawValue)")
         }
     }
 
@@ -467,8 +470,13 @@ final class SourceDetailSortingTests: XCTestCase {
         await model.load()
         await model.tryAgainNotSorted()
         XCTAssertEqual(model.notSortedRerun, .notRun)
-        host(model, style: .light)
-        wait("the could not try again line is shown") { self.shown.contains(SourceDetailView.notSortedNoticeIdentifier) }
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            host(model, style: style)
+            wait("the could not try again line is shown, \(style.rawValue)") {
+                self.shown.contains(SourceDetailView.couldNotTryAgainIdentifier)
+            }
+            XCTAssertFalse(shown.contains(SourceDetailView.notSortedNoticeIdentifier))
+        }
         XCTAssertEqual(SourceDetailView.couldNotTryAgainText, "Couldn't try again. Try once more in a moment")
     }
 
