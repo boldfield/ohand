@@ -596,6 +596,7 @@ jobs:
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
             ios/.evidence/simulator.txt
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 2
 
@@ -606,6 +607,7 @@ jobs:
         with:
           name: ios-accessibility-failure
           path: ios/.evidence/accessibility-*.xcresult
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 2
 

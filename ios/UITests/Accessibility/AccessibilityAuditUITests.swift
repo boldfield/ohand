@@ -267,6 +267,7 @@ final class AccessibilityAuditUITests: XCTestCase {
                 }
                 issueCount += 1
                 auditLines.append("ISSUE \(description)")
+                print("AUDIT-ISSUE (\(sizeName)) \(description)")
                 return false
             }
         } catch {
@@ -293,8 +294,20 @@ final class AccessibilityAuditUITests: XCTestCase {
                 let identifier = element.identifier
                 if identifier == Self.fixtureStatusIdentifier || identifier == Self.announcementLogIdentifier { continue }
                 let hasName = !element.label.isEmpty || !element.title.isEmpty || !((element.placeholderValue ?? "").isEmpty)
-                XCTAssertTrue(hasName, "\(screen): a \(kind) with identifier '\(identifier)' has no label: \(element.debugDescription.prefix(300)); parent \(element.value ?? "-")")
+                // SwiftUI exposes a toggle or menu as a labelled element that holds an unlabelled system control; VoiceOver
+                // lands on the labelled one, so the inner control is named by the element around it.
+                let isNamedByContainer = !hasName && isInsideLabelledElement(element)
+                XCTAssertTrue(hasName || isNamedByContainer, "\(screen): a \(kind) with identifier '\(identifier)' has no label: \(element.debugDescription.prefix(300)); parent \(element.value ?? "-")")
             }
+        }
+    }
+
+    private func isInsideLabelledElement(_ element: XCUIElement) -> Bool {
+        let frame = element.frame
+        let labelled = app.descendants(matching: .any).matching(NSPredicate(format: "label != ''")).allElementsBoundByIndex
+        return labelled.contains { candidate in
+            candidate.exists && candidate.isHittable && candidate.frame.insetBy(dx: -1, dy: -1).contains(frame)
+                && [.switch, .button, .cell, .other, .toggle].contains(candidate.elementType)
         }
     }
 
@@ -396,6 +409,8 @@ final class AccessibilityAuditUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1)
                 return true
             }
+            // The back button sits at the top of the scrolling screen; bring it back into view.
+            if glassBack.exists, !glassBack.isHittable { app.swipeDown() }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         let buttons = app.buttons.allElementsBoundByIndex.map { "\($0.label)|\($0.identifier)|hittable=\($0.isHittable)|\($0.frame)" }
