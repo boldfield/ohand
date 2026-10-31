@@ -15,6 +15,23 @@ private final class OneItemReader: SourceDetailReading, @unchecked Sendable {
     }
 }
 
+/// The correction controls' own read: unreadable, a deleted item, or an editable one, switched by the test.
+private final class SwitchableControlsReader: SourceDetailReading, @unchecked Sendable {
+    enum Mode { case unreadable, deleted, editable }
+    var mode: Mode
+
+    init(_ mode: Mode) { self.mode = mode }
+
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        if mode == .unreadable { throw PlaybackError.noAudio }
+        return CoreItemDetail(
+            itemID: itemID, captureID: "capture-1", revision: 0, itemType: nil, scope: "personal", sessionTopic: nil,
+            lifecycleState: mode == .deleted ? "deleted" : "active", capturedAt: "2026-10-22T09:30:00Z",
+            text: "buy oat milk", textBasis: .original, originalText: "buy oat milk", correctedText: nil,
+            audioReference: nil, transcript: nil, history: [], historyTruncated: false)
+    }
+}
+
 private final class NoAudio: SourceAudioOpening, @unchecked Sendable {
     func openAudio(itemID: String) async throws -> SourceAudioSession { throw PlaybackError.noAudio }
     func audioAvailability(itemID: String) async -> PlaybackAvailability { .noAudio }
@@ -429,6 +446,35 @@ final class SourceDetailSortingTests: XCTestCase {
             }
             XCTAssertFalse(shown.contains(SourceDetailView.notSortedSetTypeIdentifier))
             XCTAssertFalse(shown.contains(ItemControlsView.sectionIdentifier))
+        }
+    }
+
+    func testSetTheTypeYourselfIsHiddenWhileTheCorrectionIsNotEditableInBothAppearances() async {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            for blocked in [SwitchableControlsReader.Mode.unreadable, .deleted] {
+                let controlsReader = SwitchableControlsReader(blocked)
+                let model = makeModel(ScriptedSorting([.notSorted(label: "ambiguous")]), withControls: false)
+                let controls = ItemControlsModel(itemID: Self.itemID, reader: controlsReader, corrector: NoCorrections())
+                model.itemControls = controls
+                host(model, style: style)
+                wait("the line and Try again are shown, \(blocked), \(style.rawValue)") {
+                    self.shown.contains(SourceDetailView.notSortedIdentifier)
+                        && self.shown.contains(SourceDetailView.notSortedTryAgainIdentifier)
+                }
+                await controls.load()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+                XCTAssertFalse(controls.canEdit, "\(blocked), \(style.rawValue)")
+                XCTAssertFalse(model.canSetTypeYourself, "\(blocked), \(style.rawValue)")
+                XCTAssertFalse(
+                    shown.contains(SourceDetailView.notSortedSetTypeIdentifier), "\(blocked), \(style.rawValue)")
+
+                controlsReader.mode = .editable
+                await controls.load()
+                XCTAssertTrue(controls.canEdit, "\(blocked), \(style.rawValue)")
+                wait("Set the type yourself appears once the correction is editable, \(blocked), \(style.rawValue)") {
+                    self.shown.contains(SourceDetailView.notSortedSetTypeIdentifier)
+                }
+            }
         }
     }
 

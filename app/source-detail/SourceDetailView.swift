@@ -197,7 +197,7 @@ struct SourceDetailView: View {
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .disabled(model.isTryingAgain)
                     .reported(Self.notSortedTryAgainIdentifier, renderReporter, layoutReporter)
-                // The type picker is part of the correction controls below; this brings them into view.
+                // Scrolls to the Type control of the correction controls below; shown only while that correction is editable.
                 if let controls = model.itemControls {
                     SetTypeYourselfButton(
                         controls: controls, model: model, renderReporter: renderReporter, layoutReporter: layoutReporter)
