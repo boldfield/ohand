@@ -166,6 +166,7 @@ struct ItemControlsView: View {
                 .font(DSFont.groupHeading)
                 .foregroundColor(DSColor.inkMuted.color)
             TextField("Corrected words", text: $model.textDraft, axis: .vertical)
+                .accessibilityLabel("Corrected words")
                 .lineLimit(1...8)
                 .dsFieldStyle()
                 .accessibilityIdentifier(Self.textFieldIdentifier)

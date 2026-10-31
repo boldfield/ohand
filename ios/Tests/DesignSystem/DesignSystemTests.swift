@@ -47,14 +47,14 @@ final class DesignSystemTokenTests: XCTestCase {
     }
 
     func testTokenValuesMatchTheDesignTable() {
-        XCTAssertEqual(DSColor.accent.light, DSRGBA(hex: 0x3D4ED6))
+        XCTAssertEqual(DSColor.accent.light, DSRGBA(hex: 0x3343CB))
         XCTAssertEqual(DSColor.accent.dark, DSRGBA(hex: 0x8E9BFF))
         XCTAssertEqual(DSColor.onAccent.dark, DSRGBA(hex: 0x0B0C14))
         XCTAssertEqual(DSColor.surface0.dark, DSRGBA(hex: 0x0A0B12))
         XCTAssertEqual(DSColor.glass.light, DSRGBA(hex: 0xFFFFFF, alpha: 0.64))
         XCTAssertEqual(DSColor.glass.dark, DSRGBA(hex: 0x1C1F32, alpha: 0.58))
         XCTAssertEqual(DSColor.glassStroke.dark, DSRGBA(hex: 0xFFFFFF, alpha: 0.12))
-        XCTAssertEqual(DSColor.destructive.light, DSRGBA(hex: 0xC9373C))
+        XCTAssertEqual(DSColor.destructive.light, DSRGBA(hex: 0xAE2C31))
         XCTAssertEqual(DSColor.signalRecord.dark, DSRGBA(hex: 0xFF6369))
     }
 

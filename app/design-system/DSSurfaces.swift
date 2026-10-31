@@ -107,11 +107,13 @@ struct DSRow: View {
             Text(label)
                 .font(DSFont.rowLabel)
                 .foregroundColor(DSColor.ink.color)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let value {
                 Text(value)
                     .font(DSFont.rowLabel)
                     .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if showsChevron {
                 Image(systemName: "chevron.right")

@@ -500,7 +500,7 @@ jobs:
           retention-days: 7
 
   # Accessibility audits at the default and the largest accessibility content size on one iPhone simulator. Any audit
-  # issue fails the job; the audit log and the screenshots of both sizes are in the artifact.
+  # issue fails the job; the artifact holds the audit log, the summary and the large-text screenshots.
   accessibility:
     name: Accessibility audits (default and largest text)
     runs-on: macos-26
@@ -583,15 +583,31 @@ jobs:
         shell: bash
         run: cat ios/.evidence/host-pressure.txt || true
 
-      - name: Upload audit log and screenshots
+      # Routine evidence only (CI artifact budget): the audit logs, the summary and the large-text screenshots.
+      - name: Upload audit log and large-text screenshots
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ios-accessibility
-          path: ios/.evidence
-          include-hidden-files: true
+          path: |
+            ios/.evidence/accessibility/audit-*.log
+            ios/.evidence/accessibility/xxxl-*.png
+            ios/.evidence/accessibility-summary.txt
+            ios/.evidence/accessibility-*.log
+            ios/.evidence/simulator.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 2
+
+      - name: Upload result bundles (failure only)
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-accessibility-failure
+          path: ios/.evidence/accessibility-*.xcresult
+          if-no-files-found: ignore
+          retention-days: 2
 
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test

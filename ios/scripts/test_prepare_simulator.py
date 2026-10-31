@@ -41,7 +41,10 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_workflow_does_not_weaken_tests(self):
-        self.assertNotIn("continue-on-error", self.workflow)
+        # Only an artifact upload may be non-fatal (docs/features/ci-artifact-budget.md); no test or build step is.
+        for step in re.split(r"\n      - ", self.workflow):
+            if "continue-on-error" in step:
+                self.assertIn("actions/upload-artifact", step)
         self.assertNotIn("retry-tests-on-failure", self.workflow)
         for days in re.findall(r"retention-days:\s*(\d+)", self.workflow):
             self.assertLessEqual(int(days), 7)

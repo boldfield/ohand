@@ -31,10 +31,10 @@ Each screen is audited with `XCUIApplication.performAccessibilityAudit()` and th
 | Status with a failed note; Status with a reminder that needs a time | `testStatusWithFailedNote`, `testStatusWithReminderNeedingATime` | failed-sorting, needs-correction |
 | Locked screen | `testLockedScreen` | locked |
 
-Any audit issue fails the test. The job log and the artifact `ios-accessibility` (retention 7 days) hold
-`accessibility/audit-default.log` and `accessibility/audit-xxxl.log` (one `ISSUE`, `EXEMPT`, `PASS` or `FAIL` line per
-finding and screen), the screenshots of both sizes (`accessibility/xxxl-*.png` are the large-text pictures), the
-`.xcresult` bundles and `accessibility-summary.txt`.
+Any audit issue fails the test. The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
+budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log` (one `ISSUE`, `EXEMPT`, `PASS` or `FAIL`
+line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.png`) and `accessibility-summary.txt`. The
+`.xcresult` bundles upload only when the job fails, as `ios-accessibility-failure`.
 
 ### Large text
 

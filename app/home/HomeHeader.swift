@@ -86,6 +86,7 @@ struct HomeHeader: View {
                 Text("Oh And")
                     .font(DSFont.wordmark)
                     .foregroundColor(DSColor.ink.color)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityElement(children: .combine)

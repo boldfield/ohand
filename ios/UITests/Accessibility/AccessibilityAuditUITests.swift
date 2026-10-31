@@ -293,7 +293,7 @@ final class AccessibilityAuditUITests: XCTestCase {
                 let identifier = element.identifier
                 if identifier == Self.fixtureStatusIdentifier || identifier == Self.announcementLogIdentifier { continue }
                 let hasName = !element.label.isEmpty || !element.title.isEmpty || !((element.placeholderValue ?? "").isEmpty)
-                XCTAssertTrue(hasName, "\(screen): a \(kind) with identifier '\(identifier)' has no label")
+                XCTAssertTrue(hasName, "\(screen): a \(kind) with identifier '\(identifier)' has no label: \(element.debugDescription.prefix(300)); parent \(element.value ?? "-")")
             }
         }
     }
@@ -398,7 +398,8 @@ final class AccessibilityAuditUITests: XCTestCase {
             }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
-        XCTFail("no back button was hittable")
+        let buttons = app.buttons.allElementsBoundByIndex.map { "\($0.label)|\($0.identifier)|hittable=\($0.isHittable)|\($0.frame)" }
+        XCTFail("no back button was hittable; buttons: \(buttons.joined(separator: "; "))")
         return false
     }
 

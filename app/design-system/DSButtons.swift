@@ -15,6 +15,7 @@ struct DSPillButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .fixedSize(horizontal: false, vertical: true)
             .font(DSFont.button)
             .foregroundColor(foreground)
             .padding(.horizontal, DSSpacing.lg)
