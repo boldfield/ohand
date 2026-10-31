@@ -37,7 +37,7 @@ For optional paired-model comparison tasks, read [the comparison specification](
 - Test retry/idempotency, conflicts, reminder states, migrations/restore, deletion, and processing-boundary enforcement where a change affects them.
 - Run checks appropriate to the task. The canonical build and test commands for the Rust core are `make check` and `make test`; these are documented in the "Required checks for Linux Odonian workers" section below. Never claim a placeholder command passed.
 - Use synthetic fixtures in this public repository. Do not commit secrets, recordings, personal captures, private conversations, signing material, or internal service endpoints.
-- Required CI and independent review remain gates even though human approval is not one. Use standard hosted runners and bounded artifact retention; paid capacity requires separate authorization.
+- Required CI and independent review remain gates even though human approval is not one. Use standard hosted runners and keep CI artifacts within the budget in `docs/features/ci-artifact-budget.md`; paid capacity requires separate authorization.
 - Runtime adversarial review follows DESIGN.md and is not a substitute for independent code review.
 
 ## Required checks for Linux Odonian workers
@@ -58,7 +58,7 @@ Rust core checks are executed via the Makefile:
 
 These checks are wired into `.github/workflows/core.yml` on Linux runners (ubuntu-latest) via GitHub Actions. The workflow runs on all pull requests to main and validates that the change compiles, passes tests, and meets lint standards with locked dependencies. 
 
-Artifact retention is bounded: `core.yml` does not upload artifacts; any future CI artifact upload must set `retention-days ≤ 7` to limit storage and cost. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
+CI artifacts are budgeted, not only bounded in time. The `boldfield` account shares one GitHub Actions storage quota across every repository; ohand exhausted it on 2026-10-29 with 18 GB of seven-day evidence, which turned other repositories' required checks red (`docs/features/ci-artifact-budget.md`). `core.yml` uploads nothing. Every other upload step follows the budget: routine evidence (logs, screenshots, text and JSON records) uploads with `retention-days: 2`, a green `ios.yml` run stays under 25 MB of artifacts across all its jobs and a green `upgrade.yml` run under 5 MB; `.xcresult` and other result bundles are never in a routine artifact and upload only when the job has failed, under the routine name with a `-failure` suffix and `retention-days: 2`; every upload step sets `continue-on-error: true`, so a quota event degrades evidence instead of failing a required check. Acceptance criteria assert on files in the workspace, and reviewers read the logs inside the artifact. `ios/scripts/check_project_config.py` enforces the mechanical parts of this rule. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
 
 ## Required checks for macOS workers
 

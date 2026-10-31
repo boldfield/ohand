@@ -3577,6 +3577,8 @@ Keyboard navigation is not asserted in the simulator; it belongs to U10b.
 
 Contributes to original U10 criteria: 1 (automated audits), 2 (fixes recorded).
 
+**Amendment (coordinator, 2026-10-31, CI artifact budget).** The `ios-accessibility` artifact on PR #390 (head 2d29942) is 458 MB per run because it uploads all of `ios/.evidence`, result bundles included; at this week's run rate that alone exhausts the account's shared Actions storage quota in a day (`docs/features/ci-artifact-budget.md`). Criterion 5 now reads: the uploaded artifact holds the audit log, the summary and the large-text screenshots only, with `retention-days: 2` and `continue-on-error: true`; result bundles upload only when the job has failed, under `ios-accessibility-failure` with `retention-days: 2`; and the whole `ios.yml` run stays under 25 MB of artifacts. CI01 and CI02 edit the same workflow and land first; rebase over them. The contrast, Dynamic Type and clipping findings in the 2026-10-30 block note are a separate maintainer decision and are recorded here when made.
+
 ### U10b
 
 Record the actual-device accessibility pass
