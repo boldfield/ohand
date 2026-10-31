@@ -14,6 +14,7 @@ import yaml
 
 IOS_ROOT = Path(__file__).resolve().parent.parent
 IOS_WORKFLOW = IOS_ROOT.parent / ".github" / "workflows" / "ios.yml"
+UPGRADE_WORKFLOW = IOS_ROOT.parent / ".github" / "workflows" / "upgrade.yml"
 BUNDLE_PREFIX = "com.boldfield.ohand"
 
 # F01-owned native roots that must be reachable from a target without editing project.yml.
@@ -158,6 +159,23 @@ def check_workflow_xcode_pin(project, workflow_path=IOS_WORKFLOW):
             errors.append(f"ios.yml job {job_name} selects Xcode {pins[0]!r} but options.xcodeVersion is {project_pin!r}")
     if not workflow.get("jobs"):
         errors.append("ios.yml defines no jobs")
+    return errors
+
+
+def check_artifact_uploads_non_fatal(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
+    """A storage quota event must degrade evidence, never fail a required check."""
+    errors = []
+    for workflow_path in workflow_paths:
+        workflow = yaml.safe_load(workflow_path.read_text())
+        for job_name, job in workflow.get("jobs", {}).items():
+            for step in job.get("steps", []):
+                if not str(step.get("uses", "")).startswith("actions/upload-artifact@"):
+                    continue
+                if step.get("continue-on-error") is not True:
+                    errors.append(
+                        f"{workflow_path.name} job {job_name} step {step.get('name', step['uses'])!r} "
+                        "uploads an artifact without continue-on-error: true"
+                    )
     return errors
 
 
@@ -338,7 +356,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":

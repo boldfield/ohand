@@ -382,6 +382,7 @@ jobs:
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ios-evidence
           path: ios/.evidence
@@ -492,6 +493,7 @@ jobs:
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ios-walkthrough-${{ matrix.width }}
           path: ios/.evidence
@@ -691,6 +693,7 @@ jobs:
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: tauri-probe-evidence
           path: probes/tauri/.evidence
