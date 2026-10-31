@@ -259,7 +259,11 @@ struct FailedNotesActions: View {
 
     var body: some View {
         if model.offersNoteRetry {
-            Button(StatusText.retryLabel, action: retryAction)
+            Button(action: retryAction) {
+                Text(StatusText.retryLabel)
+                    .foregroundColor((model.isRerunning ? DSColor.inkMuted : DSColor.accent).color)
+                    .environment(\.isEnabled, true)
+            }
                 .font(DSFont.rowLabel)
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.rowMinimumHeight)

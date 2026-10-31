@@ -175,6 +175,7 @@ struct ResetSettingsView: View {
                     .foregroundColor(DSColor.ink.color)
             }
             .frame(minHeight: 44)
+            .environment(\.isEnabled, true)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(model.credentialChoice == value ? .isSelected : [])

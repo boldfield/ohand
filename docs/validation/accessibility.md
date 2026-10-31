@@ -71,6 +71,7 @@ An exemption is one issue on one element, handled in `isExempt` with a comment, 
 | --- | --- | --- |
 | `ui-fixture.status` | any | A 4-point, near-transparent marker added by debug builds only, so a test knows the fixture finished seeding. It is not part of the app a person uses. |
 | `provider-settings.field.model`, `provider-settings.field.secret` | Text clipped (text fields only) | A single-line text field cannot wrap; the audit's "may be clipped at larger Dynamic Type sizes" is a heuristic every single-line field raises. The fields use a scaling font, keep their 44 pt minimum height and grow with it, and the largest-size screenshot in the artifact shows them whole. |
+| the keyboard's prediction cells (`TUIPredictionViewCell`) | Element has no description | The system keyboard's predictive bar, drawn by iOS and not by the app. |
 | `accessibility.announcement-log` | any | The same kind of debug-only marker, holding the announcements a test reads. |
 
 ### Settling

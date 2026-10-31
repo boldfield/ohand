@@ -296,6 +296,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// docs/validation/accessibility.md. No whole audit type is ever excluded.
     private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
+        // The keyboard's prediction bar is the system's, not the app's.
+        if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }
         // A single-line field cannot wrap, so the audit's "may be clipped at larger Dynamic Type sizes" for a
         // text field is a heuristic it cannot clear; at the largest size the screenshot shows the field growing in height.
         if issue.auditType == .textClipped,
