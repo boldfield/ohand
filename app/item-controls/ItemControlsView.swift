@@ -189,6 +189,7 @@ struct ItemControlsView: View {
                 }
             }
             .pickerStyle(.menu)
+            .tint(DSColor.accent.color)
             .accessibilityIdentifier(Self.typePickerIdentifier)
             if model.pendingTypeMakesAction {
                 Text(Self.actionWarning)

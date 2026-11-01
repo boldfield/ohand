@@ -175,9 +175,8 @@ struct ResetSettingsView: View {
                     .foregroundColor(DSColor.ink.color)
             }
             .frame(minHeight: 44)
-            .environment(\.isEnabled, true)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(UndimmedChoiceButtonStyle())
         .accessibilityAddTraits(model.credentialChoice == value ? .isSelected : [])
         .accessibilityIdentifier(identifier)
         .reportDataSettingsRendered(identifier, text: title)
@@ -226,5 +225,15 @@ extension ResetSettingsModel {
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ResetSettingsModel {
         ResetSettingsModel(
             controls: root.resetControl, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+    }
+}
+
+/// A button that draws its label as given. The system's plain style dims a disabled label on top of the colours set here,
+/// which leaves the unchanged choices too faint while a reset waits for confirmation.
+private struct UndimmedChoiceButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .environment(\.isEnabled, true)
+            .opacity(configuration.isPressed ? 0.6 : 1)
     }
 }
