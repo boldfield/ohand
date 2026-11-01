@@ -182,6 +182,15 @@ def check_artifact_uploads_non_fatal(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKF
 MAX_ARTIFACT_RETENTION_DAYS = 2
 
 
+def bundle_exclusion_covers(include_root, exclude_patterns):
+    """True when exclusions remove every .xcresult bundle (directory and contents) under include_root."""
+    root = include_root.rstrip("/")
+    bundle_patterns = {f"{root}/**/*.xcresult", "**/*.xcresult"}
+    content_patterns = {f"{root}/**/*.xcresult/**", "**/*.xcresult/**"}
+    excluded = set(exclude_patterns)
+    return bool(bundle_patterns & excluded) and bool(content_patterns & excluded)
+
+
 def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
     """Routine artifacts keep result bundles out and expire in 2 days; bundles upload only after a failure."""
     errors = []
@@ -203,8 +212,11 @@ def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
                     continue
                 includes = [line for line in path_lines if not line.startswith("!")]
                 excludes = [line[1:] for line in path_lines if line.startswith("!")]
-                if includes and not any(".xcresult" in line for line in excludes):
-                    errors.append(f"{where} can include a .xcresult bundle in a routine artifact without an exclusion")
+                uncovered = [root for root in includes if not bundle_exclusion_covers(root, excludes)]
+                if uncovered:
+                    errors.append(
+                        f"{where} can include a .xcresult bundle in a routine artifact without an exclusion covering {uncovered}"
+                    )
                 if any(".xcresult" in line for line in includes):
                     errors.append(f"{where} includes a .xcresult bundle in a routine artifact")
     return errors

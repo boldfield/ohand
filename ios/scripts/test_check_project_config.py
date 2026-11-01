@@ -222,9 +222,17 @@ class ProjectConfigChecks(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn(".xcresult", errors[0])
 
-    def test_routine_upload_of_bundle_path_is_reported(self):
-        errors = self.budget_errors(path="out/*.xcresult\n!out/**/*.xcresult")
+    def test_exclusion_for_an_unrelated_root_is_reported(self):
+        errors = self.budget_errors(path="out\n!other/**/*.xcresult\n!other/**/*.xcresult/**")
         self.assertEqual(len(errors), 1)
+        self.assertIn(".xcresult", errors[0])
+
+    def test_exclusion_without_bundle_contents_is_reported(self):
+        self.assertEqual(len(self.budget_errors(path="out\n!out/**/*.xcresult")), 1)
+
+    def test_routine_upload_of_bundle_path_is_reported(self):
+        errors = self.budget_errors(path="out/*.xcresult\n!out/**/*.xcresult\n!out/**/*.xcresult/**")
+        self.assertTrue(any("includes a .xcresult" in error for error in errors))
 
     def test_failure_upload_of_bundles_requires_failure_condition(self):
         self.assertEqual(self.budget_errors(path="out/**/*.xcresult", name="x-failure", condition="failure()"), [])
