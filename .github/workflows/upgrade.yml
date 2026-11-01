@@ -107,10 +107,25 @@ jobs:
         continue-on-error: true
         with:
           name: upgrade-evidence
-          path: upgrade-evidence
+          path: |
+            upgrade-evidence
+            !upgrade-evidence/**/*.xcresult
+            !upgrade-evidence/**/*.xcresult/**
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 2
+
+      # Result bundles are too large for routine evidence (docs/features/ci-artifact-budget.md); keep them only when the job failed.
+      - name: Upload the upgrade report and logs (result bundles, failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: upgrade-evidence-failure
+          path: upgrade-evidence/**/*.xcresult
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 2
 
   # The debug-only upgrade report must not exist in a Release build: build one and look for it.
   release-excludes-report:

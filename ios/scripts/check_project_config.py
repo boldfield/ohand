@@ -179,6 +179,37 @@ def check_artifact_uploads_non_fatal(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKF
     return errors
 
 
+MAX_ARTIFACT_RETENTION_DAYS = 2
+
+
+def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
+    """Routine artifacts keep result bundles out and expire in 2 days; bundles upload only after a failure."""
+    errors = []
+    for workflow_path in workflow_paths:
+        workflow = yaml.safe_load(workflow_path.read_text())
+        for job_name, job in workflow.get("jobs", {}).items():
+            for step in job.get("steps", []):
+                if not str(step.get("uses", "")).startswith("actions/upload-artifact@"):
+                    continue
+                where = f"{workflow_path.name} job {job_name} step {step.get('name', step['uses'])!r}"
+                options = step.get("with", {})
+                retention = options.get("retention-days")
+                if not isinstance(retention, int) or isinstance(retention, bool) or not 1 <= retention <= MAX_ARTIFACT_RETENTION_DAYS:
+                    errors.append(f"{where} must declare retention-days of at most {MAX_ARTIFACT_RETENTION_DAYS}, found {retention!r}")
+                path_lines = [line.strip() for line in str(options.get("path", "")).splitlines() if line.strip()]
+                if str(options.get("name", "")).endswith("-failure"):
+                    if "failure()" not in str(step.get("if", "")):
+                        errors.append(f"{where} uploads result bundles without running only if failure()")
+                    continue
+                includes = [line for line in path_lines if not line.startswith("!")]
+                excludes = [line[1:] for line in path_lines if line.startswith("!")]
+                if includes and not any(".xcresult" in line for line in excludes):
+                    errors.append(f"{where} can include a .xcresult bundle in a routine artifact without an exclusion")
+                if any(".xcresult" in line for line in includes):
+                    errors.append(f"{where} includes a .xcresult bundle in a routine artifact")
+    return errors
+
+
 def check_control_extensions(project, root=IOS_ROOT):
     errors = []
     targets = project["targets"]
@@ -356,7 +387,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":
