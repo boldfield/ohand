@@ -20,7 +20,6 @@ struct DSPillButtonStyle: ButtonStyle {
             // A disabled button is drawn by this style (`foreground`, `fill`), not dimmed by the system on top of it, so
             // its words keep the contrast the audit measures.
             .environment(\.isEnabled, true)
-            .fixedSize(horizontal: false, vertical: true)
             .font(DSFont.button)
             .foregroundColor(foreground)
             .padding(.horizontal, DSSpacing.lg)
