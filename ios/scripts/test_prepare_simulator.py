@@ -3,6 +3,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import yaml
+
 SCRIPTS = Path(__file__).resolve().parent
 WORKFLOW = SCRIPTS.parents[1] / ".github" / "workflows" / "ios.yml"
 
@@ -26,7 +28,7 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertIn("swapins swapouts compressor_pages", self.script)
 
     def test_quiet_host_runs_first_in_both_simulator_jobs_and_spares_the_essentials(self):
-        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 3)
+        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 2)
         quiet = (SCRIPTS / "quiet-host.sh").read_text()
         for essential in ("CoreSimulator", "Xcode", "Runner.Listener", "provjobd"):
             self.assertNotIn(f"pkill -x {essential}", quiet)
@@ -41,10 +43,12 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_workflow_does_not_weaken_tests(self):
-        # Only an artifact upload may be non-fatal (docs/features/ci-artifact-budget.md); no test or build step is.
-        for step in re.split(r"\n      - ", self.workflow):
-            if "continue-on-error" in step:
-                self.assertIn("actions/upload-artifact", step)
+        # Only artifact uploads may be non-fatal (CI01); a test or build step must never be.
+        workflow = yaml.safe_load(self.workflow)
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                if "continue-on-error" in step:
+                    self.assertTrue(str(step.get("uses", "")).startswith("actions/upload-artifact@"), step.get("name"))
         self.assertNotIn("retry-tests-on-failure", self.workflow)
         for days in re.findall(r"retention-days:\s*(\d+)", self.workflow):
             self.assertLessEqual(int(days), 7)

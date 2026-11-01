@@ -4447,6 +4447,8 @@ Acceptance:
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
 
+**Ownership amendment (coordinator, 2026-10-31, after PR #388 round 2).** The reviewers were right that "Set the type yourself" must reach the Type picker, not the whole controls section. Less is needed than the worker asked for. `SourceDetailView.swift` already wraps its `ScrollView` in a `ScrollViewReader` and scrolls to the reminder editor by identity (F59, around line 74 and line 112); `ItemControlsModel.canEdit` already says whether the correction is loaded and editable, so the control can be hidden or disabled from that. SwiftUI cannot open a menu picker programmatically, so "reach" means scrolled into view at the top with the picker visible. F54b also owns `app/item-controls/ItemControlsView.swift`, only to give the Type control (the `typeControl` view, around line 179) a scroll identity: one static identifier and one `.id` on that view. No model change, no new request or signal, no edit to `ios/Tests/ItemControls/`. The source-detail button scrolls to that identity through the existing proxy and is shown only while `canEdit` is true; the hosted tests in `ios/Tests/SourceDetail/` cover the scroll request and the hidden state in both appearances. U10a's PR #390 also edits `ItemControlsView.swift` (accessibility attributes); the edits are additive at different lines, and whichever lands second rebases.
+
 ### F55
 
 Tell the model how to sort a question the user asks themselves
