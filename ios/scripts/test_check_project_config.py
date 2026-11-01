@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 import check_project_config as checks
 
 
@@ -165,6 +167,30 @@ class ProjectConfigChecks(unittest.TestCase):
         project = checks.load_project()
         self.assertEqual(checks.check_workflow_xcode_pin(project), [])
         self.assertEqual(str(project["options"]["xcodeVersion"]), "26.6")
+
+    def write_upload_workflow(self, directory, continue_on_error):
+        step = {"name": "Upload evidence", "uses": "actions/upload-artifact@v4", "with": {"name": "x", "path": "y"}}
+        if continue_on_error is not None:
+            step["continue-on-error"] = continue_on_error
+        path = Path(directory) / "upload.yml"
+        path.write_text(yaml.safe_dump({"jobs": {"build": {"steps": [{"run": "true"}, step]}}}))
+        return path
+
+    def test_committed_artifact_uploads_are_non_fatal(self):
+        self.assertEqual(checks.check_artifact_uploads_non_fatal(), [])
+
+    def test_artifact_upload_with_continue_on_error_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_upload_workflow(directory, True)
+            self.assertEqual(checks.check_artifact_uploads_non_fatal([path]), [])
+
+    def test_artifact_upload_without_continue_on_error_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for value in (None, False):
+                path = self.write_upload_workflow(directory, value)
+                errors = checks.check_artifact_uploads_non_fatal([path])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("continue-on-error", errors[0])
 
     def test_workflow_pin_disagreeing_with_project_is_reported(self):
         project = checks.load_project()

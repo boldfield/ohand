@@ -3,6 +3,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import yaml
+
 SCRIPTS = Path(__file__).resolve().parent
 WORKFLOW = SCRIPTS.parents[1] / ".github" / "workflows" / "ios.yml"
 
@@ -41,7 +43,12 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_workflow_does_not_weaken_tests(self):
-        self.assertNotIn("continue-on-error", self.workflow)
+        # Only artifact uploads may be non-fatal (CI01); a test or build step must never be.
+        workflow = yaml.safe_load(self.workflow)
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                if "continue-on-error" in step:
+                    self.assertTrue(str(step.get("uses", "")).startswith("actions/upload-artifact@"), step.get("name"))
         self.assertNotIn("retry-tests-on-failure", self.workflow)
         for days in re.findall(r"retention-days:\s*(\d+)", self.workflow):
             self.assertLessEqual(int(days), 7)
