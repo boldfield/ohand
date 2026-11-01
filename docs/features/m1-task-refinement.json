@@ -3783,7 +3783,9 @@
         ".github/workflows/ios.yml",
         "docs/validation/accessibility.md",
         "app/",
-        "app/accessibility/"
+        "app/accessibility/",
+        "ios/scripts/check_font_tokens.py (new, with its unit test)",
+        "Makefile (the ios-check line only)"
       ],
       "intent": "Find, fix and gate every accessibility defect the simulator can detect, so the device pass confirms the app instead of discovering its defects.",
       "acceptance": [
@@ -5574,6 +5576,10 @@
     {
       "date": "2026-11-01",
       "change": "U10a paused and amended: its failing audit runs uploaded a 448 MB result bundle per push and refilled the account's shared Actions storage quota. U10a now depends on CI02 and CI03 (docs/features/ci-artifact-budget.md; set on the Odonian task, not in this graph, because the CI tasks are outside M1) and on resume uses CI03's export script for its failure-only artifact (retention 1 day) with no bundle upload. Acceptance unchanged."
+    },
+    {
+      "date": "2026-11-01",
+      "change": "U10a amendment (maintainer decision): the default-size audit run drops the .dynamicType audit type, which reports any scrolling list of text as partially unsupported once growth pushes elements out of the scroll bounds (reproduced locally at 3b783c84 with frames); the largest-size run keeps every type. Dynamic Type evidence is the largest-size run plus ios/scripts/check_font_tokens.py (owned by U10a with its test and the ios-check Makefile line), which fails on any DSMetrics font token not built from a text style."
     }
   ]
 }
