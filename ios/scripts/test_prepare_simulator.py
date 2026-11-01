@@ -43,12 +43,14 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_workflow_does_not_weaken_tests(self):
-        # Only artifact uploads may be non-fatal (CI01); a test or build step must never be.
+        # Only artifact uploads and their failure-diagnostics export (CI03) may be non-fatal; a test or build step must never be.
         workflow = yaml.safe_load(self.workflow)
         for job in workflow["jobs"].values():
             for step in job["steps"]:
                 if "continue-on-error" in step:
-                    self.assertTrue(str(step.get("uses", "")).startswith("actions/upload-artifact@"), step.get("name"))
+                    is_upload = str(step.get("uses", "")).startswith("actions/upload-artifact@")
+                    is_export = "export-failure-diagnostics.sh" in str(step.get("run", ""))
+                    self.assertTrue(is_upload or is_export, step.get("name"))
         self.assertNotIn("retry-tests-on-failure", self.workflow)
         for days in re.findall(r"retention-days:\s*(\d+)", self.workflow):
             self.assertLessEqual(int(days), 7)
