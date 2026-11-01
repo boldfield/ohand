@@ -80,6 +80,8 @@ Acceptance: no routine artifact holds a bundle; retention is 2 days everywhere; 
 
 Revised 2026-11-01: CI02 lands as specified, with its failure-only steps uploading whole bundles at `retention-days: 2`, because it was already under review when rule item 4 was rewritten. CI03 replaces those steps. CI02 is not reopened for this.
 
+Ownership amendment (coordinator, 2026-11-01, after the third round blocked): `tools/release/test_upgrade_check_structure.py` has a test, `test_artifacts_are_kept_for_seven_days`, that pins every `upgrade.yml` upload at `retention-days: 7`, so acceptance item 2 cannot pass `make test` without editing it. CI02 owns that one test: rename it and assert the budget's 2 days for every upload step in `upgrade.yml`. Nothing else in that file changes.
+
 ## CI03
 
 Cap failure diagnostics: export from the bundle, under 100 MB, retention 1 day
@@ -90,7 +92,7 @@ The script, per bundle: writes the test summary and the test list as JSON with `
 
 `check_project_config.py` fails when any upload step in either workflow, routine or failure, has a path that can include a `.xcresult` bundle without an exclusion, when a failure-only upload step declares `retention-days` other than 1, or when a failure-only upload step is not preceded by the export step. Tests for the passing and failing cases.
 
-Owned paths: the two workflow files (the failure-only upload steps and the new export steps; the routine steps are unchanged), `ios/scripts/export-failure-diagnostics.sh` (new), `ios/scripts/check_project_config.py` and its unit tests. AGENTS.md is already updated and is not touched.
+Owned paths: the two workflow files (the failure-only upload steps and the new export steps; the routine steps are unchanged), `ios/scripts/export-failure-diagnostics.sh` (new), `ios/scripts/check_project_config.py` and its unit tests, and the retention test in `tools/release/test_upgrade_check_structure.py` that CI02 set to 2 days for every `upgrade.yml` upload: CI03 makes it assert 2 days on routine steps and 1 day on `-failure` steps, and nothing else in that file (added 2026-11-01). AGENTS.md is already updated and is not touched.
 
 Dependencies: CI02 (same steps; CI03 rebases over it).
 
