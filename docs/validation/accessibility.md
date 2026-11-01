@@ -80,6 +80,15 @@ An audit that reports something is repeated once after three seconds, because a 
 wrong background. Only issues the settled screen still has count; each of them fails the test, and the log records the first
 pass as a `RETRY` line.
 
+### Content under glass
+
+The header buttons, the back button and the composer are translucent glass. A card or label scrolled partly under one is
+measured against the blurred overlay and not against its own background, so the audit reports contrast, Dynamic Type or
+clipping for it. The test does not count such an issue when the element's frame reaches into the overlay (the `EXEMPT`
+line says so), and audits the same content again with the list scrolled to its other end, where it is clear of the
+overlay (`home-populated` and `home-populated-end`; the three source-detail stops). The overlays' own controls are never
+exempt by this rule.
+
 ### Scope of fixes
 
 Fixes made for this gate change accessibility attributes and the layout large text needs, nothing else. Visible copy is

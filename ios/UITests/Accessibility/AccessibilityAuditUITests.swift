@@ -15,6 +15,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     private var outputDirectory: URL!
     private var screenshotIndex = 0
     private var auditLines: [String] = []
+    /// The part of the screen not covered by a glass overlay (the header buttons, the back button, the composer), set per audit.
+    private var clearBand: ClosedRange<CGFloat> = 0...CGFloat.greatestFiniteMagnitude
     private let screenTimeout: TimeInterval = 90
 
     private static let largestContentSize = "UICTContentSizeCategoryAccessibilityXXXL"
@@ -64,6 +66,10 @@ final class AccessibilityAuditUITests: XCTestCase {
         XCTAssertTrue(app.homeCard(containing: "Synthetic typed note about the garden hose").waitForExistence(timeout: screenTimeout))
         dismissKeyboardIfShown()
         audit("home-populated")
+        // The cards under the composer are audited again once the list is scrolled to its end.
+        for _ in 0..<4 { app.swipeUp() }
+        Thread.sleep(forTimeInterval: 1)
+        audit("home-populated-end")
     }
 
     func testCaptureVoiceIdle() {
@@ -237,6 +243,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         XCTAssertTrue(unlock.isEnabled, "the unlock control is disabled")
         dismissKeyboardIfShown()
         scrollUntilHittable(unlock)
+        for _ in 0..<3 where unlock.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
         XCTAssertTrue(unlock.isHittable, "the unlock control cannot be reached, so authentication has a dead end")
         audit("locked")
         assertAnnouncement(containing: "Your captures are locked")
@@ -255,6 +262,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// Screenshot, then the audit with every default type. An issue not exempted by `isExempt` fails the test.
     private func audit(_ screen: String) {
         capture(screen)
+        clearBand = currentClearBand()
         if app.keyboards.count == 0 { assertInteractiveElementsAreLabelled(screen) }
         // An audit that finds something is repeated after the screen has settled: a card still fading in or a view
         // mid-transition is sampled against the wrong background and reports a contrast or text-size issue that is gone
@@ -296,6 +304,15 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// docs/validation/accessibility.md. No whole audit type is ever excluded.
     private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
+        // Content scrolled partly under a translucent glass overlay is measured against the blurred overlay, not its own
+        // background. Such an element is audited once the screen is scrolled so that it is clear of the overlay (the Home
+        // and source detail tests audit both ends of the scroll); the overlay's own controls are never exempt here.
+        if [XCUIAccessibilityAuditType.contrast, .dynamicType, .textClipped].contains(issue.auditType),
+           let frame = issue.element?.frame, !identifier.hasPrefix("home.composer"),
+           !["home.search", "home.settings", "home.done"].contains(identifier),
+           frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound {
+            return true
+        }
         // The keyboard's prediction bar is the system's, not the app's.
         if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }
         // A single-line field cannot wrap, so the audit's "may be clipped at larger Dynamic Type sizes" for a
@@ -325,6 +342,16 @@ final class AccessibilityAuditUITests: XCTestCase {
                 XCTAssertTrue(hasName || isNamedByContainer, "\(screen): a \(kind) with identifier '\(identifier)' has no label: \(element.debugDescription.prefix(300)); parent \(element.value ?? "-")")
             }
         }
+    }
+
+    /// The vertical band between the overlays at the top and bottom of the screen.
+    private func currentClearBand() -> ClosedRange<CGFloat> {
+        let topCandidates = [app.buttons["home.search"], app.buttons["home.settings"], app.buttons["home.done"], app.buttons["Back"].firstMatch]
+        let top = topCandidates.filter { $0.exists }.map { $0.frame.maxY }.max().map { $0 + 12 } ?? 0
+        let composerIdentifiers = ["home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard"]
+        let bottom = composerIdentifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY }.min().map { $0 - 28 }
+            ?? CGFloat.greatestFiniteMagnitude
+        return top...max(top, bottom)
     }
 
     private func isInsideLabelledElement(_ element: XCUIElement) -> Bool {
