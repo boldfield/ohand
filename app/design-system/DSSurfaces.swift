@@ -202,7 +202,7 @@ struct DSChip: View {
                 .font(DSFont.chip)
                 .foregroundColor((isSelected ? DSColor.onAccent : DSColor.ink).color)
                 .padding(.horizontal, DSSpacing.md)
-                .frame(height: DSLayout.chipHeight)
+                .frame(minHeight: DSLayout.chipHeight)
                 .background(Capsule().fill((isSelected ? DSColor.accent : DSColor.surface2).color))
                 .frame(minWidth: DSLayout.minimumTouchTarget, minHeight: DSLayout.minimumTouchTarget)
                 .contentShape(Rectangle())

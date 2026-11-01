@@ -119,11 +119,8 @@ struct ReminderEditSection: View {
     }
 
     private var actions: some View {
-        // Side by side while both fit; stacked when large text leaves no room, so no title is cut.
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: DSSpacing.sm) { actionButtons }
-            VStack(alignment: .leading, spacing: DSSpacing.sm) { actionButtons }
-        }
+        // Stacked, so a long title at a large text size has the full width and is never cut.
+        VStack(alignment: .leading, spacing: DSSpacing.sm) { actionButtons }
     }
 
     @ViewBuilder private var actionButtons: some View {
