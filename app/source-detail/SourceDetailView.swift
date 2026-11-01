@@ -299,6 +299,7 @@ struct SourceDetailView: View {
             Text(capturedAt.formatted(date: .abbreviated, time: .shortened))
                 .font(DSFont.footer)
                 .foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

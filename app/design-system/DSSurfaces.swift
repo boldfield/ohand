@@ -201,6 +201,7 @@ struct DSChip: View {
         Button(action: action) {
             Text(title)
                 .font(DSFont.chip)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundColor((isSelected ? DSColor.onAccent : DSColor.ink).color)
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.chipHeight)

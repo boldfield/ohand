@@ -227,12 +227,14 @@ struct HomeBodyView: View {
                     Text(caption)
                         .font(DSFont.groupHeading)
                         .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
                         .reportHomeRendered(Self.cardCaptionIdentifierPrefix + entry.id, text: caption)
                 }
                 Text(Self.text(for: entry))
                     .font(DSFont.body)
                     .foregroundColor(DSColor.ink.color)
                     .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if entry.needsTime {
                     HStack(spacing: DSSpacing.xxs) {

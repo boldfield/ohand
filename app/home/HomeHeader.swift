@@ -23,6 +23,7 @@ struct HomeHeader: View {
     static let settingsIdentifier = "home.settings"
     static let doneIdentifier = "home.done"
 
+    @Environment(\.sizeCategory) private var sizeCategory
     let keyboardIsVisible: Bool
     let actionsAreDisabled: Bool
     var isRegularWidth = false
@@ -60,6 +61,8 @@ struct HomeHeader: View {
                 Button(action: onDone) {
                     Text("Done")
                         .font(DSFont.button)
+                        .lineLimit(1)
+                        .fixedSize()
                         .foregroundColor(DSColor.accent.color)
                         .padding(.horizontal, DSSpacing.md)
                         .frame(minHeight: DSLayout.minimumTouchTarget)
@@ -79,17 +82,23 @@ struct HomeHeader: View {
         }
     }
 
+    /// At the accessibility text sizes the wordmark gives way to the mark while Done is shown, so Done keeps its whole word.
+    private var wordmarkIsAbbreviated: Bool { sizeCategory.isAccessibilityCategory && keyboardIsVisible }
+
     private var wordmark: some View {
         DSGlassPill {
             HStack(spacing: DSSpacing.xs) {
                 DSMark(size: 22)
-                Text("Oh And")
-                    .font(DSFont.wordmark)
-                    .foregroundColor(DSColor.ink.color)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !wordmarkIsAbbreviated {
+                    Text("Oh And")
+                        .font(DSFont.wordmark)
+                        .foregroundColor(DSColor.ink.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Oh And")
         .accessibilityAddTraits(.isHeader)
     }
 }

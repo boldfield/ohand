@@ -12,8 +12,6 @@ enum DSPillStyle {
 struct DSPillButtonStyle: ButtonStyle {
     let style: DSPillStyle
     @Environment(\.isEnabled) private var isEnabled
-    @ScaledMetric(relativeTo: .body) private var primaryHeight = DSLayout.primaryButtonHeight
-    @ScaledMetric(relativeTo: .body) private var secondaryHeight = DSLayout.secondaryButtonHeight
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -35,12 +33,12 @@ struct DSPillButtonStyle: ButtonStyle {
     }
 
     private var height: CGFloat {
-        style == .primary ? primaryHeight : secondaryHeight
+        style == .primary ? DSLayout.primaryButtonHeight : DSLayout.secondaryButtonHeight
     }
 
     private var foreground: Color {
         switch style {
-        case .primary: return (isEnabled ? DSColor.onAccent : DSColor.inkFaint).color
+        case .primary: return (isEnabled ? DSColor.onAccent : DSColor.inkMuted).color
         case .secondary: return (isEnabled ? DSColor.ink : DSColor.inkMuted).color
         case .plain: return (isEnabled ? DSColor.accent : DSColor.inkFaint).color
         case .destructive: return (isEnabled ? DSColor.destructive : DSColor.inkFaint).color
