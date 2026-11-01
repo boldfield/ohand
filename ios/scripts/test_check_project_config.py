@@ -192,6 +192,58 @@ class ProjectConfigChecks(unittest.TestCase):
                 self.assertEqual(len(errors), 1)
                 self.assertIn("continue-on-error", errors[0])
 
+    def write_budget_workflow(self, directory, path="out\n!out/**/*.xcresult\n!out/**/*.xcresult/**", retention=2, name="x", condition=None):
+        step = {"name": "Upload", "uses": "actions/upload-artifact@v4", "continue-on-error": True,
+                "with": {"name": name, "path": path, "retention-days": retention}}
+        if condition is not None:
+            step["if"] = condition
+        workflow = Path(directory) / "budget.yml"
+        workflow.write_text(yaml.safe_dump({"jobs": {"build": {"steps": [step]}}}))
+        return workflow
+
+    def budget_errors(self, **options):
+        with tempfile.TemporaryDirectory() as directory:
+            return checks.check_artifact_budget([self.write_budget_workflow(directory, **options)])
+
+    def test_committed_artifacts_follow_the_budget(self):
+        self.assertEqual(checks.check_artifact_budget(), [])
+
+    def test_routine_upload_excluding_bundles_with_two_day_retention_passes(self):
+        self.assertEqual(self.budget_errors(), [])
+
+    def test_retention_above_two_days_is_reported(self):
+        for retention in (3, 7, None):
+            errors = self.budget_errors(retention=retention)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("retention-days", errors[0])
+
+    def test_routine_upload_without_bundle_exclusion_is_reported(self):
+        errors = self.budget_errors(path="out")
+        self.assertEqual(len(errors), 1)
+        self.assertIn(".xcresult", errors[0])
+
+    def test_exclusion_for_an_unrelated_root_is_reported(self):
+        errors = self.budget_errors(path="out\n!other/**/*.xcresult\n!other/**/*.xcresult/**")
+        self.assertEqual(len(errors), 1)
+        self.assertIn(".xcresult", errors[0])
+
+    def test_exclusion_without_bundle_contents_is_reported(self):
+        self.assertEqual(len(self.budget_errors(path="out\n!out/**/*.xcresult")), 1)
+
+    def test_routine_upload_of_bundle_path_is_reported(self):
+        errors = self.budget_errors(path="out/*.xcresult\n!out/**/*.xcresult\n!out/**/*.xcresult/**")
+        self.assertTrue(any("includes a .xcresult" in error for error in errors))
+
+    def test_failure_upload_of_bundles_requires_failure_condition(self):
+        self.assertEqual(self.budget_errors(path="out/**/*.xcresult", name="x-failure", condition="failure()"), [])
+        errors = self.budget_errors(path="out/**/*.xcresult", name="x-failure", condition="always()")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("failure()", errors[0])
+
+    def test_failure_upload_still_limited_to_two_days(self):
+        errors = self.budget_errors(path="out/**/*.xcresult", name="x-failure", condition="failure()", retention=7)
+        self.assertEqual(len(errors), 1)
+
     def test_workflow_pin_disagreeing_with_project_is_reported(self):
         project = checks.load_project()
         with tempfile.TemporaryDirectory() as directory:
