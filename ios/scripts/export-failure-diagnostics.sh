@@ -6,8 +6,8 @@
 # Per bundle: the test summary and the test list as JSON (xcresulttool get test-results summary|tests, Xcode 16+),
 # then the attachments of the failed tests only, in test order, until OUTPUT_DIR reaches CAP_BYTES (shared across the
 # bundles; default 100 MB). MANIFEST.txt lists every file kept and every attachment omitted, with sizes.
-# The cap is hard: the JSON files, the attachments and MANIFEST.txt together never exceed it (the manifest is truncated
-# to what is left, and a space is reserved for it before anything else is written). A run-wide cap is shared by giving
+# The cap is hard: the JSON files, the attachments and MANIFEST.txt together never exceed it (room is reserved for the
+# manifest before anything else is written; the manifest is cut only if even that reserve is exceeded). A run-wide cap is shared by giving
 # each failing job of the run its own share through CAP_BYTES.
 # Always exits 0: the job has already failed and a diagnostics problem must not change its conclusion.
 # See docs/features/ci-artifact-budget.md.
@@ -39,7 +39,9 @@ cap_bytes = int(os.environ["CAP_BYTES"])
 tool = shlex.split(os.environ["XCRESULTTOOL"])
 manifest = []
 # Room kept back for MANIFEST.txt so the listing survives a cap that attachments or metadata would otherwise fill.
-manifest_reserve = min(65536, cap_bytes // 4)
+manifest_reserve = min(8 * 1024 * 1024, cap_bytes // 4)
+# Once an attachment does not fit, attachments stop: every later one is only listed as omitted.
+cap_reached = False
 
 
 def note(line):
@@ -80,6 +82,7 @@ def failed_test_cases(nodes):
 
 
 def export_bundle(bundle, label):
+    global cap_reached
     path = Path(bundle)
     if not path.is_dir():
         note(f"{bundle}: missing or not a bundle, nothing exported")
@@ -116,7 +119,8 @@ def export_bundle(bundle, label):
         # Test order: follow the failed-test list, then anything the manifest attributes to a failed test.
         def rank(entry):
             for index, case in enumerate(failed):
-                if entry.get("testIdentifier") in (case.get("nodeIdentifier"), case.get("nodeIdentifierURL"), case.get("name")):
+                candidates = (case.get("nodeIdentifier"), case.get("nodeIdentifierURL"), case.get("name"))
+                if entry.get("testIdentifier") in candidates or entry.get("testIdentifierURL") in candidates:
                     return index
             return len(failed)
         entries = [entry for entry in entries if entry.get("testIdentifier") in wanted or entry.get("testIdentifierURL") in wanted]
@@ -130,8 +134,9 @@ def export_bundle(bundle, label):
                 size = exported.stat().st_size
                 readable = attachment.get("suggestedHumanReadableName") or exported.name
                 name = f"{entry['testIdentifier'].replace('/', '_')}--{exported.name}"
-                if size > bytes_available():
-                    note(f"omitted {label}-attachments/{name} ({size} bytes, {readable}): {cap_bytes} byte cap reached")
+                if cap_reached or size > bytes_available():
+                    cap_reached = True
+                    note(f"omitted {label}-attachments/{name} ({size} bytes): cap reached")
                     continue
                 target.mkdir(exist_ok=True)
                 shutil.copy2(exported, target / name)
