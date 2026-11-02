@@ -96,6 +96,8 @@ Owned paths: the two workflow files (the failure-only upload steps and the new e
 
 Dependencies: CI02 (same steps; CI03 rebases over it).
 
+Ownership amendment (coordinator, 2026-11-02, after the second round blocked): `ios/scripts/test_prepare_simulator.py` has a test, `test_workflow_does_not_weaken_tests`, that allows `continue-on-error` only on `actions/upload-artifact` steps, so the export step this task requires cannot pass `make test` without it. CI03 owns that one assertion: it also allows `continue-on-error` on a step that runs `ios/scripts/export-failure-diagnostics.sh` and is conditioned on `failure()`, and on nothing else. A test or build step must still never be non-fatal. Nothing else in that file changes. (CI02 landed on 2026-11-01 as PR #394 through its Opus escalation.)
+
 Acceptance: no upload step in either workflow can upload a bundle; every failure-only step declares `retention-days: 1` and uploads the export directory; the export is shown once on the PR branch with a deliberately failing test commit that is then removed, with both runs linked and the failure artifact's name and size from the Actions API quoted in the PR body, under 100 MB; the manifest in that artifact names the failed test and its attachments; a green `ios.yml` run on the final head still uploads under 25 MB in total, listed per artifact; the checker enforces the three rules with tests; exact-head macOS evidence as AGENTS.md requires.
 
 ## U10a
