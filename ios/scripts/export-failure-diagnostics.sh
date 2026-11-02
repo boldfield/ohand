@@ -54,8 +54,10 @@ def directory_size(directory):
 
 
 def bytes_available():
-    """Bytes a payload may still take: the cap minus what the directory holds minus the manifest reserve."""
-    return cap_bytes - manifest_reserve - directory_size(output_dir)
+    """Bytes a payload may still take: the cap minus what the directory holds minus room for the manifest so far."""
+    # 512 bytes of slack covers the line that notes an omitted payload.
+    manifest_so_far = len(("\n".join(manifest) + "\n").encode()) + 512
+    return cap_bytes - max(manifest_reserve, manifest_so_far) - directory_size(output_dir)
 
 
 def run_tool(arguments, destination=None):

@@ -44,13 +44,30 @@ class PrepareSimulatorTests(unittest.TestCase):
 
     def test_workflow_does_not_weaken_tests(self):
         # Only artifact uploads and their failure-diagnostics export (CI03) may be non-fatal; a test or build step must never be.
+        # The export must run only after the job has failed and do nothing but call the exporter.
+        export_run = re.compile(r"(\.\./)*ios/scripts/export-failure-diagnostics\.sh(\s+[^;&|`\n]*)?")
+
+        def may_be_non_fatal(step):
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@"):
+                return True
+            condition = str(step.get("if", "")).replace("${{", "").replace("}}", "").strip()
+            return condition == "failure()" and bool(export_run.fullmatch(str(step.get("run", "")).strip()))
+
         workflow = yaml.safe_load(self.workflow)
         for job in workflow["jobs"].values():
             for step in job["steps"]:
                 if "continue-on-error" in step:
-                    is_upload = str(step.get("uses", "")).startswith("actions/upload-artifact@")
-                    is_export = "export-failure-diagnostics.sh" in str(step.get("run", ""))
-                    self.assertTrue(is_upload or is_export, step.get("name"))
+                    self.assertTrue(may_be_non_fatal(step), step.get("name"))
+        exporter = "ios/scripts/export-failure-diagnostics.sh out $(find ios/.evidence -name '*.xcresult' -prune)"
+        for weakened in (
+            {"if": "always()", "run": exporter},
+            {"run": exporter},
+            {"if": "failure() || always()", "run": exporter},
+            {"if": "failure()", "run": "xcodebuild test || true; " + exporter},
+            {"if": "failure()", "run": exporter + " && false"},
+            {"if": "failure()", "run": exporter + "\nxcodebuild test"},
+        ):
+            self.assertFalse(may_be_non_fatal({"continue-on-error": True, **weakened}), weakened)
         self.assertNotIn("retry-tests-on-failure", self.workflow)
         for days in re.findall(r"retention-days:\s*(\d+)", self.workflow):
             self.assertLessEqual(int(days), 7)
