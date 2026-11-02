@@ -44,8 +44,13 @@ class PrepareSimulatorTests(unittest.TestCase):
 
     def test_workflow_does_not_weaken_tests(self):
         # Only artifact uploads and their failure-diagnostics export (CI03) may be non-fatal; a test or build step must never be.
-        # The export must run only after the job has failed and do nothing but call the exporter.
-        export_run = re.compile(r"(\.\./)*ios/scripts/export-failure-diagnostics\.sh(\s+[^;&|`\n]*)?")
+        # The export must run only after the job has failed and do nothing but call the exporter on an output
+        # directory and the bundles that one fixed find invocation lists; no other command may hide in its arguments.
+        plain_path = r"[\w./-]+"
+        export_run = re.compile(
+            r"(\.\./)*ios/scripts/export-failure-diagnostics\.sh"
+            rf" {plain_path} \$\(find {plain_path} -name '\*\.xcresult' -prune\)"
+        )
 
         def may_be_non_fatal(step):
             if str(step.get("uses", "")).startswith("actions/upload-artifact@"):
@@ -59,6 +64,7 @@ class PrepareSimulatorTests(unittest.TestCase):
                 if "continue-on-error" in step:
                     self.assertTrue(may_be_non_fatal(step), step.get("name"))
         exporter = "ios/scripts/export-failure-diagnostics.sh out $(find ios/.evidence -name '*.xcresult' -prune)"
+        self.assertTrue(may_be_non_fatal({"if": "failure()", "continue-on-error": True, "run": exporter}))
         for weakened in (
             {"if": "always()", "run": exporter},
             {"run": exporter},
@@ -66,6 +72,10 @@ class PrepareSimulatorTests(unittest.TestCase):
             {"if": "failure()", "run": "xcodebuild test || true; " + exporter},
             {"if": "failure()", "run": exporter + " && false"},
             {"if": "failure()", "run": exporter + "\nxcodebuild test"},
+            {"if": "failure()", "run": "ios/scripts/export-failure-diagnostics.sh out $(xcodebuild test)"},
+            {"if": "failure()", "run": exporter + " $(xcodebuild test)"},
+            {"if": "failure()", "run": "ios/scripts/export-failure-diagnostics.sh $(xcodebuild test) $(find ios/.evidence -name '*.xcresult' -prune)"},
+            {"if": "failure()", "run": "ios/scripts/export-failure-diagnostics.sh out $(find ios/.evidence -name '*.xcresult' -prune -exec xcodebuild test \\;)"},
         ):
             self.assertFalse(may_be_non_fatal({"continue-on-error": True, **weakened}), weakened)
         self.assertNotIn("retry-tests-on-failure", self.workflow)

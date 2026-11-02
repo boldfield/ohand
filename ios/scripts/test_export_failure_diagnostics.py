@@ -12,16 +12,18 @@ FAKE_TOOL = r'''#!/usr/bin/env python3
 import json, os, sys
 ATTACHMENT_SIZE = int(os.environ.get('FAKE_SIZE', '1000'))
 REFERENCES = int(os.environ.get('FAKE_REFERENCES', '1'))
+URL_ONLY = os.environ.get('FAKE_URL_ONLY') == '1'
 from pathlib import Path
 args = sys.argv[1:]
 if args[:3] == ["get", "test-results", "summary"]:
     print("S" * 200)
 elif args[:3] == ["get", "test-results", "tests"]:
-    print(json.dumps({"testNodes": [{"nodeType": "Test Case", "name": "t", "nodeIdentifier": "Suite/t", "result": "Failed", "children": []}]}))
+    print(json.dumps({"testNodes": [{"nodeType": "Test Case", "name": "t", "nodeIdentifier": "Suite/t", "nodeIdentifierURL": "test://Suite/t", "result": "Failed", "children": []}]}))
 elif args[:2] == ["export", "attachments"]:
     out = Path(args[args.index("--output-path") + 1])
     (out / "a.png").write_bytes(b"x" * ATTACHMENT_SIZE)
-    (out / "manifest.json").write_text(json.dumps([{"testIdentifier": "Suite/t", "attachments": [{"exportedFileName": "a.png"}] * REFERENCES}]))
+    identity = {"testIdentifierURL": "test://Suite/t"} if URL_ONLY else {"testIdentifier": "Suite/t"}
+    (out / "manifest.json").write_text(json.dumps([{**identity, "attachments": [{"exportedFileName": "a.png"}] * REFERENCES}]))
 '''
 
 
@@ -55,6 +57,11 @@ class ExportFailureDiagnosticsTests(unittest.TestCase):
                 with self.subTest(cap_bytes=cap_bytes, bundles=bundle_count):
                     _, total = self.run_export(cap_bytes, bundle_count)
                     self.assertLessEqual(total, cap_bytes)
+
+    def test_attachment_matched_only_by_identifier_url_is_kept(self):
+        output, _ = self.run_export(1_000_000, FAKE_URL_ONLY="1")
+        self.assertTrue(list((output / "00-b0-attachments").glob("*a.png")))
+        self.assertNotIn("export failed", (output / "MANIFEST.txt").read_text())
 
     def test_attachment_omitted_and_recorded_when_cap_is_small(self):
         output, _ = self.run_export(1500)

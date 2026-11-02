@@ -135,7 +135,8 @@ def export_bundle(bundle, label):
                 if not exported.is_file():
                     continue
                 readable = attachment.get("suggestedHumanReadableName") or exported.name
-                name = f"{entry['testIdentifier'].replace('/', '_')}--{exported.name}"
+                test_name = entry.get("testIdentifier") or entry.get("testIdentifierURL") or "test"
+                name = f"{test_name.replace('/', '_').replace(':', '_')}--{exported.name}"
                 candidates.append((exported, name, exported.stat().st_size, readable))
 
         def omitted_line(name, size):
