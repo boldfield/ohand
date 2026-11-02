@@ -72,6 +72,16 @@ class ExportFailureDiagnosticsTests(unittest.TestCase):
         self.assertEqual(len(omitted), 1999)
         self.assertTrue(all(line.endswith("cap reached") and "600000 bytes" in line for line in omitted))
 
+    def test_manifest_stays_complete_when_one_attachment_nearly_fills_the_cap(self):
+        output, total = self.run_export(1_000_000, FAKE_SIZE="900000", FAKE_REFERENCES="2000")
+        self.assertLessEqual(total, 1_000_000)
+        manifest = (output / "MANIFEST.txt").read_text()
+        self.assertTrue(manifest.endswith("\n"))
+        omitted = [line for line in manifest.splitlines() if line.startswith("omitted")]
+        kept = [line for line in manifest.splitlines() if line.startswith("kept") and "attachments/" in line]
+        self.assertEqual(len(omitted) + len(kept), 2000)
+        self.assertTrue(all(line.endswith("cap reached") and "900000 bytes" in line for line in omitted))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,21 +126,32 @@ def export_bundle(bundle, label):
         entries = [entry for entry in entries if entry.get("testIdentifier") in wanted or entry.get("testIdentifierURL") in wanted]
         entries.sort(key=rank)
         target = output_dir / f"{label}-attachments"
+        candidates = []
         for entry in entries:
             for attachment in entry.get("attachments", []):
                 exported = work / attachment["exportedFileName"]
                 if not exported.is_file():
                     continue
-                size = exported.stat().st_size
                 readable = attachment.get("suggestedHumanReadableName") or exported.name
                 name = f"{entry['testIdentifier'].replace('/', '_')}--{exported.name}"
-                if cap_reached or size > bytes_available():
-                    cap_reached = True
-                    note(f"omitted {label}-attachments/{name} ({size} bytes): cap reached")
-                    continue
-                target.mkdir(exist_ok=True)
-                shutil.copy2(exported, target / name)
-                note(f"kept {label}-attachments/{name} ({size} bytes, {readable})")
+                candidates.append((exported, name, exported.stat().st_size, readable))
+
+        def omitted_line(name, size):
+            return f"omitted {label}-attachments/{name} ({size} bytes): cap reached"
+
+        # Worst-case manifest bytes for every attachment still to come in this bundle (each listed as omitted or kept).
+        pending_lines = [len(omitted_line(name, size)) + len(readable) + 32 for _, name, size, readable in candidates]
+        for index, (exported, name, size, readable) in enumerate(candidates):
+            pending_manifest = sum(pending_lines[index:])
+            manifest_so_far = len(("\n".join(manifest) + "\n").encode())
+            room = cap_bytes - directory_size(output_dir) - max(manifest_reserve, manifest_so_far + pending_manifest)
+            if cap_reached or size > room:
+                cap_reached = True
+                note(omitted_line(name, size))
+                continue
+            target.mkdir(exist_ok=True)
+            shutil.copy2(exported, target / name)
+            note(f"kept {label}-attachments/{name} ({size} bytes, {readable})")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
