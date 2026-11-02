@@ -6,6 +6,9 @@
 # Per bundle: the test summary and the test list as JSON (xcresulttool get test-results summary|tests, Xcode 16+),
 # then the attachments of the failed tests only, in test order, until OUTPUT_DIR reaches CAP_BYTES (shared across the
 # bundles; default 100 MB). MANIFEST.txt lists every file kept and every attachment omitted, with sizes.
+# The cap is hard: the JSON files, the attachments and MANIFEST.txt together never exceed it (the manifest is truncated
+# to what is left, and a space is reserved for it before anything else is written). A run-wide cap is shared by giving
+# each failing job of the run its own share through CAP_BYTES.
 # Always exits 0: the job has already failed and a diagnostics problem must not change its conclusion.
 # See docs/features/ci-artifact-budget.md.
 set -uo pipefail
@@ -35,6 +38,8 @@ bundles = sys.argv[2:]
 cap_bytes = int(os.environ["CAP_BYTES"])
 tool = shlex.split(os.environ["XCRESULTTOOL"])
 manifest = []
+# Room kept back for MANIFEST.txt so the listing survives a cap that attachments or metadata would otherwise fill.
+manifest_reserve = min(65536, cap_bytes // 4)
 
 
 def note(line):
@@ -46,11 +51,20 @@ def directory_size(directory):
     return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
 
 
+def bytes_available():
+    """Bytes a payload may still take: the cap minus what the directory holds minus the manifest reserve."""
+    return cap_bytes - manifest_reserve - directory_size(output_dir)
+
+
 def run_tool(arguments, destination=None):
     result = subprocess.run(tool + arguments, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"exit {result.returncode}")
     if destination is not None:
+        size = len(result.stdout.encode())
+        if size > bytes_available():
+            note(f"omitted {destination.name} ({size} bytes): {cap_bytes} byte cap reached")
+            return result.stdout
         destination.write_text(result.stdout)
     return result.stdout
 
@@ -81,6 +95,8 @@ def export_bundle(bundle, label):
         note(f"{bundle}: unreadable ({error}), nothing exported")
         return
     for written in (summary, tests):
+        if not written.exists():
+            continue
         note(f"kept {written.name} ({written.stat().st_size} bytes)")
     failed = failed_test_cases(json.loads(tests_json).get("testNodes", []))
     if not failed:
@@ -114,7 +130,7 @@ def export_bundle(bundle, label):
                 size = exported.stat().st_size
                 readable = attachment.get("suggestedHumanReadableName") or exported.name
                 name = f"{entry['testIdentifier'].replace('/', '_')}--{exported.name}"
-                if directory_size(output_dir) + size > cap_bytes:
+                if size > bytes_available():
                     note(f"omitted {label}-attachments/{name} ({size} bytes, {readable}): {cap_bytes} byte cap reached")
                     continue
                 target.mkdir(exist_ok=True)
@@ -132,6 +148,10 @@ for number, bundle in enumerate(bundles):
         export_bundle(bundle, label)
     except Exception as error:
         note(f"{bundle}: export failed ({error})")
-(output_dir / "MANIFEST.txt").write_text("\n".join(manifest) + "\n")
+manifest_bytes = ("\n".join(manifest) + "\n").encode()
+manifest_room = max(cap_bytes - directory_size(output_dir), 0)
+if len(manifest_bytes) > manifest_room:
+    manifest_bytes = manifest_bytes[:manifest_room]
+(output_dir / "MANIFEST.txt").write_bytes(manifest_bytes)
 PY
 exit 0

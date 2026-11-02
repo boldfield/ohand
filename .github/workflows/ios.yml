@@ -399,6 +399,8 @@ jobs:
         if: failure()
         continue-on-error: true
         shell: bash
+        env:
+          CAP_BYTES: "24000000"
         run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
 
       - name: Upload evidence (failure diagnostics, failure only)
@@ -535,6 +537,8 @@ jobs:
         if: failure()
         continue-on-error: true
         shell: bash
+        env:
+          CAP_BYTES: "24000000"
         run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
 
       - name: Upload screenshots (failure diagnostics, failure only)
@@ -760,6 +764,8 @@ jobs:
         if: failure()
         continue-on-error: true
         shell: bash
+        env:
+          CAP_BYTES: "24000000"
         run: ../../ios/scripts/export-failure-diagnostics.sh .evidence/failure-diagnostics $(find .evidence -name '*.xcresult' -prune)
 
       - name: Upload evidence (failure diagnostics, failure only)
