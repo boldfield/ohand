@@ -17,7 +17,17 @@ struct SourceDetailView: View {
     static let sortingFailedIdentifier = "source-detail.sorting-failed"
     static let tryAgainIdentifier = "source-detail.sorting.try-again"
     static let tryAgainSummaryIdentifier = "source-detail.sorting.summary"
+    static let notSortedIdentifier = "source-detail.not-sorted"
+    static let notSortedTryAgainIdentifier = "source-detail.not-sorted.try-again"
+    static let notSortedSetTypeIdentifier = "source-detail.not-sorted.set-type"
+    static let notSortedNoticeIdentifier = "source-detail.not-sorted.notice"
+    static let notSortedProcessingIdentifier = "source-detail.not-sorted.processing"
     static let tryAgainLabel = "Try again"
+    static let setTypeLabel = "Set the type yourself"
+    static let needsProviderText = "Choose a provider in Processing first"
+    static let processingLinkLabel = "Open Processing"
+    static let couldNotTryAgainText = "Couldn't try again. Try once more in a moment"
+    static let couldNotTryAgainIdentifier = "source-detail.not-sorted.could-not"
     static let sortingText = "Sorting…"
     /// The scroll identity of the reminder editor, which Set a reminder again brings into view.
     static let reminderEditorScrollIdentity = "source-detail.reminder-editor"
@@ -54,6 +64,8 @@ struct SourceDetailView: View {
     var renderReporter: ((String, Bool) -> Void)?
     /// Told where an identified element sits, in window coordinates; layout tests use it to check for clipping.
     var layoutReporter: ((String, CGRect) -> Void)?
+    /// Told the identity of each scroll this screen asks for; tests use it to check where the screen scrolls to.
+    var scrollReporter: ((String) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
     /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
@@ -77,7 +89,9 @@ struct SourceDetailView: View {
                         if let content = model.content {
                             detailCard(content)
                             sortingLine
-                            if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
+                            if let controls = model.itemControls {
+                                ItemControlsView(model: controls, renderReporter: renderReporter)
+                            }
                             history(content)
                             if let reminderEditor = model.reminderEditor {
                                 ReminderEditSection(model: reminderEditor).id(Self.reminderEditorScrollIdentity)
@@ -103,6 +117,13 @@ struct SourceDetailView: View {
                         }
                     }
                     .padding(.bottom, DSSpacing.lg)
+                }
+                // "Set the type yourself" brings the existing Type control of the correction controls into view.
+                .onReceive(model.$setTypeRequests.dropFirst()) { _ in
+                    DispatchQueue.main.async {
+                        scrollReporter?(ItemControlsView.typeScrollIdentity)
+                        scrollProxy.scrollTo(ItemControlsView.typeScrollIdentity, anchor: .top)
+                    }
                 }
                 // Set a reminder again prepares the editor drawn above; bring it into view once it is ready. The scroll
                 // waits for the next turn of the main queue, so it stays out of the update that removes the button.
@@ -164,6 +185,45 @@ struct SourceDetailView: View {
         switch model.sorting {
         case .none:
             EmptyView()
+        case .notSorted(let label):
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(SourceDetailSorting.notSortedText(label: label))
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .reported(Self.notSortedIdentifier, renderReporter, layoutReporter)
+                Button(Self.tryAgainLabel) { Task { await model.tryAgainNotSorted() } }
+                    .font(DSFont.rowLabel)
+                    .frame(minHeight: DSLayout.rowMinimumHeight)
+                    .disabled(model.isTryingAgain)
+                    .reported(Self.notSortedTryAgainIdentifier, renderReporter, layoutReporter)
+                // Scrolls to the Type control of the correction controls below; shown only while that correction is editable.
+                if let controls = model.itemControls {
+                    SetTypeYourselfButton(
+                        controls: controls, model: model, renderReporter: renderReporter, layoutReporter: layoutReporter)
+                }
+                if model.notSortedRerun == .notRun {
+                    Text(Self.couldNotTryAgainText)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.couldNotTryAgainIdentifier, renderReporter, layoutReporter)
+                }
+                if model.notSortedRerun == .needsProvider {
+                    Text(Self.needsProviderText)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .reported(Self.notSortedNoticeIdentifier, renderReporter, layoutReporter)
+                    if let makeProviderSettings = model.makeProviderSettings {
+                        NavigationLink(Self.processingLinkLabel) { makeProviderSettings() }
+                            .font(DSFont.rowLabel)
+                            .frame(minHeight: DSLayout.rowMinimumHeight)
+                            .reported(Self.notSortedProcessingIdentifier, renderReporter, layoutReporter)
+                    }
+                }
+            }
+            .padding(.horizontal, DSSpacing.md)
         case .sorting:
             VStack(alignment: .leading, spacing: DSSpacing.xxs) {
                 Text(Self.sortingText)
@@ -441,5 +501,23 @@ struct SourceDetailScreen: View {
 
     var body: some View {
         SourceDetailView(model: model, renderReporter: renderReporter)
+    }
+}
+
+/// "Set the type yourself": shown only while the correction controls are loaded and editable, so it never points at a
+/// Type control that is absent or paused.
+private struct SetTypeYourselfButton: View {
+    @ObservedObject var controls: ItemControlsModel
+    let model: SourceDetailModel
+    var renderReporter: ((String, Bool) -> Void)?
+    var layoutReporter: ((String, CGRect) -> Void)?
+
+    var body: some View {
+        if controls.canEdit {
+            Button(SourceDetailView.setTypeLabel) { model.setTypeYourself() }
+                .font(DSFont.rowLabel)
+                .frame(minHeight: DSLayout.rowMinimumHeight)
+                .reported(SourceDetailView.notSortedSetTypeIdentifier, renderReporter, layoutReporter)
+        }
     }
 }

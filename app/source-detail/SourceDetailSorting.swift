@@ -9,27 +9,59 @@ enum SourceDetailSorting: Equatable {
     case sorting
     /// Sorting failed. `reason` is fixed copy for the machine label the core recorded.
     case failed(reason: String)
+    /// The core declined to sort the note. `label` is the machine label it recorded, or nil for an older note.
+    case notSorted(label: String?)
+
+    /// The one line for a declined note: fixed copy per label. The model's own detail text is never shown.
+    static func notSortedText(label: String?) -> String {
+        switch label {
+        case "uncertain_target": return "Not sorted: it wasn't clear what this note is about"
+        case "negated": return "Not sorted: the note says not to do something"
+        case "ambiguous": return "Not sorted: it was too unclear to sort"
+        case "unsupported_operation": return "Not sorted: changing an existing note this way isn't supported yet"
+        default: return "Not sorted: it couldn't tell how to sort this"
+        }
+    }
 }
+
+/// What "Try again" on a declined note did.
+enum SourceDetailAbstainedRerun: Equatable {
+    case queued
+    /// No provider is allowed for the note, so a setting has to change first.
+    case needsProvider
+    /// Nothing was run: the note is no longer declined, or the request did not go through.
+    case notRun
+}
+
+/// Runs one declined note again.
+protocol AbstainedInterpretationRerunning: AnyObject, Sendable {
+    func rerunAbstainedInterpretation(itemID: String) async throws -> JobConfigurationAbstainedRerunOutcome
+}
+
+extension JobConfigurationService: AbstainedInterpretationRerunning {}
 
 /// Reads one note's sorting and runs a failed one again. `ItemSortingSource` is the production implementation. Both go
 /// through private reads, so a locked session answers `.none` and a refusal.
 protocol SourceDetailSortingReading: AnyObject, Sendable {
     func sorting(itemID: String) async -> SourceDetailSorting
     func tryAgain(itemID: String) async -> FailedNotesRerunSummary
+    func tryAgainNotSorted(itemID: String) async -> SourceDetailAbstainedRerun
 }
 
 /// The note's sorting from F43's failed-work read and the core's item status.
 final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
-    typealias ProcessingRead = (String) async -> (state: String, jobStatus: String?, rerunState: String?)?
+    typealias ProcessingRead = (String) async -> (state: String, jobStatus: String?, rerunState: String?, abstentionReason: String?)?
 
     private let jobs: FailedInterpretationsControlling
     private let processing: ProcessingRead
     private let afterQueued: () -> Void
+    private let abstainedJobs: AbstainedInterpretationRerunning?
     init(
-        jobs: FailedInterpretationsControlling, processing: @escaping ProcessingRead,
-        afterQueued: @escaping () -> Void
+        jobs: FailedInterpretationsControlling, abstainedJobs: AbstainedInterpretationRerunning? = nil,
+        processing: @escaping ProcessingRead, afterQueued: @escaping () -> Void
     ) {
         self.jobs = jobs
+        self.abstainedJobs = abstainedJobs
         self.processing = processing
         self.afterQueued = afterQueued
     }
@@ -51,6 +83,7 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
         // reports that as `rerun_state`, so the answer survives reopening the note and restarting the app. Every value,
         // including a replacement waiting on a setting, means the note is being sorted again.
         if status.rerunState != nil { return .sorting }
+        if status.state == "abstained" { return .notSorted(label: status.abstentionReason) }
         let isWorking = status.state == "processing" || status.state == "unprocessed"
         return isWorking && status.jobStatus != "awaiting_configuration" ? .sorting : .none
     }
@@ -59,5 +92,16 @@ final class ItemSortingSource: SourceDetailSortingReading, @unchecked Sendable {
         guard let result = try? await jobs.rerunFailedInterpretations(itemIDs: [itemID]) else { return .failed }
         if result.moved > 0 { afterQueued() }
         return FailedNotesRerunSummary(result)
+    }
+
+    func tryAgainNotSorted(itemID: String) async -> SourceDetailAbstainedRerun {
+        guard let outcome = try? await abstainedJobs?.rerunAbstainedInterpretation(itemID: itemID) else { return .notRun }
+        switch outcome {
+        case .queued:
+            afterQueued()
+            return .queued
+        case .noProviderAllowed: return .needsProvider
+        case .notAbstained: return .notRun
+        }
     }
 }
