@@ -88,6 +88,47 @@ final class ReminderEditModelTests: XCTestCase {
             scheduleGeneration: version, stateVersion: version, updatedAt: "2026-10-01T09:30:00Z")
     }
 
+    private func unscheduled(phrase: String?, reason: String?) -> ReminderRecordAnswer {
+        ReminderRecordAnswer(
+            reminderID: "reminder-1", sourcePhrase: phrase, requestState: "not_scheduled_yet",
+            scheduleState: "not_scheduled", deliveryState: "unknown", ambiguityReason: reason,
+            scheduleGeneration: 1, stateVersion: 1, updatedAt: "2026-10-01T09:30:00Z")
+    }
+
+    func testUnscheduledPhraseCopyFollowsTheStoredReason() {
+        let phrase = "tomorrow morning at 9:30 AM"
+        let quoted = "The app heard \"\(phrase)\""
+        let cases: [(String?, String, String)] = [
+            ("the time phrase could not be understood", "Time not understood",
+             "\(quoted) but could not turn it into a time. Choose a date and time."),
+            ("the request is hedged", "Not scheduled", "hedged"),
+            ("Missing day: that time is not later today, so the day is unclear", "Time incomplete", "day is missing"),
+            ("Missing meridiem: say a.m. or p.m. for the hour", "Time incomplete", "a.m. or p.m."),
+            ("Time zone or unrecognized qualifier after the time is not supported yet", "Time incomplete",
+             "time zone or qualifier"),
+            ("Nonexistent time in DST gap", "Time incomplete", "does not exist or happens twice"),
+            ("Ambiguous time in DST fold: could be 1 or 2", "Time incomplete", "does not exist or happens twice"),
+            ("something new", "Not scheduled", "could not be scheduled from that"),
+            (nil, "Not scheduled", "could not be scheduled from that"),
+        ]
+        for (reason, title, detailPart) in cases {
+            let result = standing(unscheduled(phrase: "  \(phrase) ", reason: reason))
+            XCTAssertEqual(result.title, title, reason ?? "nil")
+            XCTAssertTrue(result.detail.contains(quoted), "phrase shown verbatim in quotes: \(result.detail)")
+            XCTAssertTrue(result.detail.contains(detailPart), "\(reason ?? "nil"): \(result.detail)")
+        }
+    }
+
+    func testUnscheduledWithoutPhraseKeepsTheFallbackCopy() {
+        for phrase in [nil, "", "   "] {
+            let result = standing(unscheduled(phrase: phrase, reason: "the time phrase could not be understood"))
+            XCTAssertEqual(result, .timeNotResolved)
+            XCTAssertEqual(result.title, "No time set")
+            XCTAssertEqual(
+                result.detail, "The request did not name a time, so nothing is scheduled. Choose a date and time.")
+        }
+    }
+
     private func read(
         _ reminder: ReminderRecordAnswer?, type: String? = "action", lifecycle: String = "active"
     ) -> ReminderReadAnswer {
