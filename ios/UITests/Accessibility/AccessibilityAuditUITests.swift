@@ -278,10 +278,10 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     // MARK: Audit
 
-    /// Every default audit type; the default-size run leaves out `.dynamicType` (see `audit`).
+    /// Every audit type (`.all`, the default of `performAccessibilityAudit()`); the default-size run leaves out `.dynamicType` (see `audit`).
     private var auditTypes: XCUIAccessibilityAuditType {
-        var types: XCUIAccessibilityAuditType = [.contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .textClipped, .trait, .action]
-        if sizeName == "xxxl" { types.insert(.dynamicType) }
+        var types = XCUIAccessibilityAuditType.all
+        if sizeName != "xxxl" { types.remove(.dynamicType) }
         return types
     }
 

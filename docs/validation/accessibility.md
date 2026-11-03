@@ -101,7 +101,7 @@ list). An element inside the clear band, an element not listed, and any other is
 ### Dynamic Type
 
 At the default size the audit omits `.dynamicType` and passes every other default type (contrast, element detection, hit
-region, sufficient element description, text clipped, trait, action) to `performAccessibilityAudit(for:)`. The largest-size
+region, sufficient element description, text clipped, trait and the rest of `.all`) to `performAccessibilityAudit(for:)`. The largest-size
 run keeps every type. The decision (coordinator, 2026-11-01): the probe grows the font step by step and watches each
 element's frame; in a scrolling list the growth above pushes the elements below out of the scroll view's bounds, so they are
 reported "partially unsupported" wherever the scroll settles, which measures the audit's geometry and not the fonts. No
