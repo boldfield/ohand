@@ -22,6 +22,12 @@ struct ScreenElement: Equatable {
     static func key(card: String, identifier: String, label: String) -> String {
         "\(card)|\(identifier)|\(stableLabel(label))"
     }
+
+    /// A Home card named by what it says, without the age in its caption ("8 sec. ago"), so the same card has the same
+    /// name in every launch and at both text sizes (its identifier is a new UUID each launch).
+    static func cardName(_ cardLabel: String) -> String {
+        cardLabel.replacingOccurrences(of: "[0-9]+ [A-Za-z]+\\.? ago", with: "", options: .regularExpression)
+    }
 }
 
 /// How an element in the glass list relates to the glass.
@@ -125,6 +131,11 @@ struct GlassContrastLedger {
             }
         }
         return newlySettled
+    }
+
+    /// Settles `key` by an unobstructed audit made elsewhere (the default-size run, for the largest size).
+    mutating func settle(_ key: String, by evidence: String) {
+        if settled[key] == nil { settled[key] = evidence }
     }
 
     /// Excuses the test has not settled: each is an element whose contrast was never shown unobstructed.

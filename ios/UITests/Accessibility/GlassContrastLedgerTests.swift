@@ -71,6 +71,26 @@ final class GlassContrastLedgerTests: XCTestCase {
         XCTAssertTrue(ledger.unsettled.isEmpty)
     }
 
+    func testACardIsNamedWithoutItsAge() {
+        XCTAssertEqual(
+            ScreenElement.cardName("Idea \u{00B7} 13 sec. ago, Synthetic typed idea about a herb planter"),
+            ScreenElement.cardName("Idea \u{00B7} 2 min. ago, Synthetic typed idea about a herb planter"))
+        XCTAssertNotEqual(
+            ScreenElement.cardName("Idea \u{00B7} 13 sec. ago, Synthetic typed idea about a herb planter"),
+            ScreenElement.cardName("Idea \u{00B7} 13 sec. ago, Synthetic spoken idea about a window box"))
+        XCTAssertTrue(ScreenElement.cardName("Remind me 2099-01-15 11:00:00 to call mom").contains("2099-01-15 11:00:00"))
+    }
+
+    func testSettlingByEvidenceFromElsewhereClearsAnExcuse() {
+        var ledger = GlassContrastLedger()
+        let card = element("Idea \u{00B7} 8 sec. ago", card: "Idea, herb planter", CGRect(x: 48, y: 651, width: 313, height: 52))
+        _ = ledger.decide(contrastIssueOn: card, placement: .scrollsUnderGlass, screenName: "home", clearBand: clearBand, screen: screen,
+                          others: [], measure: { nil })
+        XCTAssertEqual(ledger.unsettled.count, 1)
+        ledger.settle(card.key, by: "default size, home-populated")
+        XCTAssertTrue(ledger.unsettled.isEmpty)
+    }
+
     func testAnElementOffScreenIsNotClear() {
         let below = element("Synthetic spoken note", CGRect(x: 32, y: 700, width: 285, height: 249))
         XCTAssertFalse(GlassContrastLedger.isUnobstructed(below, placement: .scrollsUnderGlass, clearBand: 126...10_000, screen: screen, others: []))

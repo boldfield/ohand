@@ -71,21 +71,53 @@ final class AccessibilityAuditUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        settleFromTheDefaultSize()
         settleOwedElements()
         for owed in ledger.unsettled {
             auditLines.append("UNVERIFIED \(owed.key): excused under or on glass at \(owed.firstScreen) and never audited unobstructed")
             XCTFail("'\(owed.key)' was excused under or on glass at \(owed.firstScreen) and never audited unobstructed")
         }
-        let log = outputDirectory.appendingPathComponent("audit-\(sizeName).log")
-        let text = auditLines.joined(separator: "\n") + "\n"
-        if let handle = try? FileHandle(forWritingTo: log) {
+        try append(auditLines.joined(separator: "\n") + "\n", to: "audit-\(sizeName).log")
+        // What this run audited unobstructed, for the largest-size run (`settleFromTheDefaultSize`).
+        let settled = ledger.settled.sorted { $0.key < $1.key }.map { "\($0.key)\t\($0.value)\n" }.joined()
+        try append(settled, to: "settled-\(sizeName).txt")
+        app.terminate()
+    }
+
+    private func append(_ text: String, to name: String) throws {
+        let file = outputDirectory.appendingPathComponent(name)
+        if let handle = try? FileHandle(forWritingTo: file) {
             handle.seekToEndOfFile()
             handle.write(Data(text.utf8))
             try? handle.close()
         } else {
-            try text.write(to: log, atomically: true, encoding: .utf8)
+            try text.write(to: file, atomically: true, encoding: .utf8)
         }
-        app.terminate()
+    }
+
+    /// At the largest size, an element still owed is settled by the default-size run's unobstructed audit of the same
+    /// element (same card, identifier and label). Contrast is a property of the element's colours, which do not change
+    /// with the text size; the largest size only lowers the bar for large text. This is needed for the Home list: after
+    /// it scrolls at the largest size, the app's accessibility frames (which the audit and the snapshot both read) can stay
+    /// near the top of the list while the screen shows another part of it, so a scrolled stop there proves nothing either
+    /// way (runs 41702917752, 41711242088, 41720210504: the screenshots and the logged frames disagree).
+    private func settleFromTheDefaultSize() {
+        guard sizeName == "xxxl", !ledger.unsettled.isEmpty else { return }
+        let file = outputDirectory.appendingPathComponent("settled-default.txt")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else {
+            auditLines.append("NOTE \(currentScreen): no settled-default.txt; nothing is settled from the default size")
+            return
+        }
+        var atDefault: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
+            if parts.count == 2, atDefault[parts[0]] == nil { atDefault[parts[0]] = parts[1] }
+        }
+        for owed in ledger.unsettled {
+            guard let screen = atDefault[owed.key] else { continue }
+            ledger.settle(owed.key, by: "default size, \(screen)")
+            auditLines.append("CLEAR-AT-DEFAULT \(owed.key): owed since \(owed.firstScreen), audited unobstructed at the default size at \(screen)")
+        }
     }
 
     // MARK: Home and capture
@@ -493,7 +525,7 @@ final class AccessibilityAuditUITests: XCTestCase {
                 .min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
             return ScreenElement(
                 nodeID: node.nodeID, ancestorIDs: node.ancestorIDs,
-                key: ScreenElement.key(card: card?.identifier ?? "", identifier: node.identifier, label: node.label),
+                key: ScreenElement.key(card: card.map { ScreenElement.cardName($0.label) } ?? "", identifier: node.identifier, label: node.label),
                 identifier: node.identifier, label: node.label, frame: node.frame)
         }
     }
@@ -702,7 +734,15 @@ final class AccessibilityAuditUITests: XCTestCase {
         app.launchArguments += [XCUIApplication.fixtureLaunchArgument, fixture.rawValue]
         app.launch()
         let composer = app.element(identifier: "home.composer.field")
-        let reachedHome = pollToleratingSnapshotStalls("waiting for the composer", timeout: screenTimeout) { composer.exists }
+        var reachedHome = pollToleratingSnapshotStalls("waiting for the composer", timeout: screenTimeout) { composer.exists }
+        // On the hosted runner a launch can hang until XCTest loses the app ("Lost connection to the application", run
+        // 41720210504). It is launched once more, and the log says so; a second launch that does not reach home fails.
+        if !reachedHome {
+            auditLines.append("RELAUNCH \(fixture.rawValue): the first launch did not reach home within \(Int(screenTimeout)) s")
+            app.terminate()
+            app.launch()
+            reachedHome = pollToleratingSnapshotStalls("waiting for the composer after a relaunch", timeout: screenTimeout) { composer.exists }
+        }
         XCTAssertTrue(reachedHome, "the \(fixture.rawValue) fixture did not reach home")
         guard reachedHome else { return false }
         if fixture == .emptyFirstRun { return true }
@@ -718,14 +758,16 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// Polls `condition` once a second until it holds or `timeout` passes. On the hosted runner the app's main thread can
     /// be busy for half a minute after launch, and XCTest then records "Failed to get matching snapshots: Timed out while
-    /// evaluating UI query" for a query that would have answered a moment later. Here, and only here, that one issue is an
-    /// expected failure and the poll goes on; any other issue counts, and a condition that never holds fails the caller.
+    /// evaluating UI query" for a query that would have answered a moment later, or, when the launch hangs, "Lost connection
+    /// to the application" (then `launch` relaunches once). Here, and only here, those two issues are expected failures and
+    /// the poll goes on; any other issue counts, and a condition that never holds fails the caller.
     private func pollToleratingSnapshotStalls(_ activity: String, timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         let options = XCTExpectedFailure.Options()
         options.isStrict = false
         options.issueMatcher = { issue in
-            (issue.compactDescription + " " + (issue.detailedDescription ?? "")).contains("Timed out while evaluating UI query")
+            let text = issue.compactDescription + " " + (issue.detailedDescription ?? "")
+            return text.contains("Timed out while evaluating UI query") || text.contains("Lost connection to the application")
         }
         repeat {
             var holds = false

@@ -560,7 +560,8 @@ jobs:
   accessibility:
     name: Accessibility audits (default and largest text)
     runs-on: macos-26
-    timeout-minutes: 60
+    # Generating the project alone took 8 minutes on one hosted runner (run 41720210504), and the two audit runs about 45.
+    timeout-minutes: 75
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
@@ -659,6 +660,7 @@ jobs:
           name: ios-accessibility
           path: |
             ios/.evidence/accessibility/audit-*.log
+            ios/.evidence/accessibility/settled-*.txt
             ios/.evidence/accessibility/xxxl-*.jpg
             ios/.evidence/accessibility/xxxl-*.png
             ios/.evidence/accessibility-summary.txt

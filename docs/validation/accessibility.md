@@ -34,7 +34,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 
 Any audit issue fails the test, and so does an audit that throws instead of running (the log says `ERROR`; the test
 fails, it never records a pass). The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
-budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
+budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
 uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
 failed tests' attachments as `ios-accessibility-failure` (retention 1 day, under 100 MB).
 
@@ -52,6 +52,8 @@ The audit log has one line per decision:
 | `MEASURED` | text drawn on glass, with nothing overlapping it, measured from the screenshot at 4.5:1 or above | no |
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
+| `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
+| `RELAUNCH` | the first launch did not reach home and the app was launched once more | no |
 
 `ios/scripts/accessibility-simulator.sh` fails the job on any `ISSUE`, `ERROR`, `UNVERIFIED` or `FAIL` line, or when a
 size has no `PASS` line, whatever xcodebuild returned.
@@ -59,8 +61,10 @@ size has no `PASS` line, whatever xcodebuild returned.
 On the hosted runner the app's main thread can be busy for half a minute after launch, and XCTest then records "Failed to
 get matching snapshots: Timed out while evaluating UI query" for the first query. The audit test launches with the
 walkthrough's fixture argument and waits for the composer and the fixture's `ready` marker as the shared launcher does, but
-treats that one message, during those two waits only, as an expected failure and keeps polling. Any other failure counts,
-and a launch that never reaches home or ready fails.
+treats that message, and "Lost connection to the application" (a launch that hung), during those two waits only, as
+an expected failure and keeps polling. A launch that does not reach home within 90 seconds is relaunched once, and the
+log says `RELAUNCH`; any other failure counts, and a second launch that does not reach home, or a fixture that never
+reports ready, fails.
 
 ### Large text
 
@@ -141,6 +145,15 @@ The clear band runs from 12 points below the header's glass buttons (or the back
 glass, which is 20 points above its field, placeholder or "Recording" line (the test allows 24); a status line or the
 Saved pill above the composer lowers it to 8 points above that line. A settle stop can owe something new, such as a card
 it scrolls under the header; the test keeps settling until each excuse has had its own stop (at most 12).
+
+**At the largest size, Home.** After the Home list scrolls at the largest size, the app's accessibility frames, which
+the audit and the snapshot both read, can stay near the top of the list while the screen shows another part of it: in
+runs 41702917752, 41711242088 and 41720210504 the screenshots in the artifact and the logged frames disagree. A scrolled
+stop there proves nothing either way. So at the largest size, an element still owed at the end of a test is first
+settled by the default-size run's unobstructed audit of the same element (`CLEAR-AT-DEFAULT`; the default run writes
+what it settled to `settled-default.txt`). Contrast is a property of the element's colours, which do not change with the
+text size; the largest size only lowers the bar for large text. A Home card is named by its text without the age in its
+caption, so the same card matches across launches and sizes. Only what neither size settles is scrolled to and audited.
 
 `GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a low-contrast element under
 the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
