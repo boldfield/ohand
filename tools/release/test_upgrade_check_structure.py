@@ -114,12 +114,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(any(path.startswith("core/src/store/schema") for path in paths))
         self.assertIn("workflow_dispatch", self.triggers)
 
-    def test_artifacts_are_kept_for_two_days(self):
+    def test_artifacts_are_kept_for_two_days_and_failure_exports_for_one(self):
         uploads = [step for job in self.workflow["jobs"].values() for step in job["steps"]
                    if str(step.get("uses", "")).startswith("actions/upload-artifact")]
         self.assertTrue(uploads)
         for step in uploads:
-            self.assertEqual(step["with"]["retention-days"], 2)
+            expected = 1 if step["with"]["name"].endswith("-failure") else 2
+            self.assertEqual(step["with"]["retention-days"], expected)
 
     def test_it_builds_the_head_of_the_pull_request_with_full_history(self):
         checkouts = [step for job in self.workflow["jobs"].values() for step in job["steps"]

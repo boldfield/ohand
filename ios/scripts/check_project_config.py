@@ -183,42 +183,64 @@ MAX_ARTIFACT_RETENTION_DAYS = 2
 
 
 def bundle_exclusion_covers(include_root, exclude_patterns):
-    """True when exclusions remove every .xcresult bundle (directory and contents) under include_root."""
+    """True when exclusions remove every .xcresult bundle (directory and contents) under include_root or an ancestor of it."""
     root = include_root.rstrip("/")
-    bundle_patterns = {f"{root}/**/*.xcresult", "**/*.xcresult"}
-    content_patterns = {f"{root}/**/*.xcresult/**", "**/*.xcresult/**"}
+    bases = {root}
+    while "/" in root:
+        root = root.rsplit("/", 1)[0]
+        bases.add(root)
+    bundle_patterns = {f"{base}/**/*.xcresult" for base in bases} | {"**/*.xcresult"}
+    content_patterns = {f"{base}/**/*.xcresult/**" for base in bases} | {"**/*.xcresult/**"}
     excluded = set(exclude_patterns)
     return bool(bundle_patterns & excluded) and bool(content_patterns & excluded)
 
 
+FAILURE_ARTIFACT_RETENTION_DAYS = 1
+EXPORT_SCRIPT_NAME = "export-failure-diagnostics.sh"
+
+
 def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
-    """Routine artifacts keep result bundles out and expire in 2 days; bundles upload only after a failure."""
+    """No upload can include a result bundle; routine artifacts expire in 2 days, failure exports in 1 after the export step."""
     errors = []
     for workflow_path in workflow_paths:
         workflow = yaml.safe_load(workflow_path.read_text())
         for job_name, job in workflow.get("jobs", {}).items():
-            for step in job.get("steps", []):
+            steps = job.get("steps", [])
+            for index, step in enumerate(steps):
                 if not str(step.get("uses", "")).startswith("actions/upload-artifact@"):
                     continue
                 where = f"{workflow_path.name} job {job_name} step {step.get('name', step['uses'])!r}"
                 options = step.get("with", {})
+                is_failure = str(options.get("name", "")).endswith("-failure")
+                limit = FAILURE_ARTIFACT_RETENTION_DAYS if is_failure else MAX_ARTIFACT_RETENTION_DAYS
                 retention = options.get("retention-days")
-                if not isinstance(retention, int) or isinstance(retention, bool) or not 1 <= retention <= MAX_ARTIFACT_RETENTION_DAYS:
-                    errors.append(f"{where} must declare retention-days of at most {MAX_ARTIFACT_RETENTION_DAYS}, found {retention!r}")
+                valid_retention = isinstance(retention, int) and not isinstance(retention, bool) and (
+                    retention == limit if is_failure else 1 <= retention <= limit
+                )
+                if not valid_retention:
+                    qualifier = "exactly" if is_failure else "at most"
+                    errors.append(f"{where} must declare retention-days of {qualifier} {limit}, found {retention!r}")
                 path_lines = [line.strip() for line in str(options.get("path", "")).splitlines() if line.strip()]
-                if str(options.get("name", "")).endswith("-failure"):
-                    if "failure()" not in str(step.get("if", "")):
-                        errors.append(f"{where} uploads result bundles without running only if failure()")
-                    continue
                 includes = [line for line in path_lines if not line.startswith("!")]
                 excludes = [line[1:] for line in path_lines if line.startswith("!")]
                 uncovered = [root for root in includes if not bundle_exclusion_covers(root, excludes)]
                 if uncovered:
-                    errors.append(
-                        f"{where} can include a .xcresult bundle in a routine artifact without an exclusion covering {uncovered}"
-                    )
+                    errors.append(f"{where} can include a .xcresult bundle without an exclusion covering {uncovered}")
                 if any(".xcresult" in line for line in includes):
-                    errors.append(f"{where} includes a .xcresult bundle in a routine artifact")
+                    errors.append(f"{where} includes a .xcresult bundle")
+                if not is_failure:
+                    continue
+                if "failure()" not in str(step.get("if", "")):
+                    errors.append(f"{where} uploads failure diagnostics without running only if failure()")
+                exported = any(
+                    EXPORT_SCRIPT_NAME in str(earlier.get("run", "")) and "failure()" in str(earlier.get("if", ""))
+                    and earlier.get("continue-on-error") is True
+                    for earlier in steps[:index]
+                )
+                if not exported:
+                    errors.append(
+                        f"{where} is not preceded by a failure() continue-on-error step running {EXPORT_SCRIPT_NAME}"
+                    )
     return errors
 
 

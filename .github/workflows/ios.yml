@@ -393,17 +393,29 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-      # Result bundles are too large for routine evidence (docs/features/ci-artifact-budget.md); keep them only when the job failed.
-      - name: Upload evidence (result bundles, failure only)
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload evidence (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "24000000"
+        run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
+
+      - name: Upload evidence (failure diagnostics, failure only)
         if: failure()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: ios-evidence-failure
-          path: ios/.evidence/**/*.xcresult
+          path: |
+            ios/.evidence/failure-diagnostics
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 2
+          retention-days: 1
 
   # One job per width: an iPhone and an iPad are different device types, so each pays its own first boot, and two jobs
   # cost one more concurrent macOS job. Both run on macos-26 (arm64, 7 GB) with the build service stopped before the first boot.
@@ -519,17 +531,29 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-      # Result bundles are too large for routine evidence (docs/features/ci-artifact-budget.md); keep them only when the job failed.
-      - name: Upload screenshots (result bundles, failure only)
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload screenshots (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "24000000"
+        run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
+
+      - name: Upload screenshots (failure diagnostics, failure only)
         if: failure()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: ios-walkthrough-${{ matrix.width }}-failure
-          path: ios/.evidence/**/*.xcresult
+          path: |
+            ios/.evidence/failure-diagnostics
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 2
+          retention-days: 1
 
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test
@@ -734,14 +758,26 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-      # Result bundles are too large for routine evidence (docs/features/ci-artifact-budget.md); keep them only when the job failed.
-      - name: Upload evidence (result bundles, failure only)
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload evidence (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "24000000"
+        run: ../../ios/scripts/export-failure-diagnostics.sh .evidence/failure-diagnostics $(find .evidence -name '*.xcresult' -prune)
+
+      - name: Upload evidence (failure diagnostics, failure only)
         if: failure()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: tauri-probe-evidence-failure
-          path: probes/tauri/.evidence/**/*.xcresult
+          path: |
+            probes/tauri/.evidence/failure-diagnostics
+            !probes/tauri/.evidence/**/*.xcresult
+            !probes/tauri/.evidence/**/*.xcresult/**
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 2
+          retention-days: 1

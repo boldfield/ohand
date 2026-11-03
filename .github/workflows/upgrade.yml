@@ -115,17 +115,29 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-      # Result bundles are too large for routine evidence (docs/features/ci-artifact-budget.md); keep them only when the job failed.
-      - name: Upload the upgrade report and logs (result bundles, failure only)
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload the upgrade report and logs (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "96000000"
+        run: ios/scripts/export-failure-diagnostics.sh upgrade-evidence/failure-diagnostics $(find upgrade-evidence -name '*.xcresult' -prune)
+
+      - name: Upload the upgrade report and logs (failure diagnostics, failure only)
         if: failure()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: upgrade-evidence-failure
-          path: upgrade-evidence/**/*.xcresult
+          path: |
+            upgrade-evidence/failure-diagnostics
+            !upgrade-evidence/**/*.xcresult
+            !upgrade-evidence/**/*.xcresult/**
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 2
+          retention-days: 1
 
   # The debug-only upgrade report must not exist in a Release build: build one and look for it.
   release-excludes-report:
