@@ -122,9 +122,9 @@ snapshot of the screen taken just before the audit:
 - **Scrolled under glass.** If the element's frame lies wholly inside the clear band between the overlays (and on
   screen), the issue is real and fails. Otherwise it is excused at that stop (`OWED`), and the same test must audit the
   element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
-  element into the middle of the clear band, dragging down the middle of the screen (the right edge would catch the
-  scroll indicator, which scrubs the whole list) and letting the list decelerate (after a drag that ends in a hold, the
-  app's accessibility frames stay where they were), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
+  element into the middle of the clear band, dragging down the left margin beside the cards (a drag started on a
+  card moves the list but leaves the app's accessibility frames at its top; the right edge would catch the scroll
+  indicator, which scrubs the whole list), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
   `<first screen of the test>-settle-<n>`); an
   element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
   it is on the list, never something else that shares its frame.

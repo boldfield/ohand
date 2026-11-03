@@ -533,10 +533,12 @@ final class AccessibilityAuditUITests: XCTestCase {
     }
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
-    /// slowly and released without a hold, so the scroll view ends by decelerating: after a drag that ends in a hold the
-    /// app's accessibility frames stay where they were before the drag (run 41702917752, where the screenshot and the
-    /// snapshot disagreed). The caller drags again until the element is where it should be, and the frames are read only
-    /// once two snapshots a second apart agree. The drag runs down the middle of the screen: at the right
+    /// slowly and with a hold at the end so it does not coast. The drag runs down the left margin, 8 points from the edge,
+    /// beside the cards: started on a card (a button), the scroll still moves but the app's accessibility frames stay at
+    /// the top of the list (runs 41702917752 and 41711242088, where the screenshots and the snapshots disagreed); at the
+    /// right edge it catches the scroll indicator, which scrubs the whole list. A vertical drag does not start the back
+    /// gesture. The caller drags again until the element is where it should be, and the frames are read only once two
+    /// snapshots a second apart agree. The drag runs down the middle of the screen: at the right
     /// edge it would catch the scroll indicator, which scrubs the whole list, and at the left edge the back gesture.
     private func scrollContent(by distance: CGFloat, between band: ClosedRange<CGFloat>) {
         let top = band.lowerBound + 20
@@ -545,9 +547,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         let step = max(-(bottom - top), min(bottom - top, distance))
         let startY = step > 0 ? bottom : top
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let x = app.frame.width / 2
+        let x: CGFloat = 8
         origin.withOffset(CGVector(dx: x, dy: startY)).press(
-            forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: x, dy: startY - step)), withVelocity: .slow, thenHoldForDuration: 0)
+            forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: x, dy: startY - step)), withVelocity: .slow, thenHoldForDuration: 0.3)
         waitForStillFrames()
     }
 
