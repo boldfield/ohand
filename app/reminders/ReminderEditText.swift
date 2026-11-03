@@ -13,6 +13,8 @@ enum ReminderStanding: Equatable {
     case unsupportedRepeat
     /// A request exists but no time was resolved from it. Nothing is scheduled.
     case timeNotResolved
+    /// A request quoted a time phrase but no time was resolved from it. The phrase is the person's own words.
+    case phraseNotScheduled(phrase: String, problem: TimePhraseProblem)
     /// The time is stored but too many reminders are waiting for the system's limit, so this one is held back.
     case heldBackForCapacity
     /// The stored time was not in the future when it was scheduled. The user must choose a later one.
@@ -41,7 +43,10 @@ enum ReminderStanding: Equatable {
         case "not_requested": return .none
         case "cancelled": return .cancelled
         case "unsupported_recurrence": return .unsupportedRepeat
-        case "not_scheduled_yet": return .timeNotResolved
+        case "not_scheduled_yet":
+            let phrase = reminder.sourcePhrase?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !phrase.isEmpty else { return .timeNotResolved }
+            return .phraseNotScheduled(phrase: phrase, problem: TimePhraseProblem(reason: reminder.ambiguityReason))
         case "unschedulable":
             switch reminder.unschedulableReason {
             case "capacity_exceeded": return .heldBackForCapacity
@@ -70,6 +75,7 @@ enum ReminderStanding: Equatable {
         case .cancelled: return "Reminder cancelled"
         case .unsupportedRepeat: return "Repeat not supported"
         case .timeNotResolved: return "No time set"
+        case .phraseNotScheduled(_, let problem): return problem.title
         case .heldBackForCapacity: return "Held back"
         case .opportunityExpired: return "Time has passed"
         case .heldBackForPermission, .permissionBlocked: return "Notifications are off"
@@ -90,6 +96,7 @@ enum ReminderStanding: Equatable {
             return "This request asked for a repeating reminder. Repeats are not supported yet, so nothing is scheduled. "
                 + "Choose one date and time instead."
         case .timeNotResolved: return "The request did not name a time, so nothing is scheduled. Choose a date and time."
+        case .phraseNotScheduled(let phrase, let problem): return problem.detail(phrase: phrase)
         case .heldBackForCapacity:
             return "The system limits how many reminders can wait at once, so this one is held back and nothing is "
                 + "scheduled for it. It is kept and will be scheduled when room frees up."
@@ -120,6 +127,65 @@ enum ReminderStanding: Equatable {
         switch self {
         case .none, .cancelled: return false
         default: return true
+        }
+    }
+}
+
+/// Why a quoted time phrase produced no time, read from the core's fixed `ambiguity_reason` wording
+/// (`core/src/time/resolver.rs`, `HEDGED_REQUEST_REASON` in `core/src/reminders/state/mod.rs`).
+enum TimePhraseProblem: Equatable {
+    case notUnderstood
+    case hedged
+    case missingDay
+    case missingMeridiem
+    case unsupportedZone
+    case clockChange
+    case other
+
+    init(reason: String?) {
+        let text = reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if text == "the time phrase could not be understood" {
+            self = .notUnderstood
+        } else if text == "the request is hedged" {
+            self = .hedged
+        } else if text.hasPrefix("Missing day") {
+            self = .missingDay
+        } else if text.hasPrefix("Missing meridiem") {
+            self = .missingMeridiem
+        } else if text.hasPrefix("Time zone or unrecognized qualifier") {
+            self = .unsupportedZone
+        } else if text.contains("DST gap") || text.contains("DST fold") {
+            self = .clockChange
+        } else {
+            self = .other
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .notUnderstood: return "Time not understood"
+        case .missingDay, .missingMeridiem, .unsupportedZone, .clockChange: return "Time incomplete"
+        case .hedged, .other: return "Not scheduled"
+        }
+    }
+
+    func detail(phrase: String) -> String {
+        let heard = "The app heard \"\(phrase)\""
+        switch self {
+        case .notUnderstood: return "\(heard) but could not turn it into a time. Choose a date and time."
+        case .hedged:
+            return "\(heard), but the request was hedged, so nothing is scheduled. Choose a date and time."
+        case .missingDay:
+            return "\(heard), but the day is missing or unclear, so nothing is scheduled. Choose a date and time."
+        case .missingMeridiem:
+            return "\(heard), but it does not say a.m. or p.m., so nothing is scheduled. Choose a date and time."
+        case .unsupportedZone:
+            return "\(heard), but it names a time zone or qualifier that is not supported, so nothing is scheduled. "
+                + "Choose a date and time."
+        case .clockChange:
+            return "\(heard), but a clock change means that time does not exist or happens twice, so nothing is "
+                + "scheduled. Choose a date and time."
+        case .other: return "\(heard), but it could not be scheduled from that. Choose a date and time."
         }
     }
 }
