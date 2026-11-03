@@ -4653,3 +4653,59 @@ Acceptance:
 4. **Exact-head macOS CI evidence**, with the `simulator` and both `walkthrough` jobs green.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F62
+
+Resolve day-part words in reminder phrases so "tomorrow morning at 9:30 AM" is scheduled
+
+Found by the maintainer on the trial iPhone on 2026-11-02. A spoken capture "Remind me tomorrow morning at 9:30 AM to ask about the hydrangea" was typed `action` with a reminder, and the reminder was stored `not_scheduled_yet` with the reason "the time phrase could not be understood". The interpreter's instant was discarded, as designed: the deterministic resolver is the authority (F28), and `TimeResolver::resolve` (`core/src/time/resolver.rs`) accepts a day part only as `today`, `tomorrow`, a weekday, `next <weekday>` or an ISO date (`parse_day_part`, `parse_natural_language`). "tomorrow morning" matches none of them, "morning" is not a clock, so the phrase fails as `InvalidDateFormat`; the guard (`candidate_agreement`, `core/src/interpretation/apply/mod.rs`) treats that as no opinion, `resolve_phrase` (`core/src/reminders/state/mod.rs`) fails the same way and stores the reminder as needing correction. The span-coverage check already knows these words (`TIMES_OF_DAY`, `core/src/time/expression.rs`), so only the resolver lacks them. Spoken reminders use "morning", "afternoon", "evening" and "tonight" constantly; this recurs through the trial until fixed.
+
+Owned paths:
+- `core/src/time/` and `core/tests/time/`;
+- `core/tests/proposal_application/` (one end-to-end test);
+- `fixtures/intent/contrastive-fixtures.json` and `docs/validation/intent-fixtures.md` (one fixture row each);
+- existing tests elsewhere under `core/tests/`, `tools/bench/` and `tools/evaluation/` whose asserted outcome changes only because a day-part phrase now resolves. Update such a test to the new correct outcome and list each one in the PR. Do not change what it tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Grammar.** The resolver accepts a day-part word in a reminder phrase, matching case-insensitively. The day-part words are `morning`, `afternoon`, `evening`, `night` and `tonight`, optionally preceded by `this` or `in the`, and `tonight` alone. Accepted shapes, each optionally with F28's `at` before the clock and `on` before a weekday:
+   - `<day> <daypart> [at] <clock>` ("tomorrow morning at 9:30 AM", "Friday evening at 7 pm", "tomorrow night at 21:30");
+   - `<daypart> [at] <clock>` ("this evening at 6 pm", "tonight at 8", "in the morning at 9"), where the day is today, except that `in the morning` with no day word is ambiguous, because it is as often tomorrow as today;
+   - `<day> [at] <clock> in the <daypart>` and `<day> [at] <clock> at night` ("tomorrow at 9 in the morning", "Friday at 10 at night");
+   - `<day> <daypart>` and `<daypart>` with no clock ("tomorrow morning", "tonight") resolve to the date only and stay ambiguous for the missing hour, exactly as `tomorrow` does today, with the day part named in the ambiguity reason.
+   The `<day>` and `<clock>` parts are exactly what F28 accepts, including 24-hour `HH:MM`, `noon` and `midnight`.
+2. **The day part supplies a missing meridiem and checks a stated one.** Each day part owns an hour range in the capture's zone: morning 05:00–11:59, afternoon 12:00–17:59, evening 18:00–23:59, night and tonight 18:00–23:59. A bare hour `1`–`12` with a day part takes the meridiem that puts it in that range ("tomorrow morning at 9" is 09:00, "tonight at 8" is 20:00, "tomorrow afternoon at 12" is 12:00); an hour that cannot fall in the range ("tonight at 3") stays ambiguous for the missing meridiem. A clock that states its meridiem, or a 24-hour clock, must fall in the range; otherwise the phrase is ambiguous with a reason that names the conflict ("tomorrow morning at 9:30 PM", "tomorrow morning at 21:30"). Never guess past the day part: "tonight at 1 am" is ambiguous.
+3. **Unchanged.** F28's rules keep applying: a stated zone or offset after the clock is ambiguous, DST gaps and folds are ambiguous, a resolved instant before the capture is reported as past, a clock with no day and no day part resolves to today only when later than the capture, and every existing resolver test passes unchanged.
+4. **Guard coverage.** `span_covers_time_expression` treats the day-part words and `in the`/`this` before them as part of the expression, so a span that quotes only `at 9:30 AM` of "tomorrow morning at 9:30 AM" is still truncated and never scheduled, and the full span schedules. Tests for both.
+5. **End-to-end.** A core test applies an interpreter proposal for "Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea", captured 2026-11-03T02:02:00Z in America/Los_Angeles (the maintainer's capture, with synthetic content). The stored reminder is `resolved` at 2026-11-03T09:30:00-08:00. The same proposal with the instant 21:30 is rejected by the guard as contradicting the source.
+6. **Fixture.** `fixtures/intent/contrastive-fixtures.json` and the table in `docs/validation/intent-fixtures.md` gain `daypart-explicit` ("Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea", `action`, reminder explicit at the instant above) in the `dates` family, following the existing rows' shape; the evaluation suite scores the oracle's own expected proposal for it with no defects at both stages.
+7. **Table-driven unit tests** cover every shape in item 1, every meridiem rule and conflict in item 2, a weekday with a day part, each ambiguity, and one DST case with a day part.
+8. `make check` and `make test` pass. The coordinator reruns the live harness after landing.
+
+Validation: `make check` and `make test`. No native code changes; the iOS simulator job still runs on the PR and must be green at the exact head.
+
+### F63
+
+Say which time phrase could not be understood instead of claiming no time was named
+
+Found with F62. When a reminder is stored `not_scheduled_yet`, the item's detail screen shows "No time set" and "The request did not name a time, so nothing is scheduled. Choose a date and time." (`app/reminders/ReminderEditText.swift`, `.timeNotResolved`). The core stores why: the reminder record carries `source_phrase` (the time phrase the request quoted) and `ambiguity_reason` (fixed resolver wording), both already decoded by `ReminderRecordAnswer` (`ios/OhAndCoreBridge/CoreHandle+ReminderControls.swift`) and unused by the copy. For the maintainer's capture the phrase was "tomorrow morning at 9:30 AM" and the reason "the time phrase could not be understood", so the screen told the person the opposite of what happened. A trial user needs to know that the app heard a time and could not read it, so they correct the time and not the words.
+
+Owned paths: `app/reminders/ReminderEditText.swift` and, only if the standing needs to carry the phrase and reason, `app/reminders/ReminderEditModel.swift`; `ios/Tests/ReminderEdit/`. No core, bridge or other view changes: the record already carries both fields.
+
+Dependencies: none (F62 changes what the core stores for one phrase, not the fields).
+
+Acceptance:
+
+1. **The copy uses the stored reason and phrase.** For `not_scheduled_yet` with a non-empty `source_phrase`, the headline and detail distinguish, by the fixed core wording of `ambiguity_reason`:
+   - "the time phrase could not be understood" (resolver parse failure): headline "Time not understood"; detail quotes the phrase: 'The app heard "tomorrow morning at 9:30 AM" but could not turn it into a time. Choose a date and time.';
+   - "the request is hedged" (`HEDGED_REQUEST_REASON`, `core/src/reminders/state/mod.rs`): headline "Not scheduled"; detail says the request was hedged, so nothing was scheduled;
+   - a reason starting "Missing day", "Missing meridiem", "Time zone or unrecognized qualifier", or naming a DST gap or fold (`core/src/time/resolver.rs` is the list): headline "Time incomplete"; detail quotes the phrase and says in plain words what is missing (the day, a.m. or p.m., an unsupported zone, a clock change that makes the time not exist or happen twice);
+   - any other reason: headline "Not scheduled"; detail quotes the phrase and says it could not be scheduled from it.
+   With no `source_phrase`, today's copy stays as the fallback.
+2. **The phrase is shown verbatim** from the record, in quotes, never reworded or trimmed beyond surrounding whitespace, so the person can see exactly what was heard.
+3. **Hosted tests** in `ios/Tests/ReminderEdit/` cover each branch in item 1 with a synthetic record, the fallback, and that the existing standings are unchanged.
+4. **Exact-head macOS CI evidence**, green.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
