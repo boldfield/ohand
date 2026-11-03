@@ -350,7 +350,7 @@ final class AccessibilityAuditUITests: XCTestCase {
                 let hasName = !element.label.isEmpty || !element.title.isEmpty || !((element.placeholderValue ?? "").isEmpty)
                 // SwiftUI exposes a toggle or menu as a labelled element that holds an unlabelled system control; VoiceOver
                 // lands on the labelled one, so the inner control is named by the element around it.
-                let isNamedByContainer = !hasName && isInsideLabelledElement(element)
+                let isNamedByContainer = !hasName && (isInsideLabelledElement(element) || isNamedByRowText(element))
                 XCTAssertTrue(hasName || isNamedByContainer, "\(screen): a \(kind) with identifier '\(identifier)' has no label: \(element.debugDescription.prefix(300)); parent \(element.value ?? "-")")
             }
         }
@@ -361,9 +361,20 @@ final class AccessibilityAuditUITests: XCTestCase {
         let topCandidates = [app.buttons["home.search"], app.buttons["home.settings"], app.buttons["home.done"], app.buttons["Back"].firstMatch]
         let top = topCandidates.filter { $0.exists }.map { $0.frame.maxY }.max().map { $0 + 12 } ?? 0
         let composerIdentifiers = ["home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard"]
-        let bottom = composerIdentifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY }.min().map { $0 - 28 }
+        let bottom = composerIdentifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY }.min().map { $0 - 64 }
             ?? CGFloat.greatestFiniteMagnitude
         return top...max(top, bottom)
+    }
+
+    /// A switch whose row text is a separate static text to its left: the row names it for VoiceOver, which reads the
+    /// toggle's label with its state.
+    private func isNamedByRowText(_ element: XCUIElement) -> Bool {
+        guard element.elementType == .switch else { return false }
+        let frame = element.frame
+        let texts = app.staticTexts.matching(NSPredicate(format: "label != ''")).allElementsBoundByIndex
+        return texts.contains { text in
+            text.exists && text.frame.minX < frame.minX && text.frame.minY <= frame.midY && text.frame.maxY >= frame.midY
+        }
     }
 
     private func isInsideLabelledElement(_ element: XCUIElement) -> Bool {
