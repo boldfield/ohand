@@ -423,26 +423,37 @@ final class AccessibilityAuditUITests: XCTestCase {
         func luminance(_ offset: Int) -> Double {
             func linear(_ value: UInt8) -> Double {
                 let channel = Double(value) / 255
-                return channel <= 0.03928 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
+                if channel <= 0.03928 { return channel / 12.92 }
+                let base: Double = (channel + 0.055) / 1.055
+                return pow(base, 2.4)
             }
-            return 0.2126 * linear(pixels[offset]) + 0.7152 * linear(pixels[offset + 1]) + 0.0722 * linear(pixels[offset + 2])
+            let red: Double = linear(pixels[offset])
+            let green: Double = linear(pixels[offset + 1])
+            let blue: Double = linear(pixels[offset + 2])
+            return 0.2126 * red + 0.7152 * green + 0.0722 * blue
         }
+        func bucket(_ offset: Int) -> UInt32 {
+            let red = UInt32(pixels[offset] >> 3)
+            let green = UInt32(pixels[offset + 1] >> 3)
+            let blue = UInt32(pixels[offset + 2] >> 3)
+            return (red << 16) | (green << 8) | blue
+        }
+        let offsets = Array(stride(from: 0, to: pixels.count, by: 4))
         var counts: [UInt32: Int] = [:]
-        for offset in stride(from: 0, to: pixels.count, by: 4) {
-            let key = UInt32(pixels[offset] >> 3) << 16 | UInt32(pixels[offset + 1] >> 3) << 8 | UInt32(pixels[offset + 2] >> 3)
-            counts[key, default: 0] += 1
-        }
+        for offset in offsets { counts[bucket(offset), default: 0] += 1 }
         guard let backgroundKey = counts.max(by: { $0.value < $1.value })?.key,
-              let backgroundOffset = stride(from: 0, to: pixels.count, by: 4).first(where: {
-                  UInt32(pixels[$0] >> 3) << 16 | UInt32(pixels[$0 + 1] >> 3) << 8 | UInt32(pixels[$0 + 2] >> 3) == backgroundKey
-              }) else { return nil }
+              let backgroundOffset = offsets.first(where: { bucket($0) == backgroundKey }) else { return nil }
         let backgroundLuminance = luminance(backgroundOffset)
         var textLuminance = backgroundLuminance
-        for offset in stride(from: 0, to: pixels.count, by: 4) {
+        for offset in offsets {
             let candidate = luminance(offset)
-            if abs(candidate - backgroundLuminance) > abs(textLuminance - backgroundLuminance) { textLuminance = candidate }
+            let candidateGap: Double = Swift.abs(candidate - backgroundLuminance)
+            let currentGap: Double = Swift.abs(textLuminance - backgroundLuminance)
+            if candidateGap > currentGap { textLuminance = candidate }
         }
-        return (max(backgroundLuminance, textLuminance) + 0.05) / (min(backgroundLuminance, textLuminance) + 0.05)
+        let lighter: Double = Swift.max(backgroundLuminance, textLuminance)
+        let darker: Double = Swift.min(backgroundLuminance, textLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
     }
 
     /// Every button, switch and field a person can act on has a label that names it.
