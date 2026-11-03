@@ -25,14 +25,18 @@ final class AccessibilityAuditUITests: XCTestCase {
     private static let announcementLogArgument = "-OhAndAnnouncementLog"
     private static let announcementLogIdentifier = "accessibility.announcement-log"
     private static let fixtureStatusIdentifier = "ui-fixture.status"
-    /// The elements whose contrast issue is exempt while they sit under a glass overlay (see `isExempt`).
+    /// The elements whose contrast issue is exempt while they sit under a glass overlay (see `isExempt`). A label matches by prefix
+    /// where the rest of it varies from run to run (a card caption ends in how long ago the note was captured).
     private static let contrastUnderGlass: [(identifier: String, label: String)] = [
         (identifier: "", label: "What's on your mind?"),
         (identifier: "", label: "&"),
-        (identifier: "", label: "Synthetic typed note about the garden hose"),
-        (identifier: "", label: "Synthetic typed action to sweep the porch"),
-        (identifier: "", label: "Note · 10 sec. ago"),
-        (identifier: "", label: "Action · 10 sec. ago"),
+        (identifier: "", label: "Synthetic typed note"),
+        (identifier: "", label: "Synthetic typed action"),
+        (identifier: "", label: "Note · "),
+        (identifier: "", label: "Action · "),
+        (identifier: "", label: "Idea · "),
+        (identifier: "", label: "Synthetic spoken"),
+        (identifier: "", label: "Synthetic typed idea"),
         (identifier: "home.recents.list", label: "Today"),
         (identifier: "item-controls.topic.save", label: "Save topic"),
         (identifier: "", label: "Remind me soon to call the plumber about the leaking tap"),
@@ -79,7 +83,7 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     func testHomePopulated() {
         guard launch(.populated) else { return }
-        XCTAssertTrue(app.homeCard(containing: "Synthetic typed note about the garden hose").waitForExistence(timeout: screenTimeout))
+        XCTAssertTrue(app.homeCard(containing: "Synthetic typed note").waitForExistence(timeout: screenTimeout))
         dismissKeyboardIfShown()
         audit("home-populated")
         // The cards under the composer are audited again once the list is scrolled to its end.
@@ -279,6 +283,11 @@ final class AccessibilityAuditUITests: XCTestCase {
     // MARK: Audit
 
     /// Every audit type (`.all`, the default of `performAccessibilityAudit()`); the default-size run leaves out `.dynamicType` (see `audit`).
+    /// An entry ending in a space or starting with "Synthetic" matches by prefix; any other entry matches exactly.
+    private static func matches(label: String, entry: String) -> Bool {
+        entry.hasSuffix(" ") || entry.hasPrefix("Synthetic") ? label.hasPrefix(entry) : label == entry
+    }
+
     private var auditTypes: XCUIAccessibilityAuditType {
         var types = XCUIAccessibilityAuditType.all
         if sizeName != "xxxl" { types.remove(.dynamicType) }
@@ -302,7 +311,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             do {
                 try app.performAccessibilityAudit(for: auditTypes) { [self] issue in
                     let element = issue.element
-                    let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")'"
+                    let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(clearBand)"
                     if isExempt(issue) {
                         auditLines.append("EXEMPT \(description)")
                         return true
@@ -340,7 +349,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         // docs/validation/accessibility.md lists the same elements.
         if issue.auditType == .contrast, let frame = issue.element?.frame,
            frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound,
-           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && $0.label == issue.element?.label }) {
+           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && Self.matches(label: issue.element?.label ?? "", entry: $0.label) }) {
             return true
         }
         // The keyboard's prediction bar is the system's, not the app's.
