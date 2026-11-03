@@ -25,6 +25,21 @@ final class AccessibilityAuditUITests: XCTestCase {
     private static let announcementLogArgument = "-OhAndAnnouncementLog"
     private static let announcementLogIdentifier = "accessibility.announcement-log"
     private static let fixtureStatusIdentifier = "ui-fixture.status"
+    /// The elements whose contrast issue is exempt while they sit under a glass overlay (see `isExempt`).
+    private static let contrastUnderGlass: [(identifier: String, label: String)] = [
+        (identifier: "", label: "What's on your mind?"),
+        (identifier: "", label: "&"),
+        (identifier: "", label: "Synthetic typed note about the garden hose"),
+        (identifier: "", label: "Synthetic typed action to sweep the porch"),
+        (identifier: "", label: "Note · 10 sec. ago"),
+        (identifier: "", label: "Action · 10 sec. ago"),
+        (identifier: "home.recents.list", label: "Today"),
+        (identifier: "item-controls.topic.save", label: "Save topic"),
+        (identifier: "", label: "Remind me soon to call the plumber about the leaking tap"),
+        (identifier: "item-controls.text.save", label: "Save words"),
+        (identifier: "", label: "What you wrote"),
+        (identifier: "", label: "Type"),
+    ]
 
     override func setUpWithError() throws {
         continueAfterFailure = true
@@ -124,6 +139,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         let message = app.element(identifier: "capture-entry.message")
         XCTAssertTrue(message.waitForExistence(timeout: screenTimeout), "saving a capture showed no outcome line to announce")
         XCTAssertFalse(message.label.isEmpty, "the outcome line has no text")
+        // The same words are posted as a VoiceOver announcement (hosted tests assert the announcement through the injectable
+        // announcer; this reads the debug log in the real app).
+        assertAnnouncement(containing: message.label)
     }
 
     // MARK: Search
@@ -260,7 +278,16 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     // MARK: Audit
 
-    /// Screenshot, then the audit with every default type. An issue not exempted by `isExempt` fails the test.
+    /// Every default audit type; the default-size run leaves out `.dynamicType` (see `audit`).
+    private var auditTypes: XCUIAccessibilityAuditType {
+        var types: XCUIAccessibilityAuditType = [.contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .textClipped, .trait, .action]
+        if sizeName == "xxxl" { types.insert(.dynamicType) }
+        return types
+    }
+
+    /// Screenshot, then the audit: every default type at the largest size, and at the default size every default type
+    /// except `.dynamicType`, whose resize probe measures the scroll view's geometry and not the fonts (the deterministic
+    /// replacement is `ios/scripts/check_font_tokens.py`; docs/validation/accessibility.md). An issue not exempted by `isExempt` fails the test.
     private func audit(_ screen: String) {
         capture(screen)
         currentScreen = screen
@@ -273,7 +300,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         for attempt in 1...2 {
             var found: [String] = []
             do {
-                try app.performAccessibilityAudit { [self] issue in
+                try app.performAccessibilityAudit(for: auditTypes) { [self] issue in
                     let element = issue.element
                     let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")'"
                     if isExempt(issue) {
@@ -303,26 +330,17 @@ final class AccessibilityAuditUITests: XCTestCase {
     }
 
     /// The exemptions. Each one is a single named issue on a single element and is listed with its reason in
-    /// docs/validation/accessibility.md. No whole audit type is ever excluded.
+    /// docs/validation/accessibility.md. Only the default-size run omits `.dynamicType`, as `auditTypes` documents; no exemption excludes a type.
     private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
-        // Content scrolled partly under a translucent glass overlay is measured against the blurred overlay, not its own
-        // background. Such an element is audited once the screen is scrolled so that it is clear of the overlay (the Home
-        // and source detail tests audit both ends of the scroll); the overlay's own controls are never exempt here.
-        if [XCUIAccessibilityAuditType.contrast, .dynamicType, .textClipped].contains(issue.auditType),
-           let frame = issue.element?.frame, !identifier.hasPrefix("home.composer"),
-           !["home.search", "home.settings", "home.done"].contains(identifier),
-           frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound {
-            return true
-        }
-        // At the default size the audit's resize probe reports static card and header text on these two screens as not
-        // resizable, although the text uses the scaling text styles and the same elements pass the audit at the largest
-        // size (where the probe has nothing left to change) and visibly grow in its screenshots. Only that one issue, on
-        // static text (not a control), on those two screens, at the default size.
-        if issue.auditType == .dynamicType, sizeName == "default",
-           currentScreen.hasPrefix("home-populated") || currentScreen.hasPrefix("source-detail-top"),
-           issue.element?.elementType == .staticText || issue.element?.elementType == .other,
-           issue.element?.elementType != .button {
+        // Text scrolled partly under a translucent glass overlay (the header, the composer) is measured for contrast against
+        // the blurred overlay, not its own background. Each element below is audited clear of the overlay at another
+        // scroll stop or screen, where its contrast passes; the contrast issue on it, and only that issue, is exempt while
+        // its frame is outside the clear band. An element not in the list, or one inside the clear band, is never exempt.
+        // docs/validation/accessibility.md lists the same elements.
+        if issue.auditType == .contrast, let frame = issue.element?.frame,
+           frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound,
+           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && $0.label == issue.element?.label }) {
             return true
         }
         // The keyboard's prediction bar is the system's, not the app's.

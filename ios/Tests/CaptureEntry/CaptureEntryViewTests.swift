@@ -18,9 +18,11 @@ final class CaptureEntryViewTests: XCTestCase {
     private var model: CaptureEntryModel!
     private var frames: [String: CGRect] = [:]
     private var retainedWindow: UIWindow?
+    private let announcements = AnnouncementRecorder()
 
     override func setUp() {
         super.setUp()
+        announcements.install()
         textIngress = ScriptedTextCaptureIngress()
         voice = FakeVoiceController()
         frames = [:]
@@ -28,6 +30,7 @@ final class CaptureEntryViewTests: XCTestCase {
     }
 
     override func tearDown() {
+        announcements.uninstall()
         retainedWindow?.isHidden = true
         retainedWindow = nil
         super.tearDown()
@@ -373,6 +376,17 @@ final class CaptureEntryViewTests: XCTestCase {
     }
 
     // MARK: Saved pill and messages
+
+    func testSavingACaptureAnnouncesItsOutcome() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
+        model.textModel.updateText("buy oat milk")
+        model.saveText()
+        settle(until: "the save is announced") { !self.announcements.messages.isEmpty }
+        let expected = model.acknowledgment.flatMap { CaptureMessages.message(for: $0) ?? model.message(for: $0) }
+        XCTAssertNotNil(expected)
+        XCTAssertEqual(announcements.messages.last, expected)
+    }
 
     func testAConfirmedSaveClearsTheTextShowsTheSavedPillAndStillStatesTheReminder() {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)

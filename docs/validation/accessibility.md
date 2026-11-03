@@ -33,7 +33,7 @@ Each screen is audited with `XCUIApplication.performAccessibilityAudit()` and th
 
 Any audit issue fails the test. The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
 budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log` (one `ISSUE`, `EXEMPT`, `PASS` or `FAIL`
-line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.png`) and `accessibility-summary.txt`. The
+line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. The
 `.xcresult` bundles upload only when the job fails, as `ios-accessibility-failure`.
 
 ### Large text
@@ -52,27 +52,29 @@ to look at.
   (`app/design-system/AccessibilityAnnouncer.swift`) posts the announcement and, in a debug build launched with
   `-OhAndAnnouncementLog`, also writes it to a near-invisible element (`accessibility.announcement-log`) that tests read.
 
-  | Event | Announcement | Test |
+  | Event | Announcement | Tests |
   | --- | --- | --- |
-  | Saving a capture | the outcome line, posted by `CaptureEntryView` (not edited by this task) | `testSavingACaptureShowsTheOutcomeLine` asserts the outcome line it announces appears |
-  | A processing failure | "N notes failed to sort." (Status) | `testStatusWithFailedNote` |
-  | A reminder that needs correction | "A reminder needs a time." (Home) | `testReminderNeedingACorrectionIsAnnounced` |
-  | Locking | "Your captures are locked. Unlock to see what you saved before." (Home) | `testLockedScreen` |
+  | Saving a capture | the outcome line, posted by `CaptureEntryView` | hosted `CaptureEntryViewTests.testSavingACaptureAnnouncesItsOutcome`; UI `testSavingACaptureShowsTheOutcomeLine` reads it from the debug announcement log |
+  | A processing failure | "N notes failed to sort." (Status) | hosted `StatusFailedNotesTests.testAProcessingFailureIsAnnounced`; UI `testStatusWithFailedNote` |
+  | A reminder that needs correction | "A reminder needs a time." (Home) | hosted `HomeBodyViewTests.testAReminderThatNeedsATimeIsAnnounced`; UI `testReminderNeedingACorrectionIsAnnounced` |
+  | Locking | "Your captures are locked. Unlock to see what you saved before." (Home) | hosted `HomeBodyViewTests.testLockingIsAnnounced`; UI `testLockedScreen` |
 
+  The hosted tests replace `AccessibilityAnnouncer.current` (the injectable announcer in `app/design-system/`) with a
+  recorder and assert the message posted; the UI tests assert the same text in the real app.
   What the test proves is that the app posts the announcement text at that moment. That VoiceOver speaks it, in a sensible
   order, is a device check (part 2).
 - The locked screen's Unlock control is labelled "Unlock", enabled and hittable (`testLockedScreen`).
 
 ### Exemptions
 
-An exemption is one issue on one element, handled in `isExempt` with a comment, and listed here. No audit type is ever excluded.
+An exemption is one issue on one named element, handled in `isExempt` with a comment, and listed here. No exemption excludes an audit type. The one audit type left out of a run is `.dynamicType` at the default size, by the decision under "Dynamic Type" below.
 
 | Element | Issue | Reason |
 | --- | --- | --- |
 | `ui-fixture.status` | any | A 4-point, near-transparent marker added by debug builds only, so a test knows the fixture finished seeding. It is not part of the app a person uses. |
 | `provider-settings.field.model`, `provider-settings.field.secret` | Text clipped (text fields only) | A single-line text field cannot wrap; the audit's "may be clipped at larger Dynamic Type sizes" is a heuristic every single-line field raises. The fields use a scaling font, keep their 44 pt minimum height and grow with it, and the largest-size screenshot in the artifact shows them whole. |
 | the keyboard's prediction cells (`TUIPredictionViewCell`) | Element has no description | The system keyboard's predictive bar, drawn by iOS and not by the app. |
-| static text on `home-populated`, `home-populated-end` and `source-detail-top` (the card captions and texts, the item type and capture date) | Dynamic Type font sizes are partially unsupported (default size only) | The audit's resize probe reports these as not resizable although they use scaling text styles; the same elements pass at the largest size and the largest-size screenshots show them grown. |
+| the contrast of the elements in the "Content under glass" list | Contrast failed | See "Content under glass". |
 | `accessibility.announcement-log` | any | The same kind of debug-only marker, holding the announcements a test reads. |
 
 ### Settling
@@ -83,12 +85,30 @@ pass as a `RETRY` line.
 
 ### Content under glass
 
-The header buttons, the back button and the composer are translucent glass. A card or label scrolled partly under one is
-measured against the blurred overlay and not against its own background, so the audit reports contrast, Dynamic Type or
-clipping for it. The test does not count such an issue when the element's frame reaches into the overlay (the `EXEMPT`
-line says so), and audits the same content again with the list scrolled to its other end, where it is clear of the
-overlay (`home-populated` and `home-populated-end`; the three source-detail stops). The overlays' own controls are never
-exempt by this rule.
+The header buttons, the back button and the composer are translucent glass. Text scrolled partly under one, or drawn on
+one, is measured against the blurred overlay and not against its own background, so the audit reports its contrast. The
+test exempts that contrast issue, and only that issue, for exactly these elements, and only while the element's frame
+reaches into the overlay (the `EXEMPT` line in `audit-default.log` says so; `contrastUnderGlass` in the test is the same
+list). An element inside the clear band, an element not listed, and any other issue type on a listed element fail.
+
+| Element (identifier, label) | Screens | Reason |
+| --- | --- | --- |
+| "What's on your mind?" (composer placeholder) | Home, capture, locked | Drawn on the composer glass; its colour is the placeholder token, checked against the paper behind the glass in the colour table of the PR. |
+| "&" (the mark) | capture text entry | Drawn on the header glass. |
+| the Home card texts and captions ("Synthetic typed note about the garden hose", "Synthetic typed action to sweep the porch", "Note · 10 sec. ago", "Action · 10 sec. ago") and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; `home-populated` and `home-populated-end` audit the list at both ends of the scroll. |
+| "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | source detail | Scrolled under the composer glass or header; the three source-detail stops audit them in turn. |
+
+### Dynamic Type
+
+At the default size the audit omits `.dynamicType` and passes every other default type (contrast, element detection, hit
+region, sufficient element description, text clipped, trait, action) to `performAccessibilityAudit(for:)`. The largest-size
+run keeps every type. The decision (coordinator, 2026-11-01): the probe grows the font step by step and watches each
+element's frame; in a scrolling list the growth above pushes the elements below out of the scroll view's bounds, so they are
+reported "partially unsupported" wherever the scroll settles, which measures the audit's geometry and not the fonts. No
+per-element exemption is added for these findings. The evidence for Dynamic Type is instead the largest-size run (text
+clipped, contrast, and the screenshots in the artifact) and `ios/scripts/check_font_tokens.py` (run by `make check`), which
+fails when a `Font` token in `app/design-system/DSMetrics.swift` is not built from a text style or derived from another
+token.
 
 ### Scope of fixes
 

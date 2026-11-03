@@ -1,16 +1,32 @@
 import SwiftUI
 import UIKit
 
-/// Posts a VoiceOver announcement for a change the person would otherwise have to look for: a lock, a failure, a
-/// reminder that needs a time. In a debug build launched with `-OhAndAnnouncementLog`, each announcement is also written
+/// Something that can speak a change to the person: the system in the app, a recorder in a hosted test.
+protocol AccessibilityAnnouncing {
+    func announce(_ message: String)
+}
+
+/// Posts a VoiceOver announcement through the system.
+struct SystemAccessibilityAnnouncer: AccessibilityAnnouncing {
+    func announce(_ message: String) {
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+}
+
+/// Posts a VoiceOver announcement for a change the person would otherwise have to look for: a saved capture, a lock, a
+/// failure, a reminder that needs a time. Views call `announce`; a hosted test replaces `current` with a recorder and
+/// restores it afterwards. In a debug build launched with `-OhAndAnnouncementLog`, each announcement is also written
 /// to a near-invisible accessibility element, because a UI test cannot read the announcement queue but can read an element.
 enum AccessibilityAnnouncer {
     /// The launch argument that turns the debug log element on.
     static let logLaunchArgument = "-OhAndAnnouncementLog"
     static let logIdentifier = "accessibility.announcement-log"
 
+    /// Where announcements go. Replaced only by tests, on the main thread.
+    static var current: AccessibilityAnnouncing = SystemAccessibilityAnnouncer()
+
     static func announce(_ message: String) {
-        UIAccessibility.post(notification: .announcement, argument: message)
+        current.announce(message)
         #if DEBUG
         Task { @MainActor in AnnouncementLogElement.shared.record(message) }
         #endif
