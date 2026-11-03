@@ -351,8 +351,8 @@ final class AccessibilityAuditUITests: XCTestCase {
         // ledger takes only the final pass's decisions.
         var issueCount = 0
         for attempt in 1...2 {
-            let band = currentClearBand()
             let elements = screenElements()
+            let band = clearBand(from: elements)
             var trialLedger = ledger
             var trialOwed: [String: GlassPlacement] = [:]
             var notes: [String] = []
@@ -468,7 +468,8 @@ final class AccessibilityAuditUITests: XCTestCase {
         func walk(_ node: XCUIElementSnapshot, ancestors: Set<Int>) {
             let nodeID = nextNodeID
             nextNodeID += 1
-            if !node.label.isEmpty {
+            // A scroll indicator (a field's "Horizontal scroll bar, 1 page") is not content and obstructs nothing.
+            if !node.label.isEmpty, node.elementType != .scrollBar {
                 nodes.append(ScreenElement(
                     nodeID: nodeID, ancestorIDs: ancestors, key: "", identifier: node.identifier, label: node.label, frame: node.frame))
             }
@@ -494,23 +495,29 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// For each excuse the test has not settled, brings the element where it is unobstructed and audits there: content
     /// scrolled under glass is dragged into the middle of the clear band; for text drawn on glass the screen is scrolled
-    /// to its end, where nothing is behind the composer. What still is not settled fails the test in tearDown.
+    /// to its top (the header) or its end (the composer), where nothing is behind the glass. What still is not settled
+    /// fails the test in tearDown.
     private func settleOwedElements() {
         var stop = 0
-        for owed in ledger.unsettled where stop < 8 {
-            guard ledger.settled[owed.key] == nil, let placement = owedPlacements[owed.key] else { continue }
+        var attempted: Set<String> = []
+        // A settle stop can owe something new (a card it scrolls under the header), so this runs until every excuse has
+        // had its own stop, up to 12 stops.
+        while stop < 12, let owed = ledger.unsettled.first(where: { !attempted.contains($0.key) }) {
+            attempted.insert(owed.key)
+            guard let placement = owedPlacements[owed.key] else { continue }
             let screenFrame = app.frame
-            for _ in 0..<4 {
+            for _ in 0..<6 {
                 let elements = screenElements()
                 guard let target = elements.first(where: { $0.key == owed.key }) else { break }
-                let band = currentClearBand()
+                let band = clearBand(from: elements)
                 if GlassContrastLedger.isUnobstructed(target, placement: placement, clearBand: band, screen: screenFrame, others: elements) { break }
                 switch placement {
                 case .scrollsUnderGlass:
                     let visibleBottom = min(band.upperBound, screenFrame.maxY)
                     scrollContent(by: target.frame.midY - (band.lowerBound + visibleBottom) / 2, between: band.lowerBound...visibleBottom)
                 case .drawnOnGlass:
-                    app.swipeUp()
+                    // Nothing is behind the header at the top of the screen, or behind the composer at its end.
+                    if target.frame.midY < screenFrame.midY { app.swipeDown() } else { app.swipeUp() }
                     Thread.sleep(forTimeInterval: 1)
                 }
             }
@@ -601,11 +608,27 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// The vertical band between the overlays at the top and bottom of the screen.
     private func currentClearBand() -> ClosedRange<CGFloat> {
-        let topCandidates = [app.buttons["home.search"], app.buttons["home.settings"], app.buttons["home.done"], app.buttons["Back"].firstMatch]
-        let top = topCandidates.filter { $0.exists }.map { $0.frame.maxY }.max().map { $0 + 12 } ?? 0
-        let composerIdentifiers = ["home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard"]
-        let bottom = composerIdentifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY }.min().map { $0 - 64 }
-            ?? CGFloat.greatestFiniteMagnitude
+        clearBand(from: screenElements())
+    }
+
+    /// The vertical band between the overlays, from one snapshot. The top is 12 points below the header's glass buttons
+    /// (or the back button). The bottom is the top of the composer's glass, which sits 20 points (its padding) above the
+    /// field, the placeholder and the "Recording" line, less 4 points; a status line or the Saved pill above the composer
+    /// (drawn over the list) lowers it to 8 points above that line.
+    private func clearBand(from elements: [ScreenElement]) -> ClosedRange<CGFloat> {
+        let headerIdentifiers: Set<String> = ["home.search", "home.settings", "home.done"]
+        let top = elements.filter { headerIdentifiers.contains($0.identifier) || ($0.label == "Back" && $0.frame.minY < 200) }
+            .map(\.frame.maxY).max().map { $0 + 12 } ?? 0
+        let composerIdentifiers: Set<String> = [
+            "home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard",
+        ]
+        let composerTop = elements.filter { element in
+            composerIdentifiers.contains(element.identifier)
+                || (element.identifier.isEmpty && ["What's on your mind?", "Recording"].contains(element.label))
+        }.map(\.frame.minY).min().map { $0 - 24 }
+        let linesAboveComposer: Set<String> = ["capture-entry.message", "capture-entry.notice", "capture-entry.saved"]
+        let lineTop = elements.filter { linesAboveComposer.contains($0.identifier) }.map(\.frame.minY).min().map { $0 - 8 }
+        let bottom = [composerTop, lineTop].compactMap { $0 }.min() ?? CGFloat.greatestFiniteMagnitude
         return top...max(top, bottom)
     }
 

@@ -130,8 +130,14 @@ snapshot of the screen taken just before the audit:
   the contrast is measured from the screenshot pixels inside the element's frame, below the status bar: the most common
   colour is the background, the pixel furthest from it in luminance is the text. Since nothing else is in the crop, that
   pixel is the element's own glyph. 4.5:1 or above settles it (`MEASURED`); below fails. With something overlapping,
-  it is owed as above, and the test scrolls to the end of the screen, where nothing is behind the composer, to audit or
-  measure it there.
+  it is owed as above, and the test scrolls to the top of the screen (for the header) or its end (for the composer),
+  where nothing is behind the glass, to audit or measure it there. A scroll indicator ("Horizontal scroll bar") is not
+  content and overlaps nothing.
+
+The clear band runs from 12 points below the header's glass buttons (or the back button) to the top of the composer's
+glass, which is 20 points above its field, placeholder or "Recording" line (the test allows 24); a status line or the
+Saved pill above the composer lowers it to 8 points above that line. A settle stop can owe something new, such as a card
+it scrolls under the header; the test keeps settling until each excuse has had its own stop (at most 12).
 
 `GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a low-contrast element under
 the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
