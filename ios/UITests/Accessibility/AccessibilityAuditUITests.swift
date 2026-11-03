@@ -35,6 +35,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         (identifier: "", label: "Note · "),
         (identifier: "", label: "Action · "),
         (identifier: "", label: "Idea · "),
+        (identifier: "", label: "Remind me 2099-01-15 "),
         (identifier: "", label: "Synthetic spoken"),
         (identifier: "", label: "Synthetic typed idea"),
         (identifier: "home.recents.list", label: "Today"),

@@ -95,7 +95,7 @@ list). An element inside the clear band, an element not listed, and any other is
 | --- | --- | --- |
 | "What's on your mind?" (composer placeholder) | Home, capture, locked | Drawn on the composer glass; its colour is the placeholder token, checked against the paper behind the glass in the colour table of the PR. |
 | "&" (the mark) | capture text entry | Drawn on the header glass. |
-| the Home card texts ("Synthetic typed …", "Synthetic spoken …") and captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age in the caption changes from run to run) and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; `home-populated` and `home-populated-end` audit the list at both ends of the scroll. |
+| the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …") and captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age in the caption changes from run to run) and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; `home-populated` and `home-populated-end` audit the list at both ends of the scroll. |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | source detail | Scrolled under the composer glass or header; the three source-detail stops audit them in turn. |
 
 ### Dynamic Type
