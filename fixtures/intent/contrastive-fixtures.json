@@ -775,6 +775,53 @@
       "notes": "No timezone is stated, so the device timezone applies; a device-default timezone does not downgrade quality because the date and hour are both stated. 2026-10-09 09:00 America/New_York is UTC-04:00 (13:00Z). The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
+      "id": "daypart-explicit",
+      "category": "dates",
+      "input": "Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea",
+      "provenance": "synthetic, day-part word before the clock",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "text",
+        "capture_instant": "2026-11-03T02:02:00Z",
+        "device_timezone": "America/Los_Angeles",
+        "notes": "evening of 2026-11-02 local, so tomorrow is 2026-11-03"
+      },
+      "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 76,
+            "text": "Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea"
+          }
+        ],
+        "reminder_proposal": {
+          "timezone_id": "America/Los_Angeles",
+          "quality": "explicit",
+          "instant": "2026-11-03T09:30:00-08:00",
+          "source_span": {
+            "start": 10,
+            "end": 37,
+            "text": "tomorrow morning at 9:30 AM"
+          }
+        }
+      },
+      "forbidden": {
+        "reminder_qualities": [
+          "ambiguous"
+        ],
+        "reminder_timezones": [
+          "UTC"
+        ]
+      },
+      "recoverable": true,
+      "notes": "The day part names the morning, so 9:30 AM is stated outright and the local day is 2026-11-03 (capture 2026-11-02 18:02 PST). 09:30 America/Los_Angeles is UTC-08:00 (17:30Z). The request names a target, so the capture is an action and the reminder attaches to it."
+    },
+    {
       "id": "timezone-conflicting",
       "category": "dates",
       "input": "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
