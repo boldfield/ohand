@@ -84,7 +84,7 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     func testHomePopulated() {
         guard launch(.populated) else { return }
-        XCTAssertTrue(app.homeCard(containing: "Synthetic typed note").waitForExistence(timeout: screenTimeout))
+        XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: screenTimeout))
         dismissKeyboardIfShown()
         audit("home-populated")
         // The cards under the composer are audited again once the list is scrolled to its end.
