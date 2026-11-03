@@ -7,7 +7,8 @@ import XCTest
 /// The driving script (`ios/scripts/accessibility-simulator.sh`) runs this class once at the default content size and once
 /// at the largest accessibility size (`ACCESSIBILITY_CONTENT_SIZE=default|xxxl`, passed as `TEST_RUNNER_ACCESSIBILITY_CONTENT_SIZE`)
 /// and names the directory for the audit log and screenshots (`TEST_RUNNER_ACCESSIBILITY_OUTPUT_DIR`). Any audit issue fails
-/// the test; the only exemptions are in `isExempt`, each for one named element and listed in docs/validation/accessibility.md.
+/// the test; the only exemptions are in `isExempt`, each for one named element, and the contrast decisions of the glass list
+/// (`glassList`, `GlassContrastLedger`); both are listed in docs/validation/accessibility.md. An audit that throws fails.
 @available(iOS 17.0, *)
 final class AccessibilityAuditUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -15,9 +16,10 @@ final class AccessibilityAuditUITests: XCTestCase {
     private var outputDirectory: URL!
     private var screenshotIndex = 0
     private var auditLines: [String] = []
-    /// The part of the screen not covered by a glass overlay (the header buttons, the back button, the composer), set per audit.
-    private var clearBand: ClosedRange<CGFloat> = 0...CGFloat.greatestFiniteMagnitude
     private var currentScreen = ""
+    /// The contrast excuses under and on glass this test has taken, and the unobstructed audits that settle them.
+    private var ledger = GlassContrastLedger()
+    private var owedPlacements: [String: GlassPlacement] = [:]
     private let screenTimeout: TimeInterval = 90
 
     private static let largestContentSize = "UICTContentSizeCategoryAccessibilityXXXL"
@@ -25,25 +27,30 @@ final class AccessibilityAuditUITests: XCTestCase {
     private static let announcementLogArgument = "-OhAndAnnouncementLog"
     private static let announcementLogIdentifier = "accessibility.announcement-log"
     private static let fixtureStatusIdentifier = "ui-fixture.status"
-    /// The elements whose contrast issue is exempt while they sit under a glass overlay (see `isExempt`). A label matches by prefix
-    /// where the rest of it varies from run to run (a card caption ends in how long ago the note was captured).
-    private static let contrastUnderGlass: [(identifier: String, label: String)] = [
-        (identifier: "", label: "What's on your mind?"),
-        (identifier: "", label: "&"),
-        (identifier: "", label: "Synthetic typed note"),
-        (identifier: "", label: "Synthetic typed action"),
-        (identifier: "", label: "Note · "),
-        (identifier: "", label: "Action · "),
-        (identifier: "", label: "Idea · "),
-        (identifier: "", label: "Remind me 2099-01-15 "),
-        (identifier: "", label: "Synthetic spoken"),
-        (identifier: "", label: "Synthetic typed idea"),
-        (identifier: "home.recents.list", label: "Today"),
-        (identifier: "item-controls.topic.save", label: "Save topic"),
-        (identifier: "", label: "Remind me soon to call the plumber about the leaking tap"),
-        (identifier: "item-controls.text.save", label: "Save words"),
-        (identifier: "", label: "What you wrote"),
-        (identifier: "", label: "Type"),
+    /// The glass list: the elements whose contrast issue `GlassContrastLedger` decides (docs/validation/accessibility.md,
+    /// "Content under and on glass"). A label matches by prefix where the rest of it varies from run to run (a card caption
+    /// ends in how long ago the note was captured). Every other contrast issue fails the test.
+    private static let glassList: [(identifier: String, label: String, placement: GlassPlacement)] = [
+        // Drawn on the composer glass.
+        (identifier: "", label: "What's on your mind?", placement: .drawnOnGlass),
+        // The mark, drawn on the header glass; only in the header (`glassPlacement`).
+        (identifier: "", label: "&", placement: .drawnOnGlass),
+        // Home cards and the list heading, scrolled under the header and the composer.
+        (identifier: "", label: "Synthetic typed note", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Synthetic typed action", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Synthetic typed idea", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Synthetic spoken", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Note · ", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Action · ", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Idea · ", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Remind me 2099-01-15 ", placement: .scrollsUnderGlass),
+        (identifier: "home.recents.list", label: "Today", placement: .scrollsUnderGlass),
+        // Source detail, scrolled under the back button.
+        (identifier: "item-controls.topic.save", label: "Save topic", placement: .scrollsUnderGlass),
+        (identifier: "item-controls.text.save", label: "Save words", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Remind me soon to call the plumber about the leaking tap", placement: .scrollsUnderGlass),
+        (identifier: "", label: "What you wrote", placement: .scrollsUnderGlass),
+        (identifier: "", label: "Type", placement: .scrollsUnderGlass),
     ]
 
     override func setUpWithError() throws {
@@ -62,6 +69,11 @@ final class AccessibilityAuditUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        settleOwedElements()
+        for owed in ledger.unsettled {
+            auditLines.append("UNVERIFIED \(owed.key): excused under or on glass at \(owed.firstScreen) and never audited unobstructed")
+            XCTFail("'\(owed.key)' was excused under or on glass at \(owed.firstScreen) and never audited unobstructed")
+        }
         let log = outputDirectory.appendingPathComponent("audit-\(sizeName).log")
         let text = auditLines.joined(separator: "\n") + "\n"
         if let handle = try? FileHandle(forWritingTo: log) {
@@ -87,7 +99,8 @@ final class AccessibilityAuditUITests: XCTestCase {
         XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: screenTimeout))
         dismissKeyboardIfShown()
         audit("home-populated")
-        // The cards under the composer are audited again once the list is scrolled to its end.
+        // The cards under the composer are audited again once the list is scrolled to its end; any card still excused is
+        // scrolled clear of the glass and audited there (`settleOwedElements`, from tearDown).
         for _ in 0..<4 { app.swipeUp() }
         Thread.sleep(forTimeInterval: 1)
         audit("home-populated-end")
@@ -325,37 +338,81 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// Screenshot, then the audit: every default type at the largest size, and at the default size every default type
     /// except `.dynamicType`, whose resize probe measures the scroll view's geometry and not the fonts (the deterministic
-    /// replacement is `ios/scripts/check_font_tokens.py`; docs/validation/accessibility.md). An issue not exempted by `isExempt` fails the test.
-    private func audit(_ screen: String) {
+    /// replacement is `ios/scripts/check_font_tokens.py`; docs/validation/accessibility.md). An issue that is neither in
+    /// `isExempt` nor excused by the glass ledger fails the test, and so does an audit that cannot run.
+    private func audit(_ screen: String, checksLabels: Bool = true) {
         capture(screen)
         currentScreen = screen
-        clearBand = currentClearBand()
-        if app.keyboards.count == 0 { assertInteractiveElementsAreLabelled(screen) }
+        if checksLabels, app.keyboards.count == 0 { assertInteractiveElementsAreLabelled(screen) }
+        let screenFrame = app.frame
         // An audit that finds something is repeated after the screen has settled: a card still fading in or a view
         // mid-transition is sampled against the wrong background and reports a contrast or text-size issue that is gone
-        // a moment later. Only what the settled screen still shows counts, and every such issue fails the test.
+        // a moment later. Only what the settled screen still shows counts, and every such issue fails the test. The glass
+        // ledger takes only the final pass's decisions.
         var issueCount = 0
         for attempt in 1...2 {
+            let band = currentClearBand()
+            let elements = screenElements()
+            var trialLedger = ledger
+            var trialOwed: [String: GlassPlacement] = [:]
+            var notes: [String] = []
             var found: [String] = []
+            var flaggedKeys: Set<String> = []
+            var auditError: Error?
             do {
                 try app.performAccessibilityAudit(for: auditTypes) { [self] issue in
                     let element = issue.element
-                    let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(clearBand)"
+                    let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(band)"
+                    if issue.auditType == .contrast, let element,
+                       let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band) {
+                        let shown = displayed(identifier: element.identifier, label: element.label, near: element.frame, in: elements)
+                        if let shown { flaggedKeys.insert(shown.key) }
+                        let decision = trialLedger.decide(
+                            contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
+                            others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame) } })
+                        let shownFrame = shown?.frame.debugDescription ?? "not shown"
+                        switch decision {
+                        case .owed:
+                            if let shown { trialOwed[shown.key] = placement }
+                            notes.append("OWED \(screen): '\(element.label)' (\(placement)) shown at \(shownFrame), obstructed\(obstruction(of: shown, placement: placement, in: elements)); the test must audit it unobstructed")
+                        case .measured(let ratio):
+                            notes.append("MEASURED \(screen): '\(element.label)' shown at \(shownFrame) with nothing overlapping, contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                        case .issue(let reason):
+                            found.append("\(description) | shown at \(shownFrame): \(reason)")
+                        }
+                        return true
+                    }
                     if isExempt(issue) {
-                        auditLines.append("EXEMPT \(description)")
+                        notes.append("EXEMPT \(description)")
                         return true
                     }
                     found.append(description)
                     return true
                 }
             } catch {
-                auditLines.append("ERROR \(screen): \(error)")
+                auditError = error
             }
-            if found.isEmpty { break }
-            if attempt == 1 {
+            // An audit that could not run proves nothing about the screen: it fails, it is never a pass.
+            if let auditError {
+                issueCount += 1
+                auditLines.append("ERROR \(screen): the audit did not run: \(auditError)")
+                XCTFail("\(screen): the accessibility audit did not run: \(auditError)")
+                break
+            }
+            if !found.isEmpty, attempt == 1 {
                 auditLines.append("RETRY \(screen): \(found.count) issue(s) on the first pass, auditing again after the screen settles")
                 Thread.sleep(forTimeInterval: 3)
                 continue
+            }
+            ledger = trialLedger
+            owedPlacements.merge(trialOwed) { first, _ in first }
+            auditLines += notes
+            let listed = elements.compactMap { element in
+                glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band).map { (element, $0) }
+            }
+            let settled = ledger.recordStop(screen, listed: listed, flaggedKeys: flaggedKeys, clearBand: band, screen: screenFrame, others: elements)
+            for element in settled {
+                auditLines.append("CLEAR \(screen): '\(element.label)' at \(element.frame.debugDescription) audited unobstructed with no contrast issue")
             }
             for description in found {
                 issueCount += 1
@@ -363,34 +420,126 @@ final class AccessibilityAuditUITests: XCTestCase {
                 print("AUDIT-ISSUE (\(sizeName)) \(description)")
                 XCTFail(description)
             }
+            break
         }
         auditLines.append("\(issueCount == 0 ? "PASS" : "FAIL") \(screen) (\(sizeName)), \(issueCount) issue(s)")
     }
 
-    /// The exemptions. Each one is a single named issue on a single element and is listed with its reason in
-    /// docs/validation/accessibility.md. Only the default-size run omits `.dynamicType`, as `auditTypes` documents; no exemption excludes a type.
+    /// What keeps text drawn on glass from being measured: the elements overlapping it, for the log.
+    private func obstruction(of element: ScreenElement?, placement: GlassPlacement, in elements: [ScreenElement]) -> String {
+        guard let element, placement == .drawnOnGlass else { return "" }
+        let others = GlassContrastLedger.overlapping(element, in: elements).prefix(3).map { "'\($0.label.prefix(40))' \($0.frame.debugDescription)" }
+        return others.isEmpty ? "" : " by \(others.joined(separator: ", "))"
+    }
+
+    /// The glass list entry for an element, when it has one. The mark counts only in the header, above the clear band.
+    private func glassPlacement(identifier: String, label: String, frame: CGRect, band: ClosedRange<CGFloat>) -> GlassPlacement? {
+        guard let entry = Self.glassList.first(where: { $0.identifier == identifier && Self.matches(label: label, entry: $0.label) }) else {
+            return nil
+        }
+        if entry.label == "&", frame.maxY > band.lowerBound { return nil }
+        return entry.placement
+    }
+
+    /// The element as the snapshot before the audit showed it: the same identifier and label (a caption's age aside),
+    /// nearest to where the audit reports it.
+    private func displayed(identifier: String, label: String, near frame: CGRect, in elements: [ScreenElement]) -> ScreenElement? {
+        let stable = ScreenElement.stableLabel(label)
+        func distance(_ candidate: ScreenElement) -> CGFloat {
+            hypot(candidate.frame.midX - frame.midX, candidate.frame.midY - frame.midY)
+        }
+        return elements
+            .filter { $0.identifier == identifier && ScreenElement.stableLabel($0.label) == stable }
+            .min { distance($0) < distance($1) }
+    }
+
+    /// Every labelled element on screen, from one snapshot of the hierarchy. A Home card's caption and text are keyed by
+    /// their card: the card in the hierarchy above them, or else the card whose frame holds them and whose label has their text.
+    private func screenElements() -> [ScreenElement] {
+        let root: XCUIElementSnapshot
+        do {
+            root = try app.snapshot()
+        } catch {
+            XCTFail("\(currentScreen): no snapshot of the screen before the audit: \(error)")
+            return []
+        }
+        var nodes: [ScreenElement] = []
+        var nextNodeID = 0
+        func walk(_ node: XCUIElementSnapshot, ancestors: Set<Int>) {
+            let nodeID = nextNodeID
+            nextNodeID += 1
+            if !node.label.isEmpty {
+                nodes.append(ScreenElement(
+                    nodeID: nodeID, ancestorIDs: ancestors, key: "", identifier: node.identifier, label: node.label, frame: node.frame))
+            }
+            for child in node.children { walk(child, ancestors: ancestors.union([nodeID])) }
+        }
+        walk(root, ancestors: [])
+        let cards = nodes.filter { $0.identifier.hasPrefix("home.recents.card.") }
+        return nodes.map { node in
+            let stable = ScreenElement.stableLabel(node.label)
+            let card = cards
+                .filter { card in
+                    card.nodeID != node.nodeID
+                        && (node.ancestorIDs.contains(card.nodeID)
+                            || (card.frame.insetBy(dx: -1, dy: -1).contains(node.frame) && card.label.contains(stable)))
+                }
+                .min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+            return ScreenElement(
+                nodeID: node.nodeID, ancestorIDs: node.ancestorIDs,
+                key: ScreenElement.key(card: card?.identifier ?? "", identifier: node.identifier, label: node.label),
+                identifier: node.identifier, label: node.label, frame: node.frame)
+        }
+    }
+
+    /// For each excuse the test has not settled, brings the element where it is unobstructed and audits there: content
+    /// scrolled under glass is dragged into the middle of the clear band; for text drawn on glass the screen is scrolled
+    /// to its end, where nothing is behind the composer. What still is not settled fails the test in tearDown.
+    private func settleOwedElements() {
+        var stop = 0
+        for owed in ledger.unsettled where stop < 8 {
+            guard ledger.settled[owed.key] == nil, let placement = owedPlacements[owed.key] else { continue }
+            let screenFrame = app.frame
+            for _ in 0..<4 {
+                let elements = screenElements()
+                guard let target = elements.first(where: { $0.key == owed.key }) else { break }
+                let band = currentClearBand()
+                if GlassContrastLedger.isUnobstructed(target, placement: placement, clearBand: band, screen: screenFrame, others: elements) { break }
+                switch placement {
+                case .scrollsUnderGlass:
+                    let visibleBottom = min(band.upperBound, screenFrame.maxY)
+                    scrollContent(by: target.frame.midY - (band.lowerBound + visibleBottom) / 2, between: band.lowerBound...visibleBottom)
+                case .drawnOnGlass:
+                    app.swipeUp()
+                    Thread.sleep(forTimeInterval: 1)
+                }
+            }
+            stop += 1
+            auditLines.append("SETTLE \(currentScreen): scrolled for '\(owed.key)' (excused at \(owed.firstScreen))")
+            audit("\(owed.firstScreen)-settle-\(stop)", checksLabels: false)
+        }
+    }
+
+    /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
+    /// slowly and with a hold at the end so it does not coast. The drag runs along the right edge, clear of the cards.
+    private func scrollContent(by distance: CGFloat, between band: ClosedRange<CGFloat>) {
+        let top = band.lowerBound + 20
+        let bottom = band.upperBound - 20
+        guard bottom > top, abs(distance) > 1 else { return }
+        let step = max(-(bottom - top), min(bottom - top, distance))
+        let startY = step > 0 ? bottom : top
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let x = app.frame.width - 8
+        origin.withOffset(CGVector(dx: x, dy: startY)).press(
+            forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: x, dy: startY - step)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        Thread.sleep(forTimeInterval: 1)
+    }
+
+    /// The exemptions outside the glass list. Each one is a single named issue on a single element and is listed with its
+    /// reason in docs/validation/accessibility.md. Only the default-size run omits `.dynamicType`, as `auditTypes` documents;
+    /// no exemption excludes a type.
     private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
-        // Text drawn on or scrolled under a translucent glass overlay (the header, the composer) is measured by the audit against
-        // the blurred overlay, which it cannot resolve. For the elements named below, the contrast issue, and only that issue,
-        // is exempt when the contrast measured from the screenshot pixels (the text against what is drawn behind it) meets
-        // the WCAG minimum; the measured ratio is logged on the EXEMPT line. An element not in the list, any other issue
-        // type, and a measured ratio below the minimum are never exempt. docs/validation/accessibility.md lists the same elements.
-        if issue.auditType == .contrast, let element = issue.element,
-           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && Self.matches(label: element.label, entry: $0.label) }) {
-            guard let ratio = measuredContrast(of: element) else {
-                auditLines.append("MEASURE-FAILED \(currentScreen): could not measure '\(element.label)'")
-                return false
-            }
-            auditLines.append("MEASURED \(currentScreen): '\(element.label)' contrast \(String(format: "%.2f", ratio)):1 (minimum \(Self.minimumContrastRatio):1)")
-            if ratio >= Self.minimumContrastRatio { return true }
-            // Text wholly behind the composer is not visible at this scroll stop, so its contrast is not something a person
-            // can read. The OCCLUDED line in the log names each such element.
-            if let composerTop = composerTop(), element.frame.minY >= composerTop {
-                auditLines.append("OCCLUDED \(currentScreen): '\(element.label)' lies behind the composer (top \(composerTop))")
-                return true
-            }
-        }
         // The keyboard's prediction bar is the system's, not the app's.
         if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }
         // A single-line field cannot wrap, so the audit's "may be clipped at larger Dynamic Type sizes" for a
@@ -406,24 +555,23 @@ final class AccessibilityAuditUITests: XCTestCase {
         return identifier == Self.fixtureStatusIdentifier || identifier == Self.announcementLogIdentifier
     }
 
-    /// The top edge of the composer's glass, when the composer is on screen.
-    private func composerTop() -> CGFloat? {
-        let identifiers = ["home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard"]
-        return identifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY - 16 }.min()
-    }
+    /// The top of the screenshot the measurement never reads: the status bar's clock and indicators end above it on the
+    /// iPhone simulators the job uses.
+    private static let statusBarBottom: CGFloat = 50
 
-    /// The WCAG AA ratio for body text; applied to every exempted element, large or not.
-    private static let minimumContrastRatio = 4.5
-
-    /// The contrast of the text in `element` as a person sees it: the screenshot pixels inside its frame, the most common
-    /// colour taken as the background and the pixel furthest from it in luminance as the text.
-    private func measuredContrast(of element: XCUIElement) -> Double? {
+    /// The contrast of the text in `frame` as a person sees it, from the screenshot pixels (`ScreenshotContrast`). Called
+    /// only for text drawn on glass with nothing else overlapping its frame, so the darkest glyph in the crop is its own.
+    private func measuredContrast(of frame: CGRect) -> Double? {
         guard let image = app.screenshot().image.cgImage else { return nil }
         let screenWidth = app.frame.width
         guard screenWidth > 0 else { return nil }
         let scale = CGFloat(image.width) / screenWidth
-        let pixelRect = element.frame.intersection(app.frame)
-            .applying(CGAffineTransform(scaleX: scale, y: scale)).integral
+        var visible = frame.intersection(app.frame)
+        if visible.minY < Self.statusBarBottom {
+            visible = CGRect(x: visible.minX, y: Self.statusBarBottom, width: visible.width, height: visible.maxY - Self.statusBarBottom)
+        }
+        guard !visible.isNull, visible.height > 1 else { return nil }
+        let pixelRect = visible.applying(CGAffineTransform(scaleX: scale, y: scale)).integral
             .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
         guard !pixelRect.isEmpty, let crop = image.cropping(to: pixelRect) else { return nil }
         let width = crop.width, height = crop.height
@@ -432,40 +580,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
-        func luminance(_ offset: Int) -> Double {
-            func linear(_ value: UInt8) -> Double {
-                let channel = Double(value) / 255
-                if channel <= 0.03928 { return channel / 12.92 }
-                let base: Double = (channel + 0.055) / 1.055
-                return pow(base, 2.4)
-            }
-            let red: Double = linear(pixels[offset])
-            let green: Double = linear(pixels[offset + 1])
-            let blue: Double = linear(pixels[offset + 2])
-            return 0.2126 * red + 0.7152 * green + 0.0722 * blue
-        }
-        func bucket(_ offset: Int) -> UInt32 {
-            let red = UInt32(pixels[offset] >> 3)
-            let green = UInt32(pixels[offset + 1] >> 3)
-            let blue = UInt32(pixels[offset + 2] >> 3)
-            return (red << 16) | (green << 8) | blue
-        }
-        let offsets = Array(stride(from: 0, to: pixels.count, by: 4))
-        var counts: [UInt32: Int] = [:]
-        for offset in offsets { counts[bucket(offset), default: 0] += 1 }
-        guard let backgroundKey = counts.max(by: { $0.value < $1.value })?.key,
-              let backgroundOffset = offsets.first(where: { bucket($0) == backgroundKey }) else { return nil }
-        let backgroundLuminance = luminance(backgroundOffset)
-        var textLuminance = backgroundLuminance
-        for offset in offsets {
-            let candidate = luminance(offset)
-            let candidateGap: Double = Swift.abs(candidate - backgroundLuminance)
-            let currentGap: Double = Swift.abs(textLuminance - backgroundLuminance)
-            if candidateGap > currentGap { textLuminance = candidate }
-        }
-        let lighter: Double = Swift.max(backgroundLuminance, textLuminance)
-        let darker: Double = Swift.min(backgroundLuminance, textLuminance)
-        return (lighter + 0.05) / (darker + 0.05)
+        return ScreenshotContrast.ratio(pixels: pixels, width: width, height: height)
     }
 
     /// Every button, switch and field a person can act on has a label that names it.
@@ -535,12 +650,45 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     // MARK: Driving the app
 
+    /// Launches with the walkthrough's fixture launch argument (`XCUIApplication.fixtureLaunchArgument`) and waits, as
+    /// `launch(fixture:)` and `waitForFixtureReady()` do, for the composer and then for the fixture's `ready` marker, but
+    /// rides out snapshot stalls (`pollToleratingSnapshotStalls`).
     private func launch(_ fixture: OhAndFixture) -> Bool {
-        let reachedHome = app.launch(fixture: fixture)
+        app.launchArguments += [XCUIApplication.fixtureLaunchArgument, fixture.rawValue]
+        app.launch()
+        let composer = app.element(identifier: "home.composer.field")
+        let reachedHome = pollToleratingSnapshotStalls("waiting for the composer", timeout: screenTimeout) { composer.exists }
         XCTAssertTrue(reachedHome, "the \(fixture.rawValue) fixture did not reach home")
         guard reachedHome else { return false }
         if fixture == .emptyFirstRun { return true }
-        return app.waitForFixtureReady()
+        let marker = app.element(identifier: Self.fixtureStatusIdentifier)
+        var status = "no marker"
+        let finished = pollToleratingSnapshotStalls("waiting for the fixture", timeout: 150) {
+            status = marker.exists ? marker.label : "no marker"
+            return status == "ready" || status.hasPrefix("failed")
+        }
+        XCTAssertTrue(finished && status == "ready", "the \(fixture.rawValue) fixture was not ready (status: \(status))")
+        return finished && status == "ready"
+    }
+
+    /// Polls `condition` once a second until it holds or `timeout` passes. On the hosted runner the app's main thread can
+    /// be busy for half a minute after launch, and XCTest then records "Failed to get matching snapshots: Timed out while
+    /// evaluating UI query" for a query that would have answered a moment later. Here, and only here, that one issue is an
+    /// expected failure and the poll goes on; any other issue counts, and a condition that never holds fails the caller.
+    private func pollToleratingSnapshotStalls(_ activity: String, timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let options = XCTExpectedFailure.Options()
+        options.isStrict = false
+        options.issueMatcher = { issue in
+            (issue.compactDescription + " " + (issue.detailedDescription ?? "")).contains("Timed out while evaluating UI query")
+        }
+        repeat {
+            var holds = false
+            XCTExpectFailure("a snapshot stall while \(activity)", options: options) { holds = condition() }
+            if holds { return true }
+            Thread.sleep(forTimeInterval: 1)
+        } while Date() < deadline
+        return false
     }
 
     private func typeCapture(_ text: String) -> Bool {

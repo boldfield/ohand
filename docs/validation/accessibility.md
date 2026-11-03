@@ -14,7 +14,8 @@ fixtures are the synthetic ones the walkthrough uses (`ios/UITests/Fixtures`).
 
 ### What is audited
 
-Each screen is audited with `XCUIApplication.performAccessibilityAudit()` and the default audit types (all of them):
+Each screen is audited with `XCUIApplication.performAccessibilityAudit(for:)`: every default type at the largest size, and
+every default type except `.dynamicType` at the default size (see "Dynamic Type"):
 
 | Screen | Test | Fixture |
 | --- | --- | --- |
@@ -31,11 +32,35 @@ Each screen is audited with `XCUIApplication.performAccessibilityAudit()` and th
 | Status with a failed note; Status with a reminder that needs a time | `testStatusWithFailedNote`, `testStatusWithReminderNeedingATime` | failed-sorting, needs-correction |
 | Locked screen | `testLockedScreen` | locked |
 
-Any audit issue fails the test. The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
-budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log` (one `ISSUE`, `EXEMPT`, `PASS` or `FAIL`
-line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
+Any audit issue fails the test, and so does an audit that throws instead of running (the log says `ERROR`; the test
+fails, it never records a pass). The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
+budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
 uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
 failed tests' attachments as `ios-accessibility-failure` (retention 1 day, under 100 MB).
+
+The audit log has one line per decision:
+
+| Line | Meaning | Fails the job |
+| --- | --- | --- |
+| `ISSUE` | an audit issue that is not exempt | yes |
+| `ERROR` | the audit threw and did not run | yes |
+| `UNVERIFIED` | an element excused under or on glass that the test never audited unobstructed | yes |
+| `FAIL` / `PASS` | the screen's result | `FAIL` does |
+| `EXEMPT` | an issue exempted by the table under "Exemptions" | no |
+| `OWED` | a contrast issue on a glass-list element while it is obstructed; the test owes an unobstructed audit | no, until it is `UNVERIFIED` |
+| `CLEAR` | a glass-list element audited unobstructed with no contrast issue, which settles what it owed | no |
+| `MEASURED` | text drawn on glass, with nothing overlapping it, measured from the screenshot at 4.5:1 or above | no |
+| `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
+| `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
+
+`ios/scripts/accessibility-simulator.sh` fails the job on any `ISSUE`, `ERROR`, `UNVERIFIED` or `FAIL` line, or when a
+size has no `PASS` line, whatever xcodebuild returned.
+
+On the hosted runner the app's main thread can be busy for half a minute after launch, and XCTest then records "Failed to
+get matching snapshots: Timed out while evaluating UI query" for the first query. The audit test launches with the
+walkthrough's fixture argument and waits for the composer and the fixture's `ready` marker as the shared launcher does, but
+treats that one message, during those two waits only, as an expected failure and keeps polling. Any other failure counts,
+and a launch that never reaches home or ready fails.
 
 ### Large text
 
@@ -68,15 +93,18 @@ to look at.
 
 ### Exemptions
 
-An exemption is one issue on one named element, handled in `isExempt` with a comment, and listed here. No exemption excludes an audit type. The one audit type left out of a run is `.dynamicType` at the default size, by the decision under "Dynamic Type" below.
+An exemption is one issue on one named element, handled in `isExempt` with a comment, and listed here. No exemption
+excludes an audit type. The one audit type left out of a run is `.dynamicType` at the default size, by the decision under
+"Dynamic Type" below.
 
 | Element | Issue | Reason |
 | --- | --- | --- |
 | `ui-fixture.status` | any | A 4-point, near-transparent marker added by debug builds only, so a test knows the fixture finished seeding. It is not part of the app a person uses. |
+| `accessibility.announcement-log` | any | The same kind of debug-only marker, holding the announcements a test reads. |
 | `provider-settings.field.model`, `provider-settings.field.secret` | Text clipped (text fields only) | A single-line text field cannot wrap; the audit's "may be clipped at larger Dynamic Type sizes" is a heuristic every single-line field raises. The fields use a scaling font, keep their 44 pt minimum height and grow with it, and the largest-size screenshot in the artifact shows them whole. |
 | the keyboard's prediction cells (`TUIPredictionViewCell`) | Element has no description | The system keyboard's predictive bar, drawn by iOS and not by the app. |
-| the contrast of the elements in the "Content under glass" list | Contrast failed | See "Content under glass". |
-| `accessibility.announcement-log` | any | The same kind of debug-only marker, holding the announcements a test reads. |
+
+Contrast issues on the glass list below are not exempt; they are decided as "Content under and on glass" describes.
 
 ### Settling
 
@@ -84,23 +112,38 @@ An audit that reports something is repeated once after three seconds, because a 
 wrong background. Only issues the settled screen still has count; each of them fails the test, and the log records the first
 pass as a `RETRY` line.
 
-### Content under glass
+### Content under and on glass
 
-The header buttons, the back button and the composer are translucent glass. Text scrolled partly under one, or drawn on
-one, is measured by the audit against the blurred overlay, which it cannot resolve, so it reports its contrast. For exactly
-the elements below, the test exempts that contrast issue, and only that issue, when the contrast it measures itself meets
-4.5:1. It measures from the screenshot pixels inside the element's frame (the most common colour is the background, the pixel
-furthest from it in luminance is the text), so the ratio a person sees decides, wherever the element is on the screen and
-whether or not the keyboard is up. Each exemption writes a `MEASURED` line with the ratio to `audit-*.log`; a ratio below
-4.5:1 (unless the element lies wholly behind the composer, where it is not visible at that scroll stop; the log says `OCCLUDED`; in the exact-head run only the Home card caption "Action · …" needed it), an element not listed, and any other issue type on a listed element fail the test. `contrastUnderGlass` in the test is
-the same list.
+The header buttons, the back button and the composer are translucent glass. The audit measures text scrolled under the
+glass, or drawn on it, against the blurred overlay, which it cannot resolve, and reports a contrast failure. For the
+elements below (`glassList` in the test), `GlassContrastLedger` decides such an issue from where the element is in a
+snapshot of the screen taken just before the audit:
 
-| Element (identifier, label) | Screens | Reason |
+- **Scrolled under glass.** If the element's frame lies wholly inside the clear band between the overlays (and on
+  screen), the issue is real and fails. Otherwise it is excused at that stop (`OWED`), and the same test must audit the
+  element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
+  element into the middle of the clear band and audits there (`SETTLE`, a screen named `<screen>-settle-<n>`); an
+  element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
+  it is on the list, never something else that shares its frame.
+- **Drawn on glass.** If no other element's frame overlaps the text (nothing scrolled behind the glass there and nothing
+  else drawn on it; the field around the placeholder and the pill around the mark are its ancestors and do not count),
+  the contrast is measured from the screenshot pixels inside the element's frame, below the status bar: the most common
+  colour is the background, the pixel furthest from it in luminance is the text. Since nothing else is in the crop, that
+  pixel is the element's own glyph. 4.5:1 or above settles it (`MEASURED`); below fails. With something overlapping,
+  it is owed as above, and the test scrolls to the end of the screen, where nothing is behind the composer, to audit or
+  measure it there.
+
+`GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a low-contrast element under
+the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
+measured, a measured 3.1:1 that fails, a dark glyph from another element that would read 21:1 if it were not excluded,
+and two cards with the same caption that are settled separately.
+
+| Element (identifier, label) | Placement | Screens |
 | --- | --- | --- |
-| "What's on your mind?" (composer placeholder) | Home, capture, locked | Drawn on the composer glass; the pixel measurement decides. |
-| "&" (the mark) | capture text entry | Drawn on the header glass. |
-| the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …") and captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age in the caption changes from run to run) and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; the pixel measurement decides. |
-| "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | source detail | Scrolled under the composer glass or header; the pixel measurement decides. |
+| "What's on your mind?" (composer placeholder) | drawn on the composer glass | Home, capture, locked |
+| "&" (the mark), only in the header above the clear band | drawn on the header glass | capture text entry |
+| the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
+| "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
 
 ### Dynamic Type
 

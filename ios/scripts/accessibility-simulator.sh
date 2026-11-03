@@ -5,6 +5,7 @@
 # compile runs beside a booted simulator.
 # Usage: accessibility-simulator.sh <simulator-udid> <evidence-dir>
 # Output: <evidence-dir>/accessibility/{audit-<size>.log, <size>-*.png}, accessibility-<size>.log, accessibility-<size>.xcresult. macOS only.
+# The audit log has one line per decision: ISSUE, ERROR, UNVERIFIED, EXEMPT, OWED, CLEAR, MEASURED, then PASS or FAIL per screen.
 set -euo pipefail
 
 udid="${1:?simulator udid required}"
@@ -67,7 +68,7 @@ kill "${matcher_pid}" 2>/dev/null || true
 
 # What the audits found, in the log that goes into the artifact.
 for size in default xxxl; do
-  grep -E "^(ISSUE|EXEMPT|PASS|FAIL) " "${output_dir}/audit-${size}.log" 2>/dev/null || true
+  grep -E "^(ISSUE|ERROR|UNVERIFIED|EXEMPT|OWED|CLEAR|MEASURED|PASS|FAIL) " "${output_dir}/audit-${size}.log" 2>/dev/null || true
 done | tee "${evidence_dir}/accessibility-summary.txt"
 
 if [ "${test_status}" -ne 0 ]; then
@@ -85,8 +86,14 @@ for size in default xxxl; do
     echo "FAILURE: no screenshots for the ${size} content size" >&2
     missing=1
   fi
-  if grep -q "^ISSUE " "${output_dir}/audit-${size}.log" 2>/dev/null; then
-    echo "FAILURE: audit issues at the ${size} content size" >&2
+  # An issue, an audit that did not run, a failed screen or an excuse never settled is a failure, whatever xcodebuild said.
+  if grep -qE "^(ISSUE|ERROR|FAIL|UNVERIFIED) " "${output_dir}/audit-${size}.log" 2>/dev/null; then
+    echo "FAILURE: audit issues, audit errors or unsettled glass excuses at the ${size} content size" >&2
+    grep -E "^(ISSUE|ERROR|FAIL|UNVERIFIED) " "${output_dir}/audit-${size}.log" >&2 || true
+    missing=1
+  fi
+  if ! grep -q "^PASS " "${output_dir}/audit-${size}.log" 2>/dev/null; then
+    echo "FAILURE: no audited screen passed at the ${size} content size" >&2
     missing=1
   fi
 done
