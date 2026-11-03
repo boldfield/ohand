@@ -384,6 +384,13 @@ final class AccessibilityAuditUITests: XCTestCase {
             }
             auditLines.append("MEASURED \(currentScreen): '\(element.label)' contrast \(String(format: "%.2f", ratio)):1 (minimum \(Self.minimumContrastRatio):1)")
             if ratio >= Self.minimumContrastRatio { return true }
+            // Text wholly behind the composer is not visible at this scroll stop, so its contrast is not something a person
+            // can read; the same text is audited clear of the composer at the other end of the scroll (a contrast issue
+            // there fails the test).
+            if let composerTop = composerTop(), element.frame.minY >= composerTop {
+                auditLines.append("OCCLUDED \(currentScreen): '\(element.label)' lies behind the composer (top \(composerTop))")
+                return true
+            }
         }
         // The keyboard's prediction bar is the system's, not the app's.
         if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }
@@ -398,6 +405,12 @@ final class AccessibilityAuditUITests: XCTestCase {
         // part of the app a person uses (debug builds only, near-invisible by design), so their size and contrast are
         // not defects. They are exempt by identifier, for any issue.
         return identifier == Self.fixtureStatusIdentifier || identifier == Self.announcementLogIdentifier
+    }
+
+    /// The top edge of the composer's glass, when the composer is on screen.
+    private func composerTop() -> CGFloat? {
+        let identifiers = ["home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard"]
+        return identifiers.map { app.element(identifier: $0) }.filter { $0.exists }.map { $0.frame.minY - 16 }.min()
     }
 
     /// The WCAG AA ratio for body text; applied to every exempted element, large or not.

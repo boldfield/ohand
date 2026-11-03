@@ -92,7 +92,7 @@ the elements below, the test exempts that contrast issue, and only that issue, w
 4.5:1. It measures from the screenshot pixels inside the element's frame (the most common colour is the background, the pixel
 furthest from it in luminance is the text), so the ratio a person sees decides, wherever the element is on the screen and
 whether or not the keyboard is up. Each exemption writes a `MEASURED` line with the ratio to `audit-*.log`; a ratio below
-4.5:1, an element not listed, and any other issue type on a listed element fail the test. `contrastUnderGlass` in the test is
+4.5:1 (unless the element lies wholly behind the composer, where it is not visible at that scroll stop; the log says `OCCLUDED`, and the scroll's other end audits the same text clear of the composer), an element not listed, and any other issue type on a listed element fail the test. `contrastUnderGlass` in the test is
 the same list.
 
 | Element (identifier, label) | Screens | Reason |
