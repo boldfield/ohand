@@ -385,8 +385,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             auditLines.append("MEASURED \(currentScreen): '\(element.label)' contrast \(String(format: "%.2f", ratio)):1 (minimum \(Self.minimumContrastRatio):1)")
             if ratio >= Self.minimumContrastRatio { return true }
             // Text wholly behind the composer is not visible at this scroll stop, so its contrast is not something a person
-            // can read; the same text is audited clear of the composer at the other end of the scroll (a contrast issue
-            // there fails the test).
+            // can read. The OCCLUDED line in the log names each such element.
             if let composerTop = composerTop(), element.frame.minY >= composerTop {
                 auditLines.append("OCCLUDED \(currentScreen): '\(element.label)' lies behind the composer (top \(composerTop))")
                 return true
