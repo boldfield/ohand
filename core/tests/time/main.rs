@@ -1,6 +1,8 @@
 use chrono::{DateTime, NaiveDate, Offset, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
-use ohand_core::time::{AmbiguityKind, ResolutionError, TimeContext, TimeResolver};
+use ohand_core::time::{
+    span_covers_time_expression, AmbiguityKind, ResolutionError, TimeContext, TimeResolver,
+};
 
 fn make_context(tz: &str, ref_time: &str) -> TimeContext {
     let reference_time = DateTime::parse_from_rfc3339(ref_time)
@@ -770,4 +772,426 @@ fn a_day_and_clock_on_either_side_of_the_task_resolve_together() {
     // Not the split shape: two days stay unresolved.
     let context = make_context(NY, NY_THURSDAY);
     assert!(TimeResolver::resolve("today to call Sam tomorrow at 10am", &context).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Day-part words (F62)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn day_part_phrases_resolve_in_every_shape() {
+    // 2026-10-08 10:00 EDT; EDT is UTC-4.
+    for (phrase, expected) in [
+        // <day> <daypart> [at] <clock>
+        ("tomorrow morning at 9:30 AM", "2026-10-09T13:30:00+00:00"),
+        ("Tomorrow Morning At 9:30 am", "2026-10-09T13:30:00+00:00"),
+        ("tomorrow morning 9:30 am", "2026-10-09T13:30:00+00:00"),
+        ("Friday evening at 7 pm", "2026-10-09T23:00:00+00:00"),
+        ("on Friday evening at 7 pm", "2026-10-09T23:00:00+00:00"),
+        ("tomorrow night at 21:30", "2026-10-10T01:30:00+00:00"),
+        ("tomorrow afternoon at noon", "2026-10-09T16:00:00+00:00"),
+        ("2026-10-12 evening at 6 p.m.", "2026-10-12T22:00:00+00:00"),
+        ("next Monday morning at 8 a.m.", "2026-10-12T12:00:00+00:00"),
+        ("today evening at 6 pm", "2026-10-08T22:00:00+00:00"),
+        // <daypart> [at] <clock>, today
+        ("this evening at 6 pm", "2026-10-08T22:00:00+00:00"),
+        ("this afternoon at 3", "2026-10-08T19:00:00+00:00"),
+        ("afternoon at 3 pm", "2026-10-08T19:00:00+00:00"),
+        ("tonight at 8", "2026-10-09T00:00:00+00:00"),
+        ("tonight at 8:15 pm", "2026-10-09T00:15:00+00:00"),
+        ("tonight 20:00", "2026-10-09T00:00:00+00:00"),
+        ("this night at 9", "2026-10-09T01:00:00+00:00"),
+        // <day> [at] <clock> in the <daypart> / at night
+        ("tomorrow at 9 in the morning", "2026-10-09T13:00:00+00:00"),
+        ("tomorrow 9:30 in the morning", "2026-10-09T13:30:00+00:00"),
+        ("Friday at 10 at night", "2026-10-10T02:00:00+00:00"),
+        ("Friday at 7 in the evening", "2026-10-09T23:00:00+00:00"),
+        ("at 3 in the afternoon", "2026-10-08T19:00:00+00:00"),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+}
+
+#[test]
+fn a_day_part_supplies_a_missing_meridiem() {
+    for (phrase, expected) in [
+        ("tomorrow morning at 9", "2026-10-09T13:00:00+00:00"),
+        ("tomorrow morning at 5", "2026-10-09T09:00:00+00:00"),
+        ("tomorrow morning at 11:59", "2026-10-09T15:59:00+00:00"),
+        ("tomorrow morning at 9:30", "2026-10-09T13:30:00+00:00"),
+        ("tomorrow morning at 09:30", "2026-10-09T13:30:00+00:00"),
+        ("tomorrow afternoon at 12", "2026-10-09T16:00:00+00:00"),
+        ("tomorrow afternoon at 5", "2026-10-09T21:00:00+00:00"),
+        ("tomorrow evening at 6", "2026-10-09T22:00:00+00:00"),
+        ("tomorrow evening at 11", "2026-10-10T03:00:00+00:00"),
+        ("tonight at 6", "2026-10-08T22:00:00+00:00"),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+}
+
+#[test]
+fn a_day_part_never_guesses_past_its_hours() {
+    for (phrase, kind, reason_part) in [
+        // A bare hour that cannot fall in the range.
+        ("tonight at 3", AmbiguityKind::MissingMeridiem, "tonight"),
+        (
+            "tomorrow evening at 4",
+            AmbiguityKind::MissingMeridiem,
+            "evening",
+        ),
+        (
+            "tomorrow morning at 3",
+            AmbiguityKind::MissingMeridiem,
+            "morning",
+        ),
+        (
+            "tomorrow morning at 12",
+            AmbiguityKind::MissingMeridiem,
+            "morning",
+        ),
+        (
+            "tomorrow afternoon at 6",
+            AmbiguityKind::MissingMeridiem,
+            "afternoon",
+        ),
+        (
+            "tomorrow morning at 13",
+            AmbiguityKind::MissingMeridiem,
+            "morning",
+        ),
+        // A stated meridiem or 24-hour clock outside the range.
+        (
+            "tomorrow morning at 9:30 PM",
+            AmbiguityKind::DayPartConflict,
+            "morning",
+        ),
+        (
+            "tomorrow morning at 21:30",
+            AmbiguityKind::DayPartConflict,
+            "morning",
+        ),
+        (
+            "tomorrow morning at noon",
+            AmbiguityKind::DayPartConflict,
+            "morning",
+        ),
+        (
+            "tomorrow morning at 4 am",
+            AmbiguityKind::DayPartConflict,
+            "morning",
+        ),
+        (
+            "tomorrow afternoon at 9 am",
+            AmbiguityKind::DayPartConflict,
+            "afternoon",
+        ),
+        (
+            "tomorrow afternoon at 18:00",
+            AmbiguityKind::DayPartConflict,
+            "afternoon",
+        ),
+        ("tonight at 1 am", AmbiguityKind::DayPartConflict, "tonight"),
+        (
+            "tonight at midnight",
+            AmbiguityKind::DayPartConflict,
+            "tonight",
+        ),
+        (
+            "tomorrow evening at 5:59 pm",
+            AmbiguityKind::DayPartConflict,
+            "evening",
+        ),
+        (
+            "Friday at 3 pm at night",
+            AmbiguityKind::DayPartConflict,
+            "night",
+        ),
+        (
+            "Friday at 9 pm in the morning",
+            AmbiguityKind::DayPartConflict,
+            "morning",
+        ),
+    ] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(result.ambiguity_kind, Some(kind), "{phrase}");
+        let reason = result.ambiguity_reason.unwrap();
+        assert!(reason.contains(reason_part), "{phrase}: {reason}");
+        let expected_date = if phrase.starts_with("tonight") {
+            "2026-10-08"
+        } else {
+            "2026-10-09"
+        };
+        assert_eq!(
+            result.resolved_date,
+            Some(expected_date.parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
+fn a_day_part_without_a_clock_is_date_only_and_missing_the_hour() {
+    for (phrase, date) in [
+        ("tomorrow morning", "2026-10-09"),
+        ("Friday afternoon", "2026-10-09"),
+        ("next Monday evening", "2026-10-12"),
+        ("tomorrow night", "2026-10-09"),
+        ("tonight", "2026-10-08"),
+        ("this afternoon", "2026-10-08"),
+    ] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingHour),
+            "{phrase}"
+        );
+        assert_eq!(
+            result.resolved_date,
+            Some(date.parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+        let reason = result.ambiguity_reason.unwrap();
+        let word = phrase.split_whitespace().last().unwrap();
+        assert!(reason.contains(word), "{phrase}: {reason}");
+    }
+}
+
+#[test]
+fn in_the_morning_without_a_day_is_ambiguous() {
+    for phrase in [
+        "in the morning",
+        "in the morning at 9",
+        "at 9 in the morning",
+    ] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingDay),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
+fn day_first_in_the_day_parts_resolve() {
+    for (phrase, instant) in [
+        ("tomorrow in the morning at 9", "2026-10-09T13:00:00Z"),
+        ("Friday in the evening at 7 pm", "2026-10-09T23:00:00Z"),
+        ("tomorrow in the afternoon at 3", "2026-10-09T19:00:00Z"),
+        ("tomorrow at 9 in the morning", "2026-10-09T13:00:00Z"),
+    ] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert!(!result.is_ambiguous, "{phrase}");
+        assert_eq!(
+            result.resolved_time,
+            Some(instant.parse::<DateTime<Utc>>().unwrap()),
+            "{phrase}"
+        );
+    }
+    for phrase in ["tomorrow in the afternoon", "tomorrow in the morning"] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingHour),
+            "{phrase}"
+        );
+        assert_eq!(
+            result.resolved_date,
+            Some("2026-10-09".parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
+fn in_the_other_day_parts_without_a_day_mean_today() {
+    for (phrase, instant) in [
+        ("in the afternoon at 3", "2026-10-08T19:00:00Z"),
+        ("in the evening at 7 pm", "2026-10-08T23:00:00Z"),
+        ("in the evening at 7", "2026-10-08T23:00:00Z"),
+    ] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert!(!result.is_ambiguous, "{phrase}");
+        assert_eq!(
+            result.resolved_time,
+            Some(instant.parse::<DateTime<Utc>>().unwrap()),
+            "{phrase}"
+        );
+    }
+    for phrase in ["in the evening", "in the afternoon"] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingHour),
+            "{phrase}"
+        );
+        assert_eq!(
+            result.resolved_date,
+            Some("2026-10-08".parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+    }
+    // The morning stays ambiguous even when the clock is still ahead (captured 06:00 EDT).
+    let result = TimeResolver::resolve(
+        "at 9 in the morning",
+        &make_context(NY, "2026-10-08T10:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingDay));
+    // Trailing form: later today resolves, as "at 3 in the afternoon" does.
+    let result =
+        TimeResolver::resolve("at 3 in the afternoon", &make_context(NY, NY_THURSDAY)).unwrap();
+    assert!(!result.is_ambiguous);
+}
+
+#[test]
+fn day_part_phrases_keep_the_clock_rules() {
+    // A stated zone after the clock is ambiguous.
+    for phrase in [
+        "tomorrow morning at 9 a.m. EST",
+        "tomorrow at 9 in the morning EST",
+    ] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::UnsupportedQualifier),
+            "{phrase}"
+        );
+    }
+    // A resolved instant before the capture is past (9 a.m. today, captured at 10:00).
+    let result =
+        TimeResolver::resolve("this morning at 9", &make_context(NY, NY_THURSDAY)).unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::Past));
+    assert!(result.is_past);
+    // A clock before the capture, with no day word and a trailing day part, is a missing day.
+    let result =
+        TimeResolver::resolve("at 9 in the morning", &make_context(NY, NY_THURSDAY)).unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingDay));
+    // The original phrase is kept as written.
+    let result = TimeResolver::resolve(
+        "Tomorrow Morning at 9:30 AM",
+        &make_context(NY, NY_THURSDAY),
+    )
+    .unwrap();
+    assert_eq!(result.original_phrase, "Tomorrow Morning at 9:30 AM");
+}
+
+#[test]
+fn text_around_a_day_part_is_not_a_time() {
+    for phrase in [
+        "morning coffee",
+        "tomorrow morning evening at 7",
+        "tomorrow tonight at 8",
+        "banana morning at 9",
+        "in the morning tomorrow at 9",
+        "at night",
+    ] {
+        let context = make_context(NY, NY_THURSDAY);
+        assert!(
+            TimeResolver::resolve(phrase, &context)
+                .map(|result| result.resolved_time.is_none())
+                .unwrap_or(true),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
+fn day_part_phrases_follow_the_zone_offset_across_a_dst_change() {
+    // America/New_York leaves DST on 2026-11-01; captured Saturday 2026-10-31 20:00 EDT.
+    let reference = "2026-11-01T00:00:00Z";
+    assert_eq!(
+        resolved_utc(NY, reference, "tomorrow morning at 9:30 AM"),
+        "2026-11-01T14:30:00+00:00",
+        "09:30 EST is UTC-5 after the change"
+    );
+    assert_eq!(
+        resolved_utc(NY, reference, "tonight at 8"),
+        "2026-11-01T00:00:00+00:00",
+    );
+}
+
+#[test]
+fn a_day_part_clock_inside_a_dst_gap_is_ambiguous() {
+    // Greenland (America/Nuuk) moves its clocks from 23:00 to 00:00 on 2026-03-28, inside night.
+    let zone = "America/Nuuk";
+    let reference = "2026-03-26T12:00:00Z";
+    let context = make_context(zone, reference);
+    let result = TimeResolver::resolve("Saturday night at 11:30 pm", &context).unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstGap));
+    assert!(result.resolved_time.is_none());
+}
+
+#[test]
+fn span_coverage_counts_day_part_words() {
+    let text = "Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea";
+    let span = |phrase: &str| {
+        let start = text.find(phrase).unwrap();
+        (start, start + phrase.len())
+    };
+    let (start, end) = span("tomorrow morning at 9:30 AM");
+    assert!(span_covers_time_expression(text, start, end));
+    for partial in ["at 9:30 AM", "morning at 9:30 AM", "9:30 AM"] {
+        let (start, end) = span(partial);
+        assert!(!span_covers_time_expression(text, start, end), "{partial}");
+    }
+
+    for (text, phrase) in [
+        ("Remind me tonight at 8 to water the ferns", "tonight at 8"),
+        (
+            "Remind me this evening at 6 pm to water the ferns",
+            "this evening at 6 pm",
+        ),
+        (
+            "Remind me tomorrow at 9 in the morning to water the ferns",
+            "tomorrow at 9 in the morning",
+        ),
+        (
+            "Remind me Friday at 10 at night to water the ferns",
+            "Friday at 10 at night",
+        ),
+    ] {
+        let start = text.find(phrase).unwrap();
+        assert!(
+            span_covers_time_expression(text, start, start + phrase.len()),
+            "{phrase}"
+        );
+    }
+    for (text, partial) in [
+        (
+            "Remind me this evening at 6 pm to water the ferns",
+            "at 6 pm",
+        ),
+        (
+            "Remind me tomorrow at 9 in the morning to water the ferns",
+            "tomorrow at 9",
+        ),
+        (
+            "Remind me Friday at 10 at night to water the ferns",
+            "Friday at 10",
+        ),
+        (
+            "Remind me this evening at 6 pm to water the ferns",
+            "evening at 6 pm",
+        ),
+        (
+            "Remind me this morning at 9 to water the ferns",
+            "morning at 9",
+        ),
+        (
+            "Remind me in the evening at 7 pm to water the ferns",
+            "evening at 7 pm",
+        ),
+    ] {
+        let start = text.find(partial).unwrap();
+        assert!(
+            !span_covers_time_expression(text, start, start + partial.len()),
+            "{partial}"
+        );
+    }
 }

@@ -1187,6 +1187,58 @@ fn assert_rejected_and_unscheduled_for(
     assert_eq!(fixture.reminder_effects(), None, "{text}");
 }
 
+/// The maintainer's trial capture (synthetic content): 2026-11-02 18:02 PST in America/Los_Angeles.
+fn apply_los_angeles_daypart_proposal(
+    quoted: &str,
+    instant: &str,
+) -> (Fixture, ReminderDisposition) {
+    let text = "Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea";
+    let mut fixture = Fixture::captured(text, "2026-11-03T02:02:00Z", "America/Los_Angeles", -480);
+    let lease = fixture.claim_job(0, capture_instant());
+    let proposal = fixture
+        .proposal_for(&lease, 0)
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(
+            text,
+            "ask the nursery about the hydrangea",
+        )]))
+        .with_reminder_proposal(Some(ReminderProposal {
+            instant: Some(instant.to_string()),
+            timezone_id: Some("America/Los_Angeles".to_string()),
+            quality: TimeResolutionQuality::Explicit,
+            source_span: Some(span_of(text, quoted)),
+        }));
+    let outcome = fixture.apply(&lease, &proposal).unwrap();
+    (fixture, applied_reminder(outcome))
+}
+
+#[test]
+fn a_day_part_phrase_is_scheduled_and_a_contradicting_instant_is_rejected() {
+    let quoted = "tomorrow morning at 9:30 AM";
+    let (fixture, disposition) =
+        apply_los_angeles_daypart_proposal(quoted, "2026-11-03T09:30:00-08:00");
+    assert_scheduled_at(&fixture, disposition, "2026-11-03T09:30:00-08:00");
+
+    let (fixture, disposition) =
+        apply_los_angeles_daypart_proposal(quoted, "2026-11-03T21:30:00-08:00");
+    assert_rejected_and_unscheduled_for(quoted, &fixture, disposition);
+}
+
+#[test]
+fn a_span_quoting_only_the_clock_of_a_day_part_phrase_is_not_scheduled() {
+    let (fixture, disposition) =
+        apply_los_angeles_daypart_proposal("at 9:30 AM", "2026-11-03T09:30:00-08:00");
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet)
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.schedule_state, "not_scheduled");
+    assert_eq!(reminder.resolved_instant, None);
+    let (_, _, operations, _) = fixture.reminder_effects().expect("a reminder row");
+    assert_eq!(operations, vec![]);
+}
+
 #[test]
 fn a_span_missing_the_zone_qualifier_is_held_for_correction() {
     let (fixture, disposition) = apply_clock_proposal(
