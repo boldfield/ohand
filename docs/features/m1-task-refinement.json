@@ -4433,6 +4433,51 @@
         "ios/AppAssembly/UITestFixtures/UITestFixtureServices.swift",
         "ios/Services/Assembly/CompositionRoot.swift:1531"
       ]
+    },
+    {
+      "key": "F62",
+      "parent": null,
+      "title": "Resolve day-part words in reminder phrases so \"tomorrow morning at 9:30 AM\" is scheduled",
+      "file_scope": [
+        "core/src/time/",
+        "core/tests/time/",
+        "core/tests/proposal_application/ (one end-to-end test)",
+        "fixtures/intent/contrastive-fixtures.json (one row)",
+        "docs/validation/intent-fixtures.md (one row)"
+      ],
+      "intent": "The resolver accepts morning, afternoon, evening, night and tonight beside a day and a clock, supplies or checks the meridiem from the day part's hour range, and the guard's span coverage includes them; the maintainer's capture resolves end to end.",
+      "acceptance": [
+        "See the F62 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/time/resolver.rs",
+        "core/src/time/expression.rs",
+        "core/src/interpretation/apply/mod.rs",
+        "core/src/reminders/state/mod.rs"
+      ]
+    },
+    {
+      "key": "F63",
+      "parent": null,
+      "title": "Say which time phrase could not be understood instead of claiming no time was named",
+      "file_scope": [
+        "app/reminders/ReminderEditText.swift",
+        "app/reminders/ReminderEditModel.swift (only if the standing must carry the phrase and reason)",
+        "ios/Tests/ReminderEdit/"
+      ],
+      "intent": "The not-scheduled-yet copy uses the record's stored source_phrase and ambiguity_reason to say what was heard and why it was not scheduled.",
+      "acceptance": [
+        "See the F63 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/reminders/ReminderEditText.swift:44",
+        "ios/OhAndCoreBridge/CoreHandle+ReminderControls.swift:113",
+        "core/src/reminders/state/mod.rs"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5580,6 +5625,10 @@
     {
       "date": "2026-11-01",
       "change": "U10a amendment (maintainer decision): the default-size audit run drops the .dynamicType audit type, which reports any scrolling list of text as partially unsupported once growth pushes elements out of the scroll bounds (reproduced locally at 3b783c84 with frames); the largest-size run keeps every type. Dynamic Type evidence is the largest-size run plus ios/scripts/check_font_tokens.py (owned by U10a with its test and the ios-check Makefile line), which fails on any DSMetrics font token not built from a text style."
+    },
+    {
+      "date": "2026-11-02",
+      "change": "F62 and F63 added after the maintainer's trial capture \"Remind me tomorrow morning at 9:30 AM ...\" was stored as not scheduled yet: the resolver has no day-part words (F28 stopped at today/tomorrow/weekday/ISO), and the detail copy claims no time was named. F62 extends the resolver and the guard coverage; F63 makes the copy use the stored phrase and reason."
     }
   ]
 }
