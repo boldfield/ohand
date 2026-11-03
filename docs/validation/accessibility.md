@@ -33,8 +33,9 @@ Each screen is audited with `XCUIApplication.performAccessibilityAudit()` and th
 
 Any audit issue fails the test. The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
 budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log` (one `ISSUE`, `EXEMPT`, `PASS` or `FAIL`
-line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. The
-`.xcresult` bundles upload only when the job fails, as `ios-accessibility-failure`.
+line per finding and screen), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
+uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
+failed tests' attachments as `ios-accessibility-failure` (retention 1 day, under 100 MB).
 
 ### Large text
 
@@ -86,17 +87,20 @@ pass as a `RETRY` line.
 ### Content under glass
 
 The header buttons, the back button and the composer are translucent glass. Text scrolled partly under one, or drawn on
-one, is measured against the blurred overlay and not against its own background, so the audit reports its contrast. The
-test exempts that contrast issue, and only that issue, for exactly these elements, and only while the element's frame
-reaches into the overlay (the `EXEMPT` line in `audit-default.log` says so; `contrastUnderGlass` in the test is the same
-list). An element inside the clear band, an element not listed, and any other issue type on a listed element fail.
+one, is measured by the audit against the blurred overlay, which it cannot resolve, so it reports its contrast. For exactly
+the elements below, the test exempts that contrast issue, and only that issue, when the contrast it measures itself meets
+4.5:1. It measures from the screenshot pixels inside the element's frame (the most common colour is the background, the pixel
+furthest from it in luminance is the text), so the ratio a person sees decides, wherever the element is on the screen and
+whether or not the keyboard is up. Each exemption writes a `MEASURED` line with the ratio to `audit-*.log`; a ratio below
+4.5:1, an element not listed, and any other issue type on a listed element fail the test. `contrastUnderGlass` in the test is
+the same list.
 
 | Element (identifier, label) | Screens | Reason |
 | --- | --- | --- |
-| "What's on your mind?" (composer placeholder) | Home, capture, locked | Drawn on the composer glass; its colour is the placeholder token, checked against the paper behind the glass in the colour table of the PR. |
+| "What's on your mind?" (composer placeholder) | Home, capture, locked | Drawn on the composer glass; the pixel measurement decides. |
 | "&" (the mark) | capture text entry | Drawn on the header glass. |
-| the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …") and captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age in the caption changes from run to run) and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; `home-populated` and `home-populated-end` audit the list at both ends of the scroll. |
-| "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | source detail | Scrolled under the composer glass or header; the three source-detail stops audit them in turn. |
+| the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …") and captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age in the caption changes from run to run) and the "Today" list heading (`home.recents.list`) | Home | Scrolled under the composer glass; the pixel measurement decides. |
+| "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | source detail | Scrolled under the composer glass or header; the pixel measurement decides. |
 
 ### Dynamic Type
 

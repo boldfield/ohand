@@ -21,6 +21,7 @@ SCALING_PATTERNS = (
     re.compile(r"\.custom\([^)]*\brelativeTo:\s*\.(?:%s)\b" % STYLE_ALTERNATIVES),
     re.compile(r"(?::\s*Font\s*=|->\s*Font\s*\{|:\s*Font\s*\{)\s*\.(?:%s)\b" % STYLE_ALTERNATIVES),
 )
+FONT_TYPED = re.compile(r"(?::|->)\s*Font\b")
 TOKEN_DECLARATION = re.compile(r"^\s*static\s+(?:let|var|func)\s+(\w+)")
 
 
@@ -56,11 +57,11 @@ def declarations(body):
 def problems(source):
     body = font_enum_body(source)
     found = list(declarations(body))
-    token_names = {name for name, _ in found}
+    font_tokens = [(name, text) for name, text in found if FONT_TYPED.search(text.split("=", 1)[0].split("{", 1)[0])]
+    # Only Font-typed tokens can be a derivation source; a font-name constant is a String and does not scale anything.
+    token_names = {name for name, _ in font_tokens}
     errors = []
-    for name, text in found:
-        if "Font" not in text:
-            continue  # not a Font token (for example a font file name)
+    for name, text in font_tokens:
         derived = any(
             re.search(r"\b(?:DSFont\.)?%s\b" % re.escape(other), text.split("=", 1)[-1] if "=" in text else text)
             for other in token_names - {name}

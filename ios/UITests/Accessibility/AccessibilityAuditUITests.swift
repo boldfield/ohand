@@ -202,15 +202,43 @@ final class AccessibilityAuditUITests: XCTestCase {
             audit(screen.slug)
             if screen.slug == "prompt-settings" { assertPromptToggleExposesState() }
             if screen.slug == "processing" {
-                for (identifier, slug) in [("provider-settings.add-provider", "processing-add-provider"), ("provider-settings.advanced", "processing-advanced")] {
+                let pushed: [(identifier: String, slug: String, marker: String?)] = [
+                    ("provider-settings.add-provider", "processing-add-provider", "provider-settings.field.model"),
+                    ("provider-settings.advanced", "processing-advanced", nil),
+                ]
+                for (identifier, slug, marker) in pushed {
                     let link = app.buttons[identifier]
                     guard scrollUntilHittable(link), tapWhenReady(link, identifier) else { return }
+                    guard waitForSettledDestination(slug, from: link, marker: marker) else { return }
                     audit(slug)
                     guard goBack() else { return }
                 }
             }
             guard goBack() else { return }
         }
+    }
+
+    /// The pushed screen is in its final frame when its own marker (when it has a known one) exists and stops moving; the
+    /// Processing link that opened it has left the screen by then, or the screen is accepted after the link wait times out.
+    private func waitForSettledDestination(_ slug: String, from link: XCUIElement, marker: String?) -> Bool {
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false OR isHittable == false"), object: link)
+        // Without a marker this is the only sign of arrival; a screen that keeps the link hittable settles on the frame check below.
+        if XCTWaiter().wait(for: [gone], timeout: marker == nil ? 15 : 5) != .completed { auditLines.append("NOTE \(slug): the opening link stays on screen") }
+        let destination = marker.map { app.element(identifier: $0) }
+        if let destination, !destination.waitForExistence(timeout: screenTimeout) {
+            XCTFail("\(slug) did not open: no \(marker ?? "")")
+            return false
+        }
+        // The navigation transition is finished when two frames of the marker, a moment apart, are equal.
+        var previous = destination?.frame
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.5)
+            let current = destination?.frame
+            if current == previous { return true }
+            previous = current
+        }
+        XCTFail("\(slug): the screen never settled")
+        return false
     }
 
     func testSettingsPermissionsOnFirstRun() {
@@ -343,15 +371,19 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// docs/validation/accessibility.md. Only the default-size run omits `.dynamicType`, as `auditTypes` documents; no exemption excludes a type.
     private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
-        // Text scrolled partly under a translucent glass overlay (the header, the composer) is measured for contrast against
-        // the blurred overlay, not its own background. Each element below is audited clear of the overlay at another
-        // scroll stop or screen, where its contrast passes; the contrast issue on it, and only that issue, is exempt while
-        // its frame is outside the clear band. An element not in the list, or one inside the clear band, is never exempt.
-        // docs/validation/accessibility.md lists the same elements.
-        if issue.auditType == .contrast, let frame = issue.element?.frame,
-           frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound,
-           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && Self.matches(label: issue.element?.label ?? "", entry: $0.label) }) {
-            return true
+        // Text drawn on or scrolled under a translucent glass overlay (the header, the composer) is measured by the audit against
+        // the blurred overlay, which it cannot resolve. For the elements named below, the contrast issue, and only that issue,
+        // is exempt when the contrast measured from the screenshot pixels (the text against what is drawn behind it) meets
+        // the WCAG minimum; the measured ratio is logged on the EXEMPT line. An element not in the list, any other issue
+        // type, and a measured ratio below the minimum are never exempt. docs/validation/accessibility.md lists the same elements.
+        if issue.auditType == .contrast, let element = issue.element,
+           Self.contrastUnderGlass.contains(where: { $0.identifier == identifier && Self.matches(label: element.label, entry: $0.label) }) {
+            guard let ratio = measuredContrast(of: element) else {
+                auditLines.append("MEASURE-FAILED \(currentScreen): could not measure '\(element.label)'")
+                return false
+            }
+            auditLines.append("MEASURED \(currentScreen): '\(element.label)' contrast \(String(format: "%.2f", ratio)):1 (minimum \(Self.minimumContrastRatio):1)")
+            if ratio >= Self.minimumContrastRatio { return true }
         }
         // The keyboard's prediction bar is the system's, not the app's.
         if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }
@@ -366,6 +398,51 @@ final class AccessibilityAuditUITests: XCTestCase {
         // part of the app a person uses (debug builds only, near-invisible by design), so their size and contrast are
         // not defects. They are exempt by identifier, for any issue.
         return identifier == Self.fixtureStatusIdentifier || identifier == Self.announcementLogIdentifier
+    }
+
+    /// The WCAG AA ratio for body text; applied to every exempted element, large or not.
+    private static let minimumContrastRatio = 4.5
+
+    /// The contrast of the text in `element` as a person sees it: the screenshot pixels inside its frame, the most common
+    /// colour taken as the background and the pixel furthest from it in luminance as the text.
+    private func measuredContrast(of element: XCUIElement) -> Double? {
+        guard let image = app.screenshot().image.cgImage else { return nil }
+        let screenWidth = app.frame.width
+        guard screenWidth > 0 else { return nil }
+        let scale = CGFloat(image.width) / screenWidth
+        let pixelRect = element.frame.intersection(app.frame)
+            .applying(CGAffineTransform(scaleX: scale, y: scale)).integral
+            .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !pixelRect.isEmpty, let crop = image.cropping(to: pixelRect) else { return nil }
+        let width = crop.width, height = crop.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+        func luminance(_ offset: Int) -> Double {
+            func linear(_ value: UInt8) -> Double {
+                let channel = Double(value) / 255
+                return channel <= 0.03928 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(pixels[offset]) + 0.7152 * linear(pixels[offset + 1]) + 0.0722 * linear(pixels[offset + 2])
+        }
+        var counts: [UInt32: Int] = [:]
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let key = UInt32(pixels[offset] >> 3) << 16 | UInt32(pixels[offset + 1] >> 3) << 8 | UInt32(pixels[offset + 2] >> 3)
+            counts[key, default: 0] += 1
+        }
+        guard let backgroundKey = counts.max(by: { $0.value < $1.value })?.key,
+              let backgroundOffset = stride(from: 0, to: pixels.count, by: 4).first(where: {
+                  UInt32(pixels[$0] >> 3) << 16 | UInt32(pixels[$0 + 1] >> 3) << 8 | UInt32(pixels[$0 + 2] >> 3) == backgroundKey
+              }) else { return nil }
+        let backgroundLuminance = luminance(backgroundOffset)
+        var textLuminance = backgroundLuminance
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let candidate = luminance(offset)
+            if abs(candidate - backgroundLuminance) > abs(textLuminance - backgroundLuminance) { textLuminance = candidate }
+        }
+        return (max(backgroundLuminance, textLuminance) + 0.05) / (min(backgroundLuminance, textLuminance) + 0.05)
     }
 
     /// Every button, switch and field a person can act on has a label that names it.
