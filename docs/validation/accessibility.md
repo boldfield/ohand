@@ -122,7 +122,9 @@ snapshot of the screen taken just before the audit:
 - **Scrolled under glass.** If the element's frame lies wholly inside the clear band between the overlays (and on
   screen), the issue is real and fails. Otherwise it is excused at that stop (`OWED`), and the same test must audit the
   element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
-  element into the middle of the clear band and audits there (`SETTLE`, a screen named `<screen>-settle-<n>`); an
+  element into the middle of the clear band, dragging down the middle of the screen (the right edge would catch the
+  scroll indicator, which scrubs the whole list), and audits there (`SETTLE`, a screen named
+  `<first screen of the test>-settle-<n>`); an
   element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
   it is on the list, never something else that shares its frame.
 - **Drawn on glass.** If no other element's frame overlaps the text (nothing scrolled behind the glass there and nothing

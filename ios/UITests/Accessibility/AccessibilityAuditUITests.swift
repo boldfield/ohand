@@ -17,6 +17,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     private var screenshotIndex = 0
     private var auditLines: [String] = []
     private var currentScreen = ""
+    /// The first screen this test audited; settle stops are named after it.
+    private var firstScreenOfTest = ""
     /// The contrast excuses under and on glass this test has taken, and the unobstructed audits that settle them.
     private var ledger = GlassContrastLedger()
     private var owedPlacements: [String: GlassPlacement] = [:]
@@ -343,6 +345,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     private func audit(_ screen: String, checksLabels: Bool = true) {
         capture(screen)
         currentScreen = screen
+        if firstScreenOfTest.isEmpty { firstScreenOfTest = screen }
         if checksLabels, app.keyboards.count == 0 { assertInteractiveElementsAreLabelled(screen) }
         let screenFrame = app.frame
         // An audit that finds something is repeated after the screen has settled: a card still fading in or a view
@@ -469,7 +472,9 @@ final class AccessibilityAuditUITests: XCTestCase {
             let nodeID = nextNodeID
             nextNodeID += 1
             // A scroll indicator (a field's "Horizontal scroll bar, 1 page") is not content and obstructs nothing.
-            if !node.label.isEmpty, node.elementType != .scrollBar {
+            let isScrollIndicator = node.elementType == .scrollBar
+                || node.label.hasPrefix("Horizontal scroll bar") || node.label.hasPrefix("Vertical scroll bar")
+            if !node.label.isEmpty, !isScrollIndicator {
                 nodes.append(ScreenElement(
                     nodeID: nodeID, ancestorIDs: ancestors, key: "", identifier: node.identifier, label: node.label, frame: node.frame))
             }
@@ -523,12 +528,13 @@ final class AccessibilityAuditUITests: XCTestCase {
             }
             stop += 1
             auditLines.append("SETTLE \(currentScreen): scrolled for '\(owed.key)' (excused at \(owed.firstScreen))")
-            audit("\(owed.firstScreen)-settle-\(stop)", checksLabels: false)
+            audit("\(firstScreenOfTest)-settle-\(stop)", checksLabels: false)
         }
     }
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
-    /// slowly and with a hold at the end so it does not coast. The drag runs along the right edge, clear of the cards.
+    /// slowly and with a hold at the end so it does not coast. The drag runs down the middle of the screen: at the right
+    /// edge it would catch the scroll indicator, which scrubs the whole list, and at the left edge the back gesture.
     private func scrollContent(by distance: CGFloat, between band: ClosedRange<CGFloat>) {
         let top = band.lowerBound + 20
         let bottom = band.upperBound - 20
@@ -536,7 +542,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         let step = max(-(bottom - top), min(bottom - top, distance))
         let startY = step > 0 ? bottom : top
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let x = app.frame.width - 8
+        let x = app.frame.width / 2
         origin.withOffset(CGVector(dx: x, dy: startY)).press(
             forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: x, dy: startY - step)), withVelocity: .slow, thenHoldForDuration: 0.3)
         Thread.sleep(forTimeInterval: 1)
