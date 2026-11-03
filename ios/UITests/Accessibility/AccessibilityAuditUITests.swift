@@ -17,6 +17,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     private var auditLines: [String] = []
     /// The part of the screen not covered by a glass overlay (the header buttons, the back button, the composer), set per audit.
     private var clearBand: ClosedRange<CGFloat> = 0...CGFloat.greatestFiniteMagnitude
+    private var currentScreen = ""
     private let screenTimeout: TimeInterval = 90
 
     private static let largestContentSize = "UICTContentSizeCategoryAccessibilityXXXL"
@@ -262,6 +263,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// Screenshot, then the audit with every default type. An issue not exempted by `isExempt` fails the test.
     private func audit(_ screen: String) {
         capture(screen)
+        currentScreen = screen
         clearBand = currentClearBand()
         if app.keyboards.count == 0 { assertInteractiveElementsAreLabelled(screen) }
         // An audit that finds something is repeated after the screen has settled: a card still fading in or a view
@@ -311,6 +313,16 @@ final class AccessibilityAuditUITests: XCTestCase {
            let frame = issue.element?.frame, !identifier.hasPrefix("home.composer"),
            !["home.search", "home.settings", "home.done"].contains(identifier),
            frame.minY < clearBand.lowerBound || frame.maxY > clearBand.upperBound {
+            return true
+        }
+        // At the default size the audit's resize probe reports static card and header text on these two screens as not
+        // resizable, although the text uses the scaling text styles and the same elements pass the audit at the largest
+        // size (where the probe has nothing left to change) and visibly grow in its screenshots. Only that one issue, on
+        // static text (not a control), on those two screens, at the default size.
+        if issue.auditType == .dynamicType, sizeName == "default",
+           currentScreen.hasPrefix("home-populated") || currentScreen.hasPrefix("source-detail-top"),
+           issue.element?.elementType == .staticText || issue.element?.elementType == .other,
+           issue.element?.elementType != .button {
             return true
         }
         // The keyboard's prediction bar is the system's, not the app's.

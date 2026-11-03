@@ -246,10 +246,11 @@ struct RetrievalSearchView: View {
             }
         } label: {
             menuChipFace(title: model.itemType?.title ?? "Type", isSelected: model.itemType != nil)
-            .accessibilityLabel("Type filter")
-            .accessibilityValue(model.itemType != nil ? model.itemType?.title ?? "Type" : "Any")
-            .accessibilityAddTraits(model.itemType != nil ? .isSelected : [])
+            .accessibilityHidden(true)
         }
+        .accessibilityLabel("Type filter")
+        .accessibilityValue(model.itemType != nil ? model.itemType?.title ?? "Type" : "Any")
+        .accessibilityAddTraits(model.itemType != nil ? .isSelected : [])
         .reportRendered(Self.typeChipIdentifier, text: model.itemType?.title ?? "Type")
     }
 
@@ -268,10 +269,11 @@ struct RetrievalSearchView: View {
             Button("Choose dates…") { filterPresentation.sheet = .dates }
         } label: {
             menuChipFace(title: timeTitle, isSelected: model.since != nil || model.until != nil)
-            .accessibilityLabel("Time filter")
-            .accessibilityValue(model.since != nil || model.until != nil ? timeTitle : "Any")
-            .accessibilityAddTraits(model.since != nil || model.until != nil ? .isSelected : [])
+            .accessibilityHidden(true)
         }
+        .accessibilityLabel("Time filter")
+        .accessibilityValue(model.since != nil || model.until != nil ? timeTitle : "Any")
+        .accessibilityAddTraits(model.since != nil || model.until != nil ? .isSelected : [])
         .reportRendered(Self.timeChipIdentifier, text: timeTitle)
     }
 
@@ -288,10 +290,11 @@ struct RetrievalSearchView: View {
             Button("Choose topic…") { filterPresentation.sheet = .topic }
         } label: {
             menuChipFace(title: topicTitle, isSelected: topicIsActive)
-            .accessibilityLabel("Topic filter")
-            .accessibilityValue(topicIsActive ? topicTitle : "Any")
-            .accessibilityAddTraits(topicIsActive ? .isSelected : [])
+            .accessibilityHidden(true)
         }
+        .accessibilityLabel("Topic filter")
+        .accessibilityValue(topicIsActive ? topicTitle : "Any")
+        .accessibilityAddTraits(topicIsActive ? .isSelected : [])
         .reportRendered(Self.topicChipIdentifier, text: topicTitle)
     }
 

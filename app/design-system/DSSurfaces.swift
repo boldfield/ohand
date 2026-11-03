@@ -181,6 +181,7 @@ struct DSToggleRow: View {
                 DSIconTile(systemName: iconSystemName)
             }
             Toggle(label, isOn: $isOn)
+                .accessibilityLabel(label)
                 .font(DSFont.rowLabel)
                 .foregroundColor(DSColor.ink.color)
                 .tint(DSColor.accent.color)
