@@ -977,6 +977,37 @@ fn in_the_morning_without_a_day_is_ambiguous() {
 }
 
 #[test]
+fn day_first_in_the_day_parts_resolve() {
+    for (phrase, instant) in [
+        ("tomorrow in the morning at 9", "2026-10-09T13:00:00Z"),
+        ("Friday in the evening at 7 pm", "2026-10-09T23:00:00Z"),
+        ("tomorrow in the afternoon at 3", "2026-10-09T19:00:00Z"),
+        ("tomorrow at 9 in the morning", "2026-10-09T13:00:00Z"),
+    ] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert!(!result.is_ambiguous, "{phrase}");
+        assert_eq!(
+            result.resolved_time,
+            Some(instant.parse::<DateTime<Utc>>().unwrap()),
+            "{phrase}"
+        );
+    }
+    for phrase in ["tomorrow in the afternoon", "tomorrow in the morning"] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingHour),
+            "{phrase}"
+        );
+        assert_eq!(
+            result.resolved_date,
+            Some("2026-10-09".parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
 fn in_the_other_day_parts_without_a_day_mean_today() {
     for (phrase, instant) in [
         ("in the afternoon at 3", "2026-10-08T19:00:00Z"),

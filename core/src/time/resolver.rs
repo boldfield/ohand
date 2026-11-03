@@ -553,8 +553,13 @@ impl TimeResolver {
         // `<day> [at] <clock> in the <daypart>` / `at night`: the day part follows the clock.
         // Only the morning is as often tomorrow as today; the other day parts default to today.
         let unknown_day = marker.in_the && day_part == DayPart::Morning;
-        if (marker.in_the || marker.at_night) && after.is_empty() && !before.is_empty() {
-            let (day, clock, rest) = Self::split_day_and_clock(before, context, tz)?;
+        let trailing_split =
+            if (marker.in_the || marker.at_night) && after.is_empty() && !before.is_empty() {
+                Self::split_day_and_clock(before, context, tz)
+            } else {
+                None
+            };
+        if let Some((day, clock, rest)) = trailing_split {
             if !rest.is_empty() {
                 return Some(ambiguous(
                     day,
@@ -594,8 +599,6 @@ impl TimeResolver {
                 return Some(missing_day(unknown_day_reason));
             }
             (Some(ref_date), after.to_vec())
-        } else if marker.in_the {
-            return None;
         } else {
             (
                 Some(Self::parse_day_part(before, context, tz)?),
