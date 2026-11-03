@@ -964,7 +964,7 @@ fn in_the_morning_without_a_day_is_ambiguous() {
     for phrase in [
         "in the morning",
         "in the morning at 9",
-        "in the evening at 7 pm",
+        "at 9 in the morning",
     ] {
         assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
         let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
@@ -974,6 +974,47 @@ fn in_the_morning_without_a_day_is_ambiguous() {
             "{phrase}"
         );
     }
+}
+
+#[test]
+fn in_the_other_day_parts_without_a_day_mean_today() {
+    for (phrase, instant) in [
+        ("in the afternoon at 3", "2026-10-08T19:00:00Z"),
+        ("in the evening at 7 pm", "2026-10-08T23:00:00Z"),
+        ("in the evening at 7", "2026-10-08T23:00:00Z"),
+    ] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert!(!result.is_ambiguous, "{phrase}");
+        assert_eq!(
+            result.resolved_time,
+            Some(instant.parse::<DateTime<Utc>>().unwrap()),
+            "{phrase}"
+        );
+    }
+    for phrase in ["in the evening", "in the afternoon"] {
+        let result = TimeResolver::resolve(phrase, &make_context(NY, NY_THURSDAY)).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(AmbiguityKind::MissingHour),
+            "{phrase}"
+        );
+        assert_eq!(
+            result.resolved_date,
+            Some("2026-10-08".parse::<NaiveDate>().unwrap()),
+            "{phrase}"
+        );
+    }
+    // The morning stays ambiguous even when the clock is still ahead (captured 06:00 EDT).
+    let result = TimeResolver::resolve(
+        "at 9 in the morning",
+        &make_context(NY, "2026-10-08T10:00:00Z"),
+    )
+    .unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingDay));
+    // Trailing form: later today resolves, as "at 3 in the afternoon" does.
+    let result =
+        TimeResolver::resolve("at 3 in the afternoon", &make_context(NY, NY_THURSDAY)).unwrap();
+    assert!(!result.is_ambiguous);
 }
 
 #[test]
