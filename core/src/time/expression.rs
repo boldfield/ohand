@@ -28,7 +28,9 @@
 // - Before the expression, in either order, nothing temporal may come earlier in the sentence
 //   ("Friday, remind me tomorrow at 5 p.m.", "a week from Friday"), and no relative modifier
 //   or hedge may make the day inexact ("before Friday at 3 p.m.", "prior to Friday", "maybe
-//   Saturday at 4 p.m."); "this Friday" is the same Friday.
+//   Saturday at 4 p.m."); "this Friday" is the same Friday. "this" or "in the" before a day part
+//   ("this evening at 6 pm", "in the evening at 7 pm") is part of the expression, so a span that
+//   starts at the day part ("evening at 6 pm") is narrower than it.
 // - A request prefix is the closed set of words that open a request ("Hey, can you remind me",
 //   "Set a reminder for"); it is not task content, so a comma inside it is allowed.
 //
@@ -349,6 +351,17 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
         .iter()
         .chain(later_sentences)
         .any(|word| is_temporal_token(&word.text))
+    {
+        return false;
+    }
+
+    // "this" before a day part belongs to the expression ("this evening at 6 pm"); a span that
+    // leaves it out is narrower than the expression, although "this" is also a request word.
+    if prefix.last().is_some_and(|word| word.text == "this")
+        && span_text
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| is_day_part_word(&normalized_word(word)))
     {
         return false;
     }
@@ -860,6 +873,12 @@ fn names_day(span_text: &str) -> bool {
                     | "sunday"
             ) || is_iso_date(&word)
         })
+}
+
+/// The day-part words the resolver reads as a span of hours ("morning", "evening"); "this" or
+/// "in the" before one is part of the expression.
+fn is_day_part_word(word: &str) -> bool {
+    matches!(word, "morning" | "afternoon" | "evening" | "night")
 }
 
 fn is_iso_date(word: &str) -> bool {

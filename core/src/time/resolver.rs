@@ -63,6 +63,9 @@ pub enum AmbiguityKind {
     DstGap,
     DstFold,
     Past,
+    /// A clock that states or implies a meridiem outside the hours of the day part beside it
+    /// ("tomorrow morning at 9:30 PM").
+    DayPartConflict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,9 +108,80 @@ enum Meridiem {
 
 #[derive(Debug, Clone, Copy)]
 enum ClockPart {
-    Time { hour: u32, minute: u32 },
-    MissingMeridiem,
+    Time {
+        hour: u32,
+        minute: u32,
+    },
+    /// A bare hour or `H:MM` with no a.m./p.m. (the hour as written, the minute).
+    MissingMeridiem {
+        hour: u32,
+        minute: u32,
+    },
 }
+
+/// A day-part word and the hours it owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DayPart {
+    Morning,
+    Afternoon,
+    Evening,
+    Night,
+    Tonight,
+}
+
+impl DayPart {
+    fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "morning" => Some(DayPart::Morning),
+            "afternoon" => Some(DayPart::Afternoon),
+            "evening" => Some(DayPart::Evening),
+            "night" => Some(DayPart::Night),
+            "tonight" => Some(DayPart::Tonight),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            DayPart::Morning => "morning",
+            DayPart::Afternoon => "afternoon",
+            DayPart::Evening => "evening",
+            DayPart::Night => "night",
+            DayPart::Tonight => "tonight",
+        }
+    }
+
+    /// The 24-hour hours (inclusive) the day part owns: 05:00-11:59, 12:00-17:59, 18:00-23:59.
+    fn hours(self) -> std::ops::RangeInclusive<u32> {
+        match self {
+            DayPart::Morning => 5..=11,
+            DayPart::Afternoon => 12..=17,
+            DayPart::Evening | DayPart::Night | DayPart::Tonight => 18..=23,
+        }
+    }
+
+    fn range_text(self) -> &'static str {
+        match self {
+            DayPart::Morning => "5:00 a.m. to 11:59 a.m.",
+            DayPart::Afternoon => "12:00 p.m. to 5:59 p.m.",
+            DayPart::Evening | DayPart::Night | DayPart::Tonight => "6:00 p.m. to 11:59 p.m.",
+        }
+    }
+}
+
+/// Where a day-part word sits in a phrase and how many tokens it takes.
+struct DayPartMarker {
+    day_part: DayPart,
+    start: usize,
+    len: usize,
+    /// `in the <daypart>` (no day word of its own).
+    in_the: bool,
+    /// `at night`.
+    at_night: bool,
+}
+
+const UNSUPPORTED_QUALIFIER_REASON: &str =
+    "Time zone or unrecognized qualifier after the time is not supported yet";
 
 pub struct TimeResolver;
 
@@ -143,6 +217,11 @@ impl TimeResolver {
 
         // Try natural language phrases
         if let Ok(result) = Self::parse_natural_language(&phrase_normalized, phrase, context) {
+            return Ok(result);
+        }
+
+        // Try a day-part word ("tomorrow morning at 9:30 AM")
+        if let Some(result) = Self::parse_day_part_phrase(&phrase_normalized, phrase, context) {
             return Ok(result);
         }
 
@@ -395,6 +474,226 @@ impl TimeResolver {
         ))
     }
 
+    /// Find the one day-part word of a phrase, with its `this` / `in the` lead-in or `at night`.
+    fn find_day_part(tokens: &[&str]) -> Option<DayPartMarker> {
+        let mut found: Option<DayPartMarker> = None;
+        for (index, token) in tokens.iter().enumerate() {
+            let Some(day_part) = DayPart::from_word(token) else {
+                continue;
+            };
+            if found.is_some() {
+                return None;
+            }
+            let mut start = index;
+            let mut in_the = false;
+            let mut at_night = false;
+            if index >= 1 && tokens[index - 1] == "this" && day_part != DayPart::Tonight {
+                start = index - 1;
+            } else if index >= 2
+                && tokens[index - 2] == "in"
+                && tokens[index - 1] == "the"
+                && day_part != DayPart::Tonight
+            {
+                start = index - 2;
+                in_the = true;
+            } else if index >= 1
+                && tokens[index - 1] == "at"
+                && day_part == DayPart::Night
+                && index + 1 == tokens.len()
+            {
+                start = index - 1;
+                at_night = true;
+            }
+            found = Some(DayPartMarker {
+                day_part,
+                start,
+                len: index + 1 - start,
+                in_the,
+                at_night,
+            });
+        }
+        found
+    }
+
+    /// Resolve a phrase with a day-part word: "tomorrow morning at 9:30 AM", "tonight at 8",
+    /// "Friday at 10 at night", "tomorrow morning". `None` when it is not such a phrase.
+    fn parse_day_part_phrase(
+        phrase_normalized: &str,
+        original_phrase: &str,
+        context: &TimeContext,
+    ) -> Option<ResolutionResult> {
+        let tz = Self::get_tz(context).ok()?;
+        let tokens: Vec<&str> = phrase_normalized.split_whitespace().collect();
+        let marker = Self::find_day_part(&tokens)?;
+        let day_part = marker.day_part;
+        let before = &tokens[..marker.start];
+        let after = &tokens[marker.start + marker.len..];
+        let ref_date = context.reference_time.with_timezone(&tz).date_naive();
+
+        let ambiguous =
+            |date: Option<NaiveDate>, kind: AmbiguityKind, reason: String| ResolutionResult {
+                original_phrase: original_phrase.to_string(),
+                resolved_date: date,
+                resolved_local: None,
+                resolved_time: None,
+                candidates: vec![],
+                is_ambiguous: true,
+                ambiguity_kind: Some(kind),
+                ambiguity_reason: Some(reason),
+                is_past: date.is_some_and(|date| date < ref_date),
+                context: context.clone(),
+            };
+
+        let missing_day = |reason: String| ambiguous(None, AmbiguityKind::MissingDay, reason);
+        let unknown_day_reason = format!(
+            "Missing day: say which day, because the {} is as often tomorrow as today",
+            day_part.name()
+        );
+
+        // `<day> [at] <clock> in the <daypart>` / `at night`: the day part follows the clock.
+        // Only the morning is as often tomorrow as today; the other day parts default to today.
+        let unknown_day = marker.in_the && day_part == DayPart::Morning;
+        let trailing_split =
+            if (marker.in_the || marker.at_night) && after.is_empty() && !before.is_empty() {
+                Self::split_day_and_clock(before, context, tz)
+            } else {
+                None
+            };
+        if let Some((day, clock, rest)) = trailing_split {
+            if !rest.is_empty() {
+                return Some(ambiguous(
+                    day,
+                    AmbiguityKind::UnsupportedQualifier,
+                    UNSUPPORTED_QUALIFIER_REASON.to_string(),
+                ));
+            }
+            let result = Self::apply_day_part(day, clock, day_part, original_phrase, context, tz)?;
+            let later_today = result
+                .resolved_time
+                .is_some_and(|instant| instant > context.reference_time)
+                && !result.is_ambiguous;
+            if day.is_none() && unknown_day {
+                return Some(missing_day(unknown_day_reason));
+            }
+            if day.is_none() && result.resolved_time.is_some() && !later_today {
+                return Some(missing_day(
+                    "Missing day: that time is not later today, so the day is unclear".to_string(),
+                ));
+            }
+            return Some(result);
+        }
+        if marker.at_night {
+            return if before.is_empty() && after.is_empty() {
+                Some(missing_day(unknown_day_reason))
+            } else {
+                None
+            };
+        }
+        let (day, clock_tokens): (Option<NaiveDate>, Vec<&str>) = if day_part == DayPart::Tonight {
+            if !before.is_empty() {
+                return None;
+            }
+            (Some(ref_date), after.to_vec())
+        } else if before.is_empty() {
+            if unknown_day {
+                return Some(missing_day(unknown_day_reason));
+            }
+            (Some(ref_date), after.to_vec())
+        } else {
+            (
+                Some(Self::parse_day_part(before, context, tz)?),
+                after.to_vec(),
+            )
+        };
+
+        if clock_tokens.is_empty() {
+            return Some(ambiguous(
+                day,
+                AmbiguityKind::MissingHour,
+                format!("Missing hour: the {} needs a time", day_part.name()),
+            ));
+        }
+        let (clock, used) = Self::parse_clock_tokens(&clock_tokens, true)?;
+        if used != clock_tokens.len() {
+            return Some(ambiguous(
+                day,
+                AmbiguityKind::UnsupportedQualifier,
+                UNSUPPORTED_QUALIFIER_REASON.to_string(),
+            ));
+        }
+        Self::apply_day_part(day, clock, day_part, original_phrase, context, tz)
+    }
+
+    /// Place a clock inside the hours its day part owns, supplying a missing meridiem and
+    /// refusing a stated one that falls outside them.
+    fn apply_day_part(
+        day: Option<NaiveDate>,
+        clock: ClockPart,
+        day_part: DayPart,
+        original_phrase: &str,
+        context: &TimeContext,
+        tz: Tz,
+    ) -> Option<ResolutionResult> {
+        let ref_date = context.reference_time.with_timezone(&tz).date_naive();
+        let ambiguous = |kind: AmbiguityKind, reason: String| ResolutionResult {
+            original_phrase: original_phrase.to_string(),
+            resolved_date: day,
+            resolved_local: None,
+            resolved_time: None,
+            candidates: vec![],
+            is_ambiguous: true,
+            ambiguity_kind: Some(kind),
+            ambiguity_reason: Some(reason),
+            is_past: day.is_some_and(|date| date < ref_date),
+            context: context.clone(),
+        };
+        let (hour, minute) = match clock {
+            ClockPart::Time { hour, minute } => {
+                if !day_part.hours().contains(&hour) {
+                    return Some(ambiguous(
+                        AmbiguityKind::DayPartConflict,
+                        format!(
+                            "Day part conflict: {:02}:{:02} is not in the {} ({})",
+                            hour,
+                            minute,
+                            day_part.name(),
+                            day_part.range_text()
+                        ),
+                    ));
+                }
+                (hour, minute)
+            }
+            ClockPart::MissingMeridiem { hour, minute } => {
+                let fitting: Vec<u32> = if (1..=12).contains(&hour) {
+                    [hour % 12, hour % 12 + 12]
+                        .into_iter()
+                        .filter(|candidate| day_part.hours().contains(candidate))
+                        .collect()
+                } else {
+                    vec![]
+                };
+                match fitting.as_slice() {
+                    [only] => (*only, minute),
+                    _ => {
+                        return Some(ambiguous(
+                            AmbiguityKind::MissingMeridiem,
+                            format!(
+                                "Missing meridiem: {} cannot be placed in the {} ({}); say a.m. or p.m.",
+                                hour,
+                                day_part.name(),
+                                day_part.range_text()
+                            ),
+                        ));
+                    }
+                }
+            }
+        };
+        let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+        let date = day.unwrap_or(ref_date);
+        Self::handle_complete_datetime_result(date.and_time(time), original_phrase, context, tz)
+            .ok()
+    }
+
     /// Resolve a day part and/or a clock part ("Friday at 3 p.m.", "5 pm tomorrow", "at 5 p.m.").
     /// Returns `None` when the phrase is not a clock phrase at all.
     fn parse_clock_phrase(
@@ -426,12 +725,12 @@ impl TimeResolver {
             return Some(ambiguous(
                 day,
                 AmbiguityKind::UnsupportedQualifier,
-                "Time zone or unrecognized qualifier after the time is not supported yet",
+                UNSUPPORTED_QUALIFIER_REASON,
             ));
         }
         let (hour, minute) = match clock {
             ClockPart::Time { hour, minute } => (hour, minute),
-            ClockPart::MissingMeridiem => {
+            ClockPart::MissingMeridiem { .. } => {
                 return Some(ambiguous(
                     day,
                     AmbiguityKind::MissingMeridiem,
@@ -489,7 +788,7 @@ impl TimeResolver {
             }
         }
         // A bare number with neither `at` nor a day part is not a clock ("3 days").
-        if matches!(clock, ClockPart::MissingMeridiem) && tokens.first() != Some(&"at") {
+        if matches!(clock, ClockPart::MissingMeridiem { .. }) && tokens.first() != Some(&"at") {
             return None;
         }
         Some((None, clock, after.to_vec()))
@@ -587,7 +886,7 @@ impl TimeResolver {
             if minute_text.is_none() && !has_at && !allow_bare_hour {
                 return None;
             }
-            return Some((ClockPart::MissingMeridiem, at_len + 1));
+            return Some((ClockPart::MissingMeridiem { hour, minute }, at_len + 1));
         };
         if !(1..=12).contains(&hour) {
             return None;
