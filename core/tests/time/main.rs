@@ -1175,6 +1175,18 @@ fn span_coverage_counts_day_part_words() {
             "Remind me Friday at 10 at night to water the ferns",
             "Friday at 10",
         ),
+        (
+            "Remind me this evening at 6 pm to water the ferns",
+            "evening at 6 pm",
+        ),
+        (
+            "Remind me this morning at 9 to water the ferns",
+            "morning at 9",
+        ),
+        (
+            "Remind me in the evening at 7 pm to water the ferns",
+            "evening at 7 pm",
+        ),
     ] {
         let start = text.find(partial).unwrap();
         assert!(
