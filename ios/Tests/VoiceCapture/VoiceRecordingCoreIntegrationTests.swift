@@ -12,8 +12,7 @@ private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// synthetic recorder. A process death is simulated by discarding every object and closing the core: only files
 /// survive. Device lock, real interruptions and termination are physical-matrix evidence, not shown here.
 final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var runtimes: [Runtime] = []
 
     /// One "process": core, ingress service, handoff and recording controller over the protected store locations.
@@ -74,8 +73,7 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let seedCore = try CoreHandle(path: layout.databaseURL.path)
         seedCore.close()
         try withDatabase { database in
@@ -88,8 +86,7 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
     override func tearDown() {
         runtimes.forEach { $0.terminate() }
         runtimes = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

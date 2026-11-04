@@ -19,20 +19,17 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
     private static let captureText = "synthetic action for the suggestion screen"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("suggestion-screen-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

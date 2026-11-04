@@ -54,16 +54,14 @@ private final class ScriptedPermissionAsker: NotificationPermissionAsking, @unch
 
 final class AppServicesTests: XCTestCase {
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var created: [AppServices] = []
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("app-services-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = settledLiveResultBufferCount()
+        coreLeakBaseline = CoreLeakBaseline.capture()
         created = []
     }
 
@@ -73,12 +71,10 @@ final class AppServicesTests: XCTestCase {
         let pending = created
         created = []
         let deadline = Date().addingTimeInterval(5)
-        while pending.contains(where: { $0.homeRecents.readsInFlight > 0 })
-            || CoreHandle.liveResultBufferCount != baselineBuffers, Date() < deadline {
+        while pending.contains(where: { $0.homeRecents.readsInFlight > 0 }), Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 
@@ -586,7 +582,7 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(services.root.readScope, .authenticated)
 
         services.shutDown()
-        let freed = await timeChangeWaitUntil { CoreHandle.liveResultBufferCount == baselineBuffers }
+        let freed = await timeChangeWaitUntil { CoreHandle.liveResultBufferCount == coreLeakBaseline.buffers }
 
         XCTAssertTrue(freed, "no home read outlives the shutdown")
         XCTAssertTrue(services.homeRecents.entries.isEmpty)

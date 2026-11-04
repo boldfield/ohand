@@ -86,8 +86,7 @@ private let unauthorizedJobStatements = [
 @MainActor
 final class StatusIntegrationTests: XCTestCase {
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var services: AppServices?
     private var window: UIWindow?
     private var rendered: [String: String] = [:]
@@ -97,8 +96,7 @@ final class StatusIntegrationTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("status-integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         rendered = [:]
         actions = [:]
     }
@@ -114,8 +112,7 @@ final class StatusIntegrationTests: XCTestCase {
         }
         services?.shutDown()
         services = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

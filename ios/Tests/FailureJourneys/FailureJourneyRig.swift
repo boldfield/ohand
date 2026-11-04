@@ -111,8 +111,7 @@ class FailureJourneyTestCase: XCTestCase {
     static let syntheticKey = "synthetic-provider-key-do-not-leak-0002"
 
     var storageRoot: URL!
-    var baselineHandles = 0
-    var baselineBuffers = 0
+    var coreLeakBaseline = CoreLeakBaseline.empty
     var services: AppServices!
     var sender: FailureJourneyProviderSender!
     var center: FakeNotificationCenter!
@@ -145,8 +144,7 @@ class FailureJourneyTestCase: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("failure-journeys-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         try bringUp(providerMode: providerMode, withRecognizer: withRecognizer, withBackgroundGrant: withBackgroundGrant)
     }
 
@@ -165,7 +163,7 @@ class FailureJourneyTestCase: XCTestCase {
     func stopRig() {
         services.shutDown()
         services = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "the run closed every core handle")
+        coreLeakBaseline.assertHandlesReturned("the run closed every core handle")
     }
 
     func launchRig(
@@ -224,8 +222,7 @@ class FailureJourneyTestCase: XCTestCase {
             settleBackgroundWork()
             services.shutDown()
             self.services = nil
-            XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-            XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+            coreLeakBaseline.check()
         }
         if let storageRoot { try? FileManager.default.removeItem(at: storageRoot) }
         try super.tearDownWithError()

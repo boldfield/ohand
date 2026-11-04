@@ -6,14 +6,12 @@ import XCTest
 /// backup treatment the operating system reports for them. The simulator does not lock, so protection classes are
 /// verified as requests made to the file system (and read back only on a device); lock behavior is device evidence.
 final class ProtectedStorageCoreIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var layout: ProtectedStorageLayout!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-protected-storage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -22,8 +20,7 @@ final class ProtectedStorageCoreIntegrationTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: layout.rootDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

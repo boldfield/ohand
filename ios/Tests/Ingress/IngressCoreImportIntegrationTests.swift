@@ -11,8 +11,7 @@ private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// nothing but the files survives, exactly as after a kill. The simulator does not lock, so lock-state behavior is
 /// device evidence; protection classes are verified as requests made to the file system.
 final class IngressCoreImportIntegrationTests: IngressStorageTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var runtimes: [Runtime] = []
 
     /// One "process": a core over the protected database, the importer bridging to it, and the service on top.
@@ -41,16 +40,14 @@ final class IngressCoreImportIntegrationTests: IngressStorageTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         try createStoreWithPersonalRoute()
     }
 
     override func tearDown() {
         runtimes.forEach { $0.terminate() }
         runtimes = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

@@ -9,8 +9,7 @@ private let retrievalStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// Imports synthetic captures through the real Rust core and retrieves them through `CoreHandle.startRetrieval`.
 /// Outcomes are events delivered on the main queue, where XCTest runs.
 final class RetrievalBridgeTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var storeDirectory: URL!
     private var core: CoreHandle!
     private var events: [CoreEvent] = []
@@ -18,8 +17,7 @@ final class RetrievalBridgeTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-retrieval-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -39,8 +37,7 @@ final class RetrievalBridgeTests: XCTestCase {
         core?.close()
         core = nil
         try? FileManager.default.removeItem(at: storeDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

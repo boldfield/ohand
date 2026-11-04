@@ -52,8 +52,7 @@ final class CoreStatusProgressReader: CaptureProgressReading {
 /// the recorder is synthetic (microphone capture is device evidence). Nothing here asserts a reminder: an item that has
 /// just been saved has no confirmed reminder, and the acknowledgment must say so.
 final class CaptureEntryCoreIntegrationTests: IngressStorageTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var writerCore: CoreHandle!
     private var service: ForegroundIngressService!
     private var reader: CoreStatusProgressReader!
@@ -62,8 +61,7 @@ final class CaptureEntryCoreIntegrationTests: IngressStorageTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
 
         let seedCore = try CoreHandle(path: layout.databaseURL.path)
         seedCore.close()
@@ -94,8 +92,7 @@ final class CaptureEntryCoreIntegrationTests: IngressStorageTestCase {
         reader = nil
         writerCore?.close()
         writerCore = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

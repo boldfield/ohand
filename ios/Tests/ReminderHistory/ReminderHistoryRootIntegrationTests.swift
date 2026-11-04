@@ -14,21 +14,18 @@ private final class UnreachableHistorySender: ProviderRequestSender, @unchecked 
 /// Reads reminder history from the real Rust core through the real composition root.
 final class ReminderHistoryRootIntegrationTests: XCTestCase {
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("reminder-history-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

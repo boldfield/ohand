@@ -13,14 +13,12 @@ private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// Saving writes only the capture. Items are created by the foreground import (C02a), so the
 /// status tests stand in for it by inserting item rows into the closed store file directly.
 final class CaptureStatusTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var storeDirectory: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-capture-status-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -28,8 +26,7 @@ final class CaptureStatusTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: storeDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 
@@ -214,7 +211,7 @@ final class CaptureStatusTests: XCTestCase {
         let first = try Session(path: storePath)
         _ = try first.save(capture).decode(SaveCaptureAcknowledgment.self)
         first.close()
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
+        coreLeakBaseline.assertHandlesReturned()
 
         let second = try Session(path: storePath)
         defer { second.close() }

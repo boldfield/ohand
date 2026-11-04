@@ -8,21 +8,18 @@ import XCTest
 /// and opens a new one over the same disk, so nothing but the files survives, as after a kill. Native code keeps no
 /// generation: every generation asserted here is read back from the core.
 final class ResetCoreIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var worlds: [RealCoreResetWorld] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDown() {
         worlds.forEach { $0.tearDown() }
         worlds = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

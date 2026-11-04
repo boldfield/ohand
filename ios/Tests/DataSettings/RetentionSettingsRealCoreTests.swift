@@ -18,8 +18,7 @@ private struct BuiltRoot: @unchecked Sendable {
 /// the real unresolved list, the core's refusals, and a capture saved while a sweep runs.
 @MainActor
 final class RetentionSettingsRealCoreTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreRetentionWorld!
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
@@ -27,8 +26,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreRetentionWorld()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
@@ -40,8 +38,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
         root = nil
         world.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

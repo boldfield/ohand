@@ -38,8 +38,7 @@ final class ReminderControlRootIntegrationTests: XCTestCase {
 
     private var storageRoot: URL!
     private var center: FakeNotificationCenter!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -47,13 +46,11 @@ final class ReminderControlRootIntegrationTests: XCTestCase {
             .appendingPathComponent("reminder-controls-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
         center = FakeNotificationCenter()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

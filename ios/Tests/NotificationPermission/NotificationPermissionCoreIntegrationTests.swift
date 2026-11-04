@@ -15,8 +15,7 @@ private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// Reminder rows are seeded into the closed store file because no export creates reminders yet; every
 /// later state (rejected, scheduled, held back for capacity) is produced by a real pass.
 final class NotificationPermissionCoreIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var storeDirectory: URL!
 
     private struct SeededReminder {
@@ -28,8 +27,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-permission-integration-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -37,8 +35,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: storeDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

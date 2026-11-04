@@ -9,14 +9,12 @@ import XCTest
 /// authentication session decides whether the core is asked for stored content at all, and whether its answer is
 /// delivered.
 final class PrivateReadCoreIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var layout: ProtectedStorageLayout!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-private-read-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -27,8 +25,7 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: layout.rootDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

@@ -24,14 +24,12 @@ private final class MetricsAnswerBox<Value>: @unchecked Sendable {
 /// Events arrive on the main queue, where XCTest runs synchronous tests, so waiting pumps the run loop.
 final class MetricsCoreIntegrationTests: XCTestCase {
     private var directory: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private let boundary = FakeReadAuthenticationBoundary()
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-metrics-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -39,8 +37,7 @@ final class MetricsCoreIntegrationTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: directory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

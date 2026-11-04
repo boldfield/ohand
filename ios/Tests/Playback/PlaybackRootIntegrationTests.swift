@@ -34,25 +34,18 @@ final class PlaybackRootIntegrationTests: XCTestCase {
     private static let routeID = "route-playback"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("playback-root-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        // A core read issued before the root shut down finishes on its own queue; wait for its buffer to be freed.
-        waitUntilPumping("every core result buffer is freed", timeout: 10) {
-            CoreHandle.liveResultBufferCount == self.baselineBuffers
-        }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

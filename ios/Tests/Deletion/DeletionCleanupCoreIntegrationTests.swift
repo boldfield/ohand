@@ -10,21 +10,18 @@ import XCTest
 final class DeletionCleanupCoreIntegrationTests: XCTestCase {
     private let captureID = "cap-1"
     private let reminderID = "rem-1"
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var worlds: [RealCoreDeletionWorld] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDown() {
         worlds.forEach { $0.tearDown() }
         worlds = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

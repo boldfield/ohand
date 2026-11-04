@@ -211,21 +211,18 @@ enum OptionalCapabilitiesReplies {
 /// Builds production roots over a temporary storage root and checks every core handle is closed afterwards.
 class OptionalCapabilitiesTestCase: XCTestCase {
     private(set) var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var authenticationBoundaries: [FakeReadAuthenticationBoundary] = []
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("optional-capabilities-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

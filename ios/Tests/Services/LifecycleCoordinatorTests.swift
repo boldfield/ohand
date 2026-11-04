@@ -572,25 +572,17 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
     private static let timeZone = TimeZone(identifier: "UTC")!
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("lifecycle-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        // A job drain or a core read started by the last pass completes on its own queue, so its result buffer is freed a
-        // moment after the test body ends. Wait for that, bounded, before judging a leak.
-        _ = pump(timeout: 10) {
-            CoreHandle.liveResultBufferCount == self.baselineBuffers && CoreHandle.liveHandleCount == self.baselineHandles
-        }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

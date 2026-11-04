@@ -55,8 +55,7 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
     private static let requestVersion = "5a1c0000-0000-4000-8000-0000000000a3"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var configurationHandle: CoreHandle?
     private var configurationEvents: [CoreEvent] = []
     private var nextConfigurationOperationID: UInt64 = 1
@@ -66,15 +65,13 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("job-configuration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
         configurationHandle?.close()
         configurationHandle = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

@@ -27,14 +27,12 @@ private final class OutcomeRecorder: @unchecked Sendable {
 }
 
 final class ProcessingHealthTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var storeDirectory: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-health-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -42,8 +40,7 @@ final class ProcessingHealthTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: storeDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

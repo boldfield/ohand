@@ -91,15 +91,13 @@ final class ExportCoreIntegrationTests: XCTestCase {
     private static let endpointSentinel = "https://private-endpoint.invalid/v1"
     private static let credentialSentinel = "keychain:credential-sentinel"
 
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var worlds: [RealCoreDeletionWorld] = []
     private var sessions: [RealCoreExportSession] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDown() {
@@ -107,8 +105,7 @@ final class ExportCoreIntegrationTests: XCTestCase {
         sessions = []
         worlds.forEach { $0.tearDown() }
         worlds = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

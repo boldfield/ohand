@@ -15,15 +15,13 @@ private final class UnreachableRetentionProviderSender: ProviderRequestSender, @
 /// and the gate. The lifecycle coordinator is a module of the root, as in the app, so audio removal and the sweep run
 /// through the same `AudioRetentionService` the app uses.
 final class RetentionControlRootIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreRetentionWorld!
     private var center: FakeNotificationCenter!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreRetentionWorld()
         center = FakeNotificationCenter()
     }
@@ -31,8 +29,7 @@ final class RetentionControlRootIntegrationTests: XCTestCase {
     override func tearDown() {
         world.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

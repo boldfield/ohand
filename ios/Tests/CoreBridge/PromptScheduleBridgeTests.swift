@@ -5,14 +5,12 @@ import XCTest
 /// Configures, refreshes and reads the daily prompt schedule through `CoreHandle` against the real Rust core on the
 /// simulator. The core owns the schedule and its clock; native supplies only the IANA zone.
 final class PromptScheduleBridgeTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var storeDirectory: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-prompt-schedule-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -20,8 +18,7 @@ final class PromptScheduleBridgeTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: storeDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

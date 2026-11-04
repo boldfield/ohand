@@ -24,8 +24,7 @@ final class AppRealServicesTests: XCTestCase {
     }
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var created: [AppServices] = []
     private let engine = SyntheticVoiceEngine()
     private let permission = FakeMicrophonePermission()
@@ -36,21 +35,14 @@ final class AppRealServicesTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("app-real-services-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = settledLiveResultBufferCount()
+        coreLeakBaseline = CoreLeakBaseline.capture()
         created = []
     }
 
     override func tearDownWithError() throws {
         created.forEach { $0.shutDown() }
         created = []
-        // A core read issued before the shutdown completes on its own queue; wait for its buffer to be freed.
-        let bufferDeadline = Date().addingTimeInterval(5)
-        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < bufferDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

@@ -50,8 +50,7 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
     private static let routeID = "route-retrieval-search"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var session: ReadAuthenticationSession!
     private var sender: OfflineProviderSender!
     private var module: RetrievalSearchModule!
@@ -68,8 +67,7 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("retrieval-search-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         sender = OfflineProviderSender()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         module = RetrievalSearchModule(calendar: utcCalendar)
@@ -87,8 +85,7 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
     override func tearDownWithError() throws {
         root.shutDown()
         root = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }
