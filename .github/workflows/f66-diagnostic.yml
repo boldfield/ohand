@@ -18,6 +18,7 @@ jobs:
         target:
           - "OhAndTests/ProviderAndPermissionFailureJourneyTests/testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact"
           - "OhAndTests/ProviderAndPermissionFailureJourneyTests/testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact#2"
+          - "OhAndTests/ExportSettingsViewTests/testAFailedShareAndACompletedShareShowTheirOwnOutcome"
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1

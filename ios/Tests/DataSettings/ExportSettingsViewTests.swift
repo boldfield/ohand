@@ -89,6 +89,13 @@ final class ExportSettingsViewTests: XCTestCase {
 
     private func text(_ identifier: String) -> String? { rendered[identifier]?.text }
 
+    /// What the screen shows for `identifier` after a layout pass, which is what makes it report a changed render.
+    private func renderedAfterLayout(_ identifier: String) -> String? {
+        window?.rootViewController?.view.setNeedsLayout()
+        window?.rootViewController?.view.layoutIfNeeded()
+        return text(identifier)
+    }
+
     /// Polls on the main actor, where the window and its presentations live.
     private func waitForScreen(timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
@@ -164,11 +171,15 @@ final class ExportSettingsViewTests: XCTestCase {
             model.shareEnded(.failed)
             await settle()
             guard case .finished(.failed(let failed)) = model.phase else { return XCTFail("got \(model.phase)") }
+            await waitUntil("the failed share is shown on the screen") { renderedAfterLayout(ExportSettingsView.stateIdentifier) == failed }
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), failed)
 
             await model.startExport()
             model.shareEnded(.completed)
             await settle()
+            await waitUntil("the completed share is shown on the screen") {
+                renderedAfterLayout(ExportSettingsView.stateIdentifier)?.hasPrefix("Shared") == true
+            }
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
             XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertTrue(shown.contains("cannot recall"))
