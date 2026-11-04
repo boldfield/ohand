@@ -22,13 +22,15 @@ final class HomeScrollDiagnosticUITests: XCTestCase {
         }
     }
 
-    func testDiagA_gateLikeWithWalker() { run("A-walker", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"]) }
-    func testDiagB_noAnnouncementLogWithWalker() { run("B-nolog-walker", ["-OhAndDiagAXFrames"]) }
-    func testDiagC_postLayoutChanged() { run("C-postlayout", ["-OhAndAnnouncementLog", "-OhAndDiagPostLayout"]) }
-    func testDiagD_gateLikePlain() { run("D-plain", ["-OhAndAnnouncementLog"]) }
-    func testDiagE_walkerSlowElementSwipe() { run("E-walker-elementswipe", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], elementSwipe: true) }
+    func testDiagF_auditAllTypesThenScroll() { run("F-audit-all", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: .all) }
+    func testDiagG_auditWithoutDynamicTypeThenScroll() {
+        var types = XCUIAccessibilityAuditType.all
+        types.remove(.dynamicType)
+        run("G-audit-nodyn", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: types)
+    }
+    func testDiagH_auditDynamicTypeOnlyThenScroll() { run("H-audit-dynonly", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: .dynamicType) }
 
-    private func run(_ name: String, _ arguments: [String], elementSwipe: Bool = false) {
+    private func run(_ name: String, _ arguments: [String], auditFirst: XCUIAccessibilityAuditType? = nil) {
         variant = name
         app.launchArguments += arguments
         guard app.launch(fixture: .populated, timeout: 120) else { return log("NO-HOME") }
@@ -36,9 +38,18 @@ final class HomeScrollDiagnosticUITests: XCTestCase {
         _ = app.homeCard(containing: "Synthetic").waitForExistence(timeout: 60)
         dismissKeyboard()
         record("start")
-        for _ in 0..<4 {
-            if elementSwipe { app.scrollViews.firstMatch.swipeUp(velocity: .slow) } else { app.swipeUp() }
+        if let auditFirst {
+            var count = 0
+            do {
+                try app.performAccessibilityAudit(for: auditFirst) { _ in count += 1; return true }
+                log("AUDIT ran, \(count) issue(s) ignored")
+            } catch {
+                log("AUDIT error \(error)")
+            }
+            Thread.sleep(forTimeInterval: 2)
+            record("after-audit")
         }
+        for _ in 0..<4 { app.swipeUp() }
         Thread.sleep(forTimeInterval: 1)
         record("end")
         Thread.sleep(forTimeInterval: 8)

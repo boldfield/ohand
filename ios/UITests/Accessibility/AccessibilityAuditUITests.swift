@@ -570,8 +570,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// the top of the list (runs 41702917752 and 41711242088, where the screenshots and the snapshots disagreed); at the
     /// right edge it catches the scroll indicator, which scrubs the whole list. A vertical drag does not start the back
     /// gesture. The caller drags again until the element is where it should be, and the frames are read only once two
-    /// snapshots a second apart agree. The drag runs down the middle of the screen: at the right
-    /// edge it would catch the scroll indicator, which scrubs the whole list, and at the left edge the back gesture.
+    /// snapshots a second apart agree.
     private func scrollContent(by distance: CGFloat, between band: ClosedRange<CGFloat>) {
         let top = band.lowerBound + 20
         let bottom = band.upperBound - 20

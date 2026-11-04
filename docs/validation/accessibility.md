@@ -212,6 +212,12 @@ size; and, with a keyboard, Tab reaches every control and Space or Return activa
 9. Status with a reminder that needs a time: open the note from Status.
 10. Locked screen: background and reopen the app, listen for the lock announcement; reach and activate Unlock; confirm the authentication prompt appears and can be answered, and that there is no state with nothing to activate.
 11. First run: with permissions not yet asked, open Settings, Permissions.
+12. Home, populated, at the largest text size with VoiceOver on (the gate's frame-agreement check, part 1, is the
+    simulator's view of this): scroll the list to its end, once with a one-finger drag (VoiceOver off for the drag, then
+    on) and once with a three-finger swipe up. At each end position, drag one finger slowly over the cards (touch
+    exploration), then swipe right through them. Confirm that the focus ring surrounds the card drawn under the finger,
+    that the card read aloud is the card drawn there, and that a double tap opens that card. Record any mismatch as a
+    defect, with the scroll method and the card positions.
 
 ## 4. Evidence record
 
