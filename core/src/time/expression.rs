@@ -338,6 +338,10 @@ pub fn span_covers_time_expression(basis_text: &str, start: usize, end: usize) -
     let before = text_before_span(&before);
     let before_words = words(before);
     let (earlier_sentences, prefix) = split_at_last_sentence_end(&before_words);
+    // A likelihood hedge right before the day or clock is part of the expression, whether or not
+    // the span quotes it ("probably today around 10 AM"); it never hides the day.
+    let prefix_without_hedge = without_likelihood_hedge(prefix);
+    let prefix = prefix_without_hedge.as_slice();
     let after = text_after_span(&after, meridiem_dot_open);
     let after_words = words(after);
     let (own_after, later_sentences) = if after.starts_with('\n') {
@@ -547,19 +551,46 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
         if made_inexact_by_modifier(prefix) {
             return None;
         }
-        let clock_length = [2, 1].into_iter().find(|&length| {
-            body.len() > leading_day_length + length
-                && clock_length(&body[body.len() - length..]) == Some(length)
-        })?;
-        let clock_start = body.len() - clock_length;
-        let at_length = usize::from(body[clock_start - 1].text == "at");
-        let task_end = clock_start - at_length;
+        // [hedge] [same day] [at] [approximation] <clock> [qualifier] ends the sentence.
+        let (clock_start, clock_words, qualifier_words) =
+            (0..=MAX_QUALIFIER_WORDS).find_map(|qualifier_words| {
+                let end = body.len().checked_sub(qualifier_words)?;
+                if qualifier_words > 0 && !is_qualifier_run(&body[end..]) {
+                    return None;
+                }
+                [2, 1].into_iter().find_map(|length| {
+                    (end > leading_day_length + length
+                        && clock_length(&body[end - length..end]) == Some(length))
+                    .then(|| (end - length, length, qualifier_words))
+                })
+            })?;
+        let approximation_words = usize::from(
+            clock_start > leading_day_length && is_approximation_word(&body[clock_start - 1].text),
+        );
+        let approximation_start = clock_start - approximation_words;
+        let at_words = usize::from(
+            approximation_start > leading_day_length && body[approximation_start - 1].text == "at",
+        );
+        let clock_part_start = approximation_start - at_words;
+        let mut task_end = clock_part_start;
+        if task_end >= leading_day_length * 2
+            && day_phrase(&body[task_end - leading_day_length..task_end]) == day_phrase(day)
+        {
+            task_end -= leading_day_length;
+        }
+        if task_end > leading_day_length && is_likelihood_hedge(&body[task_end - 1].text) {
+            task_end -= 1;
+        }
         let task = body.get(leading_day_length..task_end)?;
         if !is_split_task(task) || made_inexact_by_modifier(task) {
             return None;
         }
-        let clock = &body[clock_start..];
-        let combined = format!("{} at {}", day_phrase(day), words_phrase(clock));
+        let clock = &body[clock_part_start..clock_start + clock_words + qualifier_words];
+        let combined = if at_words + approximation_words > 0 {
+            format!("{} {}", day_phrase(day), words_phrase(clock))
+        } else {
+            format!("{} at {}", day_phrase(day), words_phrase(clock))
+        };
         let whole_starts = std::iter::once(prefix_length)
             .chain(lead_start(&["on", "at"]))
             .collect();
@@ -574,7 +605,11 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
     }
 
     // Clock, task, day.
-    let clock_length = clock_length(body)?;
+    let approximation_words = usize::from(is_approximation_word(&body.first()?.text));
+    let clock_words = clock_length(&body[approximation_words..])?;
+    let clock_length = approximation_words
+        + clock_words
+        + qualifier_prefix_length(&body[approximation_words + clock_words..]);
     let clock = &body[..clock_length];
     if clock.iter().any(|word| has_clause_mark(&word.raw)) {
         return None;
@@ -601,6 +636,81 @@ fn parse_split_sentence(sentence: &[Word]) -> Option<SplitShape> {
         stretch: stretch_phrase(body),
         combined,
     })
+}
+
+/// The most words a run of clock qualifiers after a clock may have ("or so sharp").
+const MAX_QUALIFIER_WORDS: usize = 5;
+
+/// Words before a clock that say it is approximate ("around 10 AM", "at about 10").
+fn is_approximation_word(word: &str) -> bool {
+    matches!(
+        word,
+        "around" | "about" | "approximately" | "approx" | "roughly"
+    )
+}
+
+/// Words that hedge how likely a day or clock is, not what it is ("probably today around 10 AM").
+fn is_likelihood_hedge(word: &str) -> bool {
+    matches!(
+        word,
+        "probably" | "maybe" | "perhaps" | "possibly" | "likely" | "hopefully"
+    )
+}
+
+/// How many of the leading words are clock qualifiers after a clock: `ish`, `or so`, `on the
+/// dot` and the single words of [`is_clock_qualifier`] that only state precision. Task content
+/// never opens with one.
+fn qualifier_prefix_length(words: &[Word]) -> usize {
+    let mut length = 0;
+    loop {
+        let rest = &words[length..];
+        let texts: Vec<&str> = rest.iter().take(3).map(|word| word.text.as_str()).collect();
+        if texts.starts_with(&["on", "the", "dot"]) {
+            length += 3;
+        } else if texts.starts_with(&["or", "so"]) {
+            length += 2;
+        } else if texts.first().is_some_and(|word| {
+            matches!(
+                *word,
+                "ish"
+                    | "thereabouts"
+                    | "approximately"
+                    | "roughly"
+                    | "sharp"
+                    | "exactly"
+                    | "precisely"
+            )
+        }) {
+            length += 1;
+        } else {
+            return length;
+        }
+    }
+}
+
+/// Whether the words are nothing but clock qualifiers.
+fn is_qualifier_run(words: &[Word]) -> bool {
+    !words.is_empty() && qualifier_prefix_length(words) == words.len()
+}
+
+/// The words without a likelihood hedge right before the day or clock they hedge: the last word,
+/// or the one before a closing `at` or `on`.
+fn without_likelihood_hedge(words: &[Word]) -> Vec<Word> {
+    let hedge_index = match words {
+        [.., last] if is_likelihood_hedge(&last.text) => Some(words.len() - 1),
+        [.., hedge, last]
+            if is_likelihood_hedge(&hedge.text) && matches!(last.text.as_str(), "at" | "on") =>
+        {
+            Some(words.len() - 2)
+        }
+        _ => None,
+    };
+    words
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != hedge_index)
+        .map(|(_, word)| word.clone())
+        .collect()
 }
 
 /// Whether the words between the parts of a split-shape sentence are a task: they open with `to`
@@ -656,11 +766,27 @@ fn clock_length(words: &[Word]) -> Option<usize> {
     if matches!(first, "noon" | "midnight") {
         return Some(1);
     }
+    // `ish` attached to a clock that has its own meridiem: "10amish", "10am-ish", "15:00ish".
+    if let Some(stem) = first
+        .strip_suffix("ish")
+        .map(|stem| stem.trim_end_matches('-'))
+        .filter(|stem| stem.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return clock_length(&[Word {
+            raw: stem.to_string(),
+            text: stem.to_string(),
+            ends_sentence: false,
+            start: 0,
+        }]);
+    }
     let meridiems = ["a.m", "p.m", "am", "pm"];
-    if words
-        .get(1)
-        .is_some_and(|second| meridiems.contains(&second.text.as_str()))
-        && is_clock_number(first)
+    if words.get(1).is_some_and(|second| {
+        let text = second.text.as_str();
+        let without_ish = text
+            .strip_suffix("ish")
+            .map(|stem| stem.trim_end_matches('-'));
+        meridiems.contains(&text) || without_ish.is_some_and(|stem| meridiems.contains(&stem))
+    }) && is_clock_number(first)
     {
         return Some(2);
     }
@@ -893,6 +1019,7 @@ fn is_iso_date(word: &str) -> bool {
 /// A word of the basis text: as written, normalized, and flagged when it ends its sentence. A
 /// token of punctuation alone (",", "-", ".") is kept with an empty normalized form, so that its
 /// clause mark or sentence end still counts.
+#[derive(Clone)]
 struct Word {
     raw: String,
     text: String,
@@ -1212,6 +1339,14 @@ mod tests {
         let byte_start = text.find(quoted).expect("quoted text is in the basis");
         let start = text[..byte_start].chars().count();
         span_covers_time_expression(text, start, start + quoted.chars().count())
+    }
+
+    #[test]
+    fn a_likelihood_hedge_before_the_day_is_covered_with_or_without_it() {
+        // F64: the hedge sits inside the time expression, so it never hides the day.
+        let text = "Remind me maybe Saturday at 4 p.m.";
+        assert!(covers(text, "Saturday at 4 p.m."));
+        assert!(covers(text, "maybe Saturday at 4 p.m."));
     }
 
     #[test]
@@ -2086,7 +2221,6 @@ mod tests {
                 "Remind me by maybe Friday at 3 p.m.",
                 "Friday at 3 p.m.",
             ),
-            ("Remind me maybe Saturday at 4 p.m.", "Saturday at 4 p.m."),
             (
                 "Remind me to call the roofer, maybe Friday at 3 p.m.",
                 "Friday at 3 p.m.",
@@ -2172,6 +2306,12 @@ mod tests {
                 "Remind me at 3 p.m. to call Sam next Monday",
                 "at 3 p.m.",
                 "next monday at 3 p.m.",
+            ),
+            // F64: an approximation before the clock belongs to the clock part.
+            (
+                "Remind me today to call the dentist around 10am",
+                "10am",
+                "today around 10am",
             ),
         ] {
             assert!(covers(text, clock), "{text:?} / {clock:?}");
@@ -2284,7 +2424,6 @@ mod tests {
                 "at 10am",
             ),
             ("Remind me today to call the dentist by 10am", "10am"),
-            ("Remind me today to call the dentist around 10am", "10am"),
             (
                 "Remind me at 10am to call the dentist before tomorrow",
                 "at 10am",

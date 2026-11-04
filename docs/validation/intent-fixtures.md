@@ -34,6 +34,8 @@ Columns: expected outcome, forbidden outcomes, and whether the transcript alone 
 | `timezone-explicit` | dates | Remind me tomorrow at 9 a.m. EST to submit the form | `action`; reminder ambiguous, no instant | reminder instant | no |
 | `timezone-implicit-local` | dates | Remind me tomorrow at 9 a.m. to submit the form | `action`; reminder explicit 2026-10-09T09:00:00-04:00 | reminder ambiguous; zone UTC | yes |
 | `daypart-explicit` | dates | Remind me tomorrow morning at 9:30 AM to ask the nursery about the hydrangea | `action`; reminder explicit 2026-11-03T09:30:00-08:00 | reminder ambiguous; zone UTC | yes |
+| `clock-approximate` | dates | Remind me to cancel the subscription today around 10 AM | `action`; reminder explicit 2026-11-04T10:00:00-08:00 | reminder ambiguous; zone UTC | yes |
+| `day-hedged-restated` | dates | Remind me today to cancel the subscription probably today around 10 AM | `action`; reminder explicit 2026-11-04T10:00:00-08:00 | reminder ambiguous; zone UTC | yes |
 | `timezone-conflicting` | dates | Remind me tomorrow at 9 a.m. Tokyo time to join the call | `action`; reminder ambiguous, no instant or zone | zone America/New_York | yes |
 | `asr-dropped-word-remind-me` | dropped-asr-word | me tomorrow at 3 | abstain `UncertainTarget` | any facet | no |
 | `asr-dropped-word-action` | dropped-asr-word | call the dentist about that | `action` | any reminder; topic | no |

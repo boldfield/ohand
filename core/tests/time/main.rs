@@ -1,7 +1,8 @@
 use chrono::{DateTime, NaiveDate, Offset, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use ohand_core::time::{
-    span_covers_time_expression, AmbiguityKind, ResolutionError, TimeContext, TimeResolver,
+    span_covers_time_expression, split_shape_combined_phrase, split_shape_phrase, AmbiguityKind,
+    ResolutionError, TimeContext, TimeResolver,
 };
 
 fn make_context(tz: &str, ref_time: &str) -> TimeContext {
@@ -1193,5 +1194,343 @@ fn span_coverage_counts_day_part_words() {
             !span_covers_time_expression(text, start, start + partial.len()),
             "{partial}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Approximate and hedged times (F64)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn approximations_before_the_clock_resolve_to_the_stated_clock() {
+    // 2026-10-08 10:00 EDT; 3 p.m. EDT is 19:00 UTC.
+    for word in ["around", "about", "approximately", "approx", "roughly"] {
+        for phrase in [
+            format!("today {word} 3 PM"),
+            format!("today at {word} 3 PM"),
+            format!("Friday {word} 3:00 pm"),
+        ] {
+            let expected = if phrase.starts_with("Friday") {
+                "2026-10-09T19:00:00+00:00"
+            } else {
+                "2026-10-08T19:00:00+00:00"
+            };
+            assert_eq!(resolved_utc(NY, NY_THURSDAY, &phrase), expected, "{phrase}");
+        }
+    }
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "today around 10:30 PM"),
+        "2026-10-09T02:30:00+00:00"
+    );
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "tomorrow roughly noon"),
+        "2026-10-09T16:00:00+00:00"
+    );
+    // The approximation word never carries ambiguity of its own.
+    let context = make_context(NY, NY_THURSDAY);
+    let result = TimeResolver::resolve("today around 3 PM", &context).unwrap();
+    assert!(!result.is_ambiguous && result.ambiguity_kind.is_none());
+    assert_eq!(result.original_phrase, "today around 3 PM");
+}
+
+#[test]
+fn qualifiers_after_the_clock_resolve_to_the_stated_clock() {
+    for qualifier in [
+        "ish",
+        "or so",
+        "thereabouts",
+        "approximately",
+        "roughly",
+        "sharp",
+        "exactly",
+        "precisely",
+        "on the dot",
+        "or so sharp",
+    ] {
+        for phrase in [
+            format!("today at 3 PM {qualifier}"),
+            format!("today at 3:00 p.m. {qualifier}"),
+            format!("Friday at 3 pm {qualifier}"),
+        ] {
+            let expected = if phrase.starts_with("Friday") {
+                "2026-10-09T19:00:00+00:00"
+            } else {
+                "2026-10-08T19:00:00+00:00"
+            };
+            assert_eq!(resolved_utc(NY, NY_THURSDAY, &phrase), expected, "{phrase}");
+        }
+    }
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "around 3 PM sharp today"),
+        "2026-10-08T19:00:00+00:00"
+    );
+}
+
+#[test]
+fn ish_attached_to_a_clock_resolves_to_the_stated_clock() {
+    for (phrase, expected) in [
+        ("today at 3pmish", "2026-10-08T19:00:00+00:00"),
+        ("today at 3pm-ish", "2026-10-08T19:00:00+00:00"),
+        ("today at 3:30pmish", "2026-10-08T19:30:00+00:00"),
+        ("today at 3:30 pm-ish", "2026-10-08T19:30:00+00:00"),
+        ("today at 15:30ish", "2026-10-08T19:30:00+00:00"),
+        ("tomorrow morning at 9ish", "2026-10-09T13:00:00+00:00"),
+        ("tomorrow morning at 9:30ish", "2026-10-09T13:30:00+00:00"),
+        ("tomorrow evening around 7-ish", "2026-10-09T23:00:00+00:00"),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+}
+
+#[test]
+fn likelihood_hedges_on_the_time_resolve_as_if_absent() {
+    for (phrase, expected) in [
+        ("probably today around 3 PM", "2026-10-08T19:00:00+00:00"),
+        ("maybe Friday at 3 p.m.", "2026-10-09T19:00:00+00:00"),
+        ("possibly at 3 PM", "2026-10-08T19:00:00+00:00"),
+        (
+            "hopefully tomorrow morning at 9",
+            "2026-10-09T13:00:00+00:00",
+        ),
+        ("perhaps tomorrow at 9 AM", "2026-10-09T13:00:00+00:00"),
+        ("likely Friday 3 pm", "2026-10-09T19:00:00+00:00"),
+        ("today at probably 3 PM", "2026-10-08T19:00:00+00:00"),
+        ("Friday maybe morning at 9", "2026-10-09T13:00:00+00:00"),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+}
+
+#[test]
+fn approximations_keep_the_meridiem_zone_and_day_part_rules() {
+    let context = make_context(NY, NY_THURSDAY);
+    let kind = |phrase: &str| {
+        let result = TimeResolver::resolve(phrase, &context).unwrap();
+        assert!(
+            result.is_ambiguous && result.resolved_time.is_none(),
+            "{phrase}"
+        );
+        result.ambiguity_kind
+    };
+    assert_eq!(
+        kind("Friday around 3"),
+        Some(AmbiguityKind::MissingMeridiem)
+    );
+    assert_eq!(kind("Friday at 3ish"), Some(AmbiguityKind::MissingMeridiem));
+    assert_eq!(
+        kind("Friday around 3 pm EST"),
+        Some(AmbiguityKind::UnsupportedQualifier)
+    );
+    assert_eq!(
+        kind("Friday at 3 pm ish EST"),
+        Some(AmbiguityKind::UnsupportedQualifier)
+    );
+    assert_eq!(
+        kind("tomorrow morning around 9:30 PM"),
+        Some(AmbiguityKind::DayPartConflict)
+    );
+    assert_eq!(
+        kind("tomorrow morning around 1"),
+        Some(AmbiguityKind::MissingMeridiem)
+    );
+    // The day part still supplies the meridiem.
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "tomorrow morning around 9"),
+        "2026-10-09T13:00:00+00:00"
+    );
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "tomorrow morning at 9 or so"),
+        "2026-10-09T13:00:00+00:00"
+    );
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "tomorrow at about 9 in the morning"),
+        "2026-10-09T13:00:00+00:00"
+    );
+    // A clock before now, with no day, is still missing its day.
+    assert_eq!(kind("around 9 AM"), Some(AmbiguityKind::MissingDay));
+    // DST rules are unchanged: 2:30 a.m. does not exist on 2026-03-08 in New York.
+    let spring = make_context(NY, "2026-03-07T15:00:00Z");
+    let result = TimeResolver::resolve("2026-03-08 around 2:30 AM", &spring).unwrap();
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstGap));
+    // Words that are not directly before a clock are not approximations.
+    assert!(TimeResolver::resolve("about tomorrow", &context).is_err());
+}
+
+#[test]
+fn a_restated_day_in_the_split_shape_resolves_as_one_time() {
+    // 2026-10-08 10:00 EDT.
+    for (phrase, expected) in [
+        (
+            "today to cancel the subscription probably today around 3 PM",
+            "2026-10-08T19:00:00+00:00",
+        ),
+        (
+            "today to cancel the subscription today around 3 PM",
+            "2026-10-08T19:00:00+00:00",
+        ),
+        (
+            "today to cancel the subscription probably at 3 PM",
+            "2026-10-08T19:00:00+00:00",
+        ),
+        (
+            "today to cancel the subscription around 3 PM",
+            "2026-10-08T19:00:00+00:00",
+        ),
+        (
+            "Friday to call Sam maybe Friday at about 3 p.m. ish",
+            "2026-10-09T19:00:00+00:00",
+        ),
+        (
+            "today to call Sam at 3 PM or so",
+            "2026-10-08T19:00:00+00:00",
+        ),
+        (
+            "around 3 PM to call the dentist tomorrow",
+            "2026-10-09T19:00:00+00:00",
+        ),
+        (
+            "at roughly 3 PM sharp to call the dentist tomorrow",
+            "2026-10-09T19:00:00+00:00",
+        ),
+    ] {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+    assert_eq!(
+        split_shape_combined_phrase("today to cancel the subscription probably today around 10 AM")
+            .as_deref(),
+        Some("today around 10 AM")
+    );
+    assert_eq!(
+        split_shape_combined_phrase("today to call Sam at 10 AM").as_deref(),
+        Some("today at 10 AM")
+    );
+    // A different day in the task stays a contradiction.
+    let context = make_context(NY, NY_THURSDAY);
+    for phrase in [
+        "today to call Sam tomorrow at 10am",
+        "today to call Sam probably tomorrow around 10am",
+        "today to call Sam tomorrow around 10am",
+    ] {
+        assert!(split_shape_combined_phrase(phrase).is_none(), "{phrase}");
+        assert!(TimeResolver::resolve(phrase, &context).is_err(), "{phrase}");
+    }
+}
+
+fn covers(text: &str, phrase: &str) -> bool {
+    let start = text
+        .find(phrase)
+        .unwrap_or_else(|| panic!("{phrase:?} in {text:?}"));
+    span_covers_time_expression(text, start, start + phrase.len())
+}
+
+#[test]
+fn spans_cover_approximated_and_hedged_expressions() {
+    let trailing = "Remind me to cancel the subscription probably today around 10 AM";
+    for phrase in ["probably today around 10 AM", "today around 10 AM"] {
+        assert!(covers(trailing, phrase), "{phrase}");
+    }
+    for phrase in ["around 10 AM", "10 AM"] {
+        assert!(!covers(trailing, phrase), "{phrase}");
+    }
+    let plain = "Remind me to cancel the subscription today around 10 AM";
+    assert!(covers(plain, "today around 10 AM"));
+    // A span that stops before a trailing qualifier is narrower than the expression.
+    for qualifier in ["ish", "or so", "sharp", "on the dot", "thereabouts"] {
+        let text = format!("Remind me to cancel the subscription today at 10 AM {qualifier}");
+        assert!(
+            covers(&text, &format!("today at 10 AM {qualifier}")),
+            "{qualifier}"
+        );
+        assert!(!covers(&text, "today at 10 AM"), "{qualifier}");
+        let time_first = format!("Remind me today at 10 AM {qualifier} to cancel the subscription");
+        assert!(
+            covers(&time_first, &format!("today at 10 AM {qualifier}")),
+            "{qualifier}"
+        );
+        assert!(!covers(&time_first, "today at 10 AM"), "{qualifier}");
+    }
+    // A hedge or approximation right before the clock belongs to the expression.
+    let hedged_clock = "Remind me probably at 10 AM to cancel the subscription";
+    assert!(covers(hedged_clock, "at 10 AM"));
+    assert!(covers(hedged_clock, "probably at 10 AM"));
+    let hedged_day = "Remind me maybe Friday at 3 p.m. to call Sam";
+    assert!(covers(hedged_day, "Friday at 3 p.m."));
+    assert!(covers(hedged_day, "maybe Friday at 3 p.m."));
+    assert!(covers(
+        "Remind me tomorrow around 9 AM to call Sam",
+        "tomorrow around 9 AM"
+    ));
+}
+
+#[test]
+fn spans_cover_the_split_shape_with_a_restated_day() {
+    let text = "Remind me today to cancel the subscription probably today around 10 AM";
+    for phrase in [
+        "10 AM",
+        "around 10 AM",
+        "today around 10 AM",
+        "probably today around 10 AM",
+        "today to cancel the subscription probably today around 10 AM",
+    ] {
+        assert!(covers(text, phrase), "{phrase}");
+    }
+    let without_hedge = "Remind me today to cancel the subscription today around 10 AM";
+    for phrase in ["10 AM", "around 10 AM", "today around 10 AM"] {
+        assert!(covers(without_hedge, phrase), "{phrase}");
+    }
+    let qualified = "Remind me today to cancel the subscription today at 10 AM ish";
+    assert!(covers(qualified, "10 AM ish"));
+    assert!(covers(qualified, "today at 10 AM ish"));
+    assert!(!covers(qualified, "10 AM"));
+    assert!(!covers(qualified, "today at 10 AM"));
+    // A different day in the task stays uncovered.
+    let contradiction = "Remind me today to call Sam tomorrow around 10 AM";
+    for phrase in ["10 AM", "around 10 AM", "tomorrow around 10 AM"] {
+        assert!(!covers(contradiction, phrase), "{phrase}");
+    }
+}
+
+#[test]
+fn every_other_modifier_keeps_the_time_inexact() {
+    for modifier in [
+        "by",
+        "before",
+        "after",
+        "until",
+        "no later than",
+        "not",
+        "from",
+        "prior to",
+        "sometime",
+        "roughly",
+        "approximately",
+        "about",
+        "like",
+        "ideally",
+        "preferably",
+        "by probably",
+        "until maybe",
+        "no later than maybe",
+        "not maybe",
+    ] {
+        let text = format!("Remind me to cancel the subscription {modifier} Friday at 3 p.m.");
+        assert!(!covers(&text, "Friday at 3 p.m."), "{modifier}");
+        let time_first =
+            format!("Remind me {modifier} Friday at 3 p.m. to cancel the subscription");
+        assert!(!covers(&time_first, "Friday at 3 p.m."), "{modifier}");
+    }
+    // Inside the split shape the modifiers still reject the stretch.
+    for text in [
+        "Remind me today to cancel the subscription by today around 10 AM",
+        "Remind me today to cancel the subscription before today at 10 AM",
+        "Remind me today to cancel the subscription until probably today at 10 AM",
+        "Remind me today to cancel the subscription not today at 10 AM",
+    ] {
+        let start = text.find("today to cancel").unwrap();
+        assert!(
+            split_shape_phrase(text, start, text.len()).is_none(),
+            "{text}"
+        );
+        assert!(!covers(text, "10 AM"), "{text}");
     }
 }

@@ -3292,3 +3292,95 @@ fn a_split_shape_part_the_resolver_cannot_read_is_not_covered() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Approximate and hedged times (F64)
+// ---------------------------------------------------------------------------------------------
+
+/// The maintainer's trial capture (synthetic content): 2026-11-04 07:42 PST in
+/// America/Los_Angeles.
+fn apply_los_angeles_approximate_proposal(
+    text: &str,
+    quoted: &str,
+    instant: &str,
+) -> (Fixture, ReminderDisposition) {
+    let mut fixture = Fixture::captured(text, "2026-11-04T15:42:00Z", "America/Los_Angeles", -480);
+    let lease = fixture.claim_job(0, capture_instant());
+    let proposal = fixture
+        .proposal_for(&lease, 0)
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(text, "cancel the subscription")]))
+        .with_reminder_proposal(Some(ReminderProposal {
+            instant: Some(instant.to_string()),
+            timezone_id: Some("America/Los_Angeles".to_string()),
+            quality: TimeResolutionQuality::Explicit,
+            source_span: Some(span_of(text, quoted)),
+        }));
+    let outcome = fixture.apply(&lease, &proposal).unwrap();
+    (fixture, applied_reminder(outcome))
+}
+
+#[test]
+fn an_approximated_restated_day_reminder_schedules_with_every_span_form() {
+    let text = "Remind me today to cancel the subscription probably today around 10 AM";
+    for quoted in [
+        "10 AM",
+        "around 10 AM",
+        "today around 10 AM",
+        "probably today around 10 AM",
+        "today to cancel the subscription probably today around 10 AM",
+    ] {
+        let (fixture, disposition) =
+            apply_los_angeles_approximate_proposal(text, quoted, "2026-11-04T10:00:00-08:00");
+        assert_scheduled_at(&fixture, disposition, "2026-11-04T10:00:00-08:00");
+
+        let (fixture, disposition) =
+            apply_los_angeles_approximate_proposal(text, quoted, "2026-11-04T22:00:00-08:00");
+        assert_rejected_and_unscheduled_for(quoted, &fixture, disposition);
+    }
+}
+
+#[test]
+fn an_approximated_clock_after_the_task_schedules_at_the_stated_clock() {
+    let text = "Remind me to cancel the subscription today around 10 AM";
+    let quoted = "today around 10 AM";
+    let (fixture, disposition) =
+        apply_los_angeles_approximate_proposal(text, quoted, "2026-11-04T10:00:00-08:00");
+    assert_scheduled_at(&fixture, disposition, "2026-11-04T10:00:00-08:00");
+    let (fixture, disposition) =
+        apply_los_angeles_approximate_proposal(text, quoted, "2026-11-04T22:00:00-08:00");
+    assert_rejected_and_unscheduled_for(quoted, &fixture, disposition);
+
+    // A span that stops before the trailing qualifier is narrower than the time: held.
+    let text = "Remind me to cancel the subscription today at 10 AM ish";
+    let (fixture, disposition) =
+        apply_los_angeles_approximate_proposal(text, "today at 10 AM", "2026-11-04T10:00:00-08:00");
+    assert_held_for_correction(&fixture, disposition);
+    let (fixture, disposition) = apply_los_angeles_approximate_proposal(
+        text,
+        "today at 10 AM ish",
+        "2026-11-04T10:00:00-08:00",
+    );
+    assert_scheduled_at(&fixture, disposition, "2026-11-04T10:00:00-08:00");
+}
+
+#[test]
+fn a_request_hedge_still_leaves_a_clock_request_unscheduled() {
+    // F29 is unchanged: a hedge before the request cue hedges the request, not the time.
+    let text = "Maybe remind me Friday at 3 p.m. to call Sam";
+    let (fixture, disposition) = apply_clock_proposal_with(
+        text,
+        "Friday at 3 p.m.",
+        None,
+        TimeResolutionQuality::Ambiguous,
+        "call Sam",
+    );
+    assert_hedged_and_unscheduled(&fixture, disposition);
+    let (fixture, disposition) = apply_clock_proposal(
+        text,
+        "Friday at 3 p.m.",
+        "2026-10-09T15:00:00-04:00",
+        "call Sam",
+    );
+    assert_rejected_and_unscheduled_for(text, &fixture, disposition);
+}
