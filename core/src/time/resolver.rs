@@ -348,8 +348,7 @@ impl TimeResolver {
             return token;
         };
         let stem = stem.trim_end_matches('-');
-        let attached = token.starts_with(|character: char| character.is_ascii_digit())
-            || Self::parse_meridiem(stem).is_some();
+        let attached = Self::is_clock_stem(stem) || Self::parse_meridiem(stem).is_some();
         if attached && !stem.is_empty() {
             stem
         } else {
@@ -1028,6 +1027,17 @@ impl TimeResolver {
             },
             at_len + 1 + meridiem_tokens,
         ))
+    }
+
+    /// Digits with an optional ":mm" part and meridiem, as a clock takes ("10", "10:30", "3pm"); not a date.
+    fn is_clock_stem(stem: &str) -> bool {
+        let stem = ["a.m.", "p.m.", "a.m", "p.m", "am", "pm"]
+            .iter()
+            .find_map(|meridiem| stem.strip_suffix(meridiem))
+            .unwrap_or(stem);
+        let (hour, minute) = stem.split_once(':').unwrap_or((stem, "00"));
+        let all_digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+        all_digits(hour) && all_digits(minute) && hour.len() <= 2 && minute.len() == 2
     }
 
     fn parse_meridiem(text: &str) -> Option<Meridiem> {

@@ -705,12 +705,22 @@ fn without_likelihood_hedge(words: &[Word]) -> Vec<Word> {
         }
         _ => None,
     };
-    words
+    let mut kept: Vec<Word> = words
         .iter()
         .enumerate()
         .filter(|(index, _)| Some(*index) != hedge_index)
         .map(|(_, word)| word.clone())
-        .collect()
+        .collect();
+    // The comma that stood before the hedge ("roofer, maybe Friday") is the boundary comma
+    // `text_before_span` would have trimmed had the hedge not been in front of the span.
+    if let Some(index) = hedge_index.filter(|index| *index > 0) {
+        if let Some(previous) = kept.get_mut(index - 1) {
+            if let Some(trimmed) = previous.raw.strip_suffix(',') {
+                previous.raw = trimmed.to_string();
+            }
+        }
+    }
+    kept
 }
 
 /// Whether the words between the parts of a split-shape sentence are a task: they open with `to`
@@ -2193,7 +2203,7 @@ mod tests {
             ("Remind me a week from Friday at 3 p.m.", "Friday at 3 p.m."),
             ("Remind me next Friday at 3 p.m.", "Friday at 3 p.m."),
             ("Remind me every Friday at 3 p.m.", "Friday at 3 p.m."),
-            // A relative modifier or a hedge before a day-naming span makes the day inexact.
+            // A relative modifier before a day-naming span makes the day inexact (a likelihood hedge does not).
             ("Remind me before Friday at 3 p.m.", "Friday at 3 p.m."),
             ("Remind me after Friday at 3 p.m.", "Friday at 3 p.m."),
             ("Remind me prior to Friday at 3 p.m.", "Friday at 3 p.m."),
@@ -2219,10 +2229,6 @@ mod tests {
             ),
             (
                 "Remind me by maybe Friday at 3 p.m.",
-                "Friday at 3 p.m.",
-            ),
-            (
-                "Remind me to call the roofer, maybe Friday at 3 p.m.",
                 "Friday at 3 p.m.",
             ),
             (

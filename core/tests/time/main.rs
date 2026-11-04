@@ -1424,6 +1424,37 @@ fn covers(text: &str, phrase: &str) -> bool {
 }
 
 #[test]
+fn ish_attached_to_a_date_is_not_stripped_as_if_it_were_a_clock() {
+    let context = make_context(NY, NY_THURSDAY);
+    for phrase in ["2026-10-12-ish at 10 AM", "2026-10-12ish at 10 AM"] {
+        let result = TimeResolver::resolve(phrase, &context);
+        assert!(
+            result.is_err() || result.is_ok_and(|resolved| resolved.is_ambiguous),
+            "{phrase}"
+        );
+    }
+}
+
+#[test]
+fn a_hedge_after_a_boundary_comma_is_covered_with_or_without_it() {
+    for (text, hedged, bare) in [
+        (
+            "Remind me to cancel the subscription, probably today around 10 AM",
+            "probably today around 10 AM",
+            "today around 10 AM",
+        ),
+        (
+            "Remind me to call the roofer, maybe Friday at 3 p.m.",
+            "maybe Friday at 3 p.m.",
+            "Friday at 3 p.m.",
+        ),
+    ] {
+        assert!(covers(text, hedged), "{hedged}");
+        assert!(covers(text, bare), "{bare}");
+    }
+}
+
+#[test]
 fn spans_cover_approximated_and_hedged_expressions() {
     let trailing = "Remind me to cancel the subscription probably today around 10 AM";
     for phrase in ["probably today around 10 AM", "today around 10 AM"] {
