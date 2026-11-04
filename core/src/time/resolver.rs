@@ -180,6 +180,30 @@ struct DayPartMarker {
     at_night: bool,
 }
 
+/// Words before a day, day part or clock that hedge how likely it is, not what it is.
+const LIKELIHOOD_HEDGES: &[&str] = &[
+    "probably",
+    "maybe",
+    "perhaps",
+    "possibly",
+    "likely",
+    "hopefully",
+];
+
+/// Words directly before a clock that say it is approximate.
+const APPROXIMATION_WORDS: &[&str] = &["around", "about", "approximately", "approx", "roughly"];
+
+/// Single words directly after a clock that qualify it ("or so" and "on the dot" are phrases).
+const CLOCK_QUALIFIER_WORDS: &[&str] = &[
+    "ish",
+    "thereabouts",
+    "approximately",
+    "roughly",
+    "sharp",
+    "exactly",
+    "precisely",
+];
+
 const UNSUPPORTED_QUALIFIER_REASON: &str =
     "Time zone or unrecognized qualifier after the time is not supported yet";
 
@@ -199,7 +223,7 @@ impl TimeResolver {
             return Ok(result);
         }
 
-        let phrase_normalized = phrase.trim().to_lowercase();
+        let phrase_normalized = Self::without_approximations(&phrase.trim().to_lowercase());
 
         Self::validate_context(context)?;
 
@@ -231,6 +255,105 @@ impl TimeResolver {
         }
 
         Err(ResolutionError::InvalidDateFormat(phrase.to_string()))
+    }
+
+    /// The phrase with the words that only soften its time removed: a likelihood hedge before the
+    /// day, day part or clock ("probably today"), an approximation before the clock ("around
+    /// 10 AM", "at about 10") and a qualifier after it ("10 AM ish", "10am-ish", "10 or so",
+    /// "on the dot"). The time is the one stated; no quality or ambiguity comes of the words.
+    /// An approximation that is not directly before a clock stays, and so does anything else.
+    fn without_approximations(phrase_normalized: &str) -> String {
+        let tokens: Vec<&str> = phrase_normalized.split_whitespace().collect();
+        let mut kept: Vec<String> = Vec::with_capacity(tokens.len());
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = tokens[index];
+            let next = tokens.get(index + 1).copied();
+            if LIKELIHOOD_HEDGES.contains(&token) && next.is_some_and(Self::is_hedge_target) {
+                index += 1;
+                continue;
+            }
+            if APPROXIMATION_WORDS.contains(&token) && next.is_some_and(Self::is_clock_start) {
+                if kept.last().map(String::as_str) != Some("at") {
+                    kept.push("at".to_string());
+                }
+                index += 1;
+                continue;
+            }
+            if kept.last().is_some_and(|last| Self::is_clock_end(last)) {
+                if tokens[index..].starts_with(&["on", "the", "dot"]) {
+                    index += 3;
+                    continue;
+                }
+                if tokens[index..].starts_with(&["or", "so"]) {
+                    index += 2;
+                    continue;
+                }
+                if CLOCK_QUALIFIER_WORDS.contains(&token) {
+                    index += 1;
+                    continue;
+                }
+            }
+            kept.push(Self::without_attached_ish(token).to_string());
+            index += 1;
+        }
+        kept.join(" ")
+    }
+
+    fn is_clock_start(token: &str) -> bool {
+        token.starts_with(|character: char| character.is_ascii_digit())
+            || matches!(token, "noon" | "midnight")
+    }
+
+    /// Whether a token can be the last word of a clock: the hour or minutes as written, a
+    /// meridiem, `noon` or `midnight`; not an ISO date.
+    fn is_clock_end(token: &str) -> bool {
+        matches!(token, "noon" | "midnight") || Self::parse_meridiem(token).is_some() || {
+            token.starts_with(|character: char| character.is_ascii_digit())
+                && token
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || ":.".contains(character))
+        }
+    }
+
+    /// Whether a likelihood hedge may sit directly before this word: a day, a day part, a
+    /// lead-in to either, an approximation or a clock.
+    fn is_hedge_target(token: &str) -> bool {
+        Self::is_clock_start(token)
+            || APPROXIMATION_WORDS.contains(&token)
+            || DayPart::from_word(token).is_some()
+            || matches!(
+                token,
+                "today"
+                    | "tomorrow"
+                    | "next"
+                    | "monday"
+                    | "tuesday"
+                    | "wednesday"
+                    | "thursday"
+                    | "friday"
+                    | "saturday"
+                    | "sunday"
+                    | "at"
+                    | "on"
+                    | "this"
+                    | "in"
+            )
+    }
+
+    /// A clock, or the meridiem after one, with `ish` attached ("10ish", "10amish", "10am-ish",
+    /// "10:30ish", "10:30 pm-ish") without it.
+    fn without_attached_ish(token: &str) -> &str {
+        let Some(stem) = token.strip_suffix("ish") else {
+            return token;
+        };
+        let stem = stem.trim_end_matches('-');
+        let attached = Self::is_clock_stem(stem) || Self::parse_meridiem(stem).is_some();
+        if attached && !stem.is_empty() {
+            stem
+        } else {
+            token
+        }
     }
 
     fn is_unsupported_repeat(phrase: &str) -> bool {
@@ -904,6 +1027,17 @@ impl TimeResolver {
             },
             at_len + 1 + meridiem_tokens,
         ))
+    }
+
+    /// Digits with an optional ":mm" part and meridiem, as a clock takes ("10", "10:30", "3pm"); not a date.
+    fn is_clock_stem(stem: &str) -> bool {
+        let stem = ["a.m.", "p.m.", "a.m", "p.m", "am", "pm"]
+            .iter()
+            .find_map(|meridiem| stem.strip_suffix(meridiem))
+            .unwrap_or(stem);
+        let (hour, minute) = stem.split_once(':').unwrap_or((stem, "00"));
+        let all_digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+        all_digits(hour) && all_digits(minute) && hour.len() <= 2 && minute.len() == 2
     }
 
     fn parse_meridiem(text: &str) -> Option<Meridiem> {

@@ -822,6 +822,100 @@
       "notes": "The day part names the morning, so 9:30 AM is stated outright and the local day is 2026-11-03 (capture 2026-11-02 18:02 PST). 09:30 America/Los_Angeles is UTC-08:00 (17:30Z). The request names a target, so the capture is an action and the reminder attaches to it."
     },
     {
+      "id": "clock-approximate",
+      "category": "dates",
+      "input": "Remind me to cancel the subscription today around 10 AM",
+      "provenance": "synthetic, approximate clock (F64)",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "text",
+        "capture_instant": "2026-11-04T15:42:00Z",
+        "device_timezone": "America/Los_Angeles",
+        "notes": "07:42 on 2026-11-04 local, so today around 10 AM is 10:00 that day"
+      },
+      "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 13,
+            "end": 36,
+            "text": "cancel the subscription"
+          }
+        ],
+        "reminder_proposal": {
+          "timezone_id": "America/Los_Angeles",
+          "quality": "explicit",
+          "instant": "2026-11-04T10:00:00-08:00",
+          "source_span": {
+            "start": 37,
+            "end": 55,
+            "text": "today around 10 AM"
+          }
+        }
+      },
+      "forbidden": {
+        "reminder_qualities": [
+          "ambiguous"
+        ],
+        "reminder_timezones": [
+          "UTC"
+        ]
+      },
+      "recoverable": true,
+      "notes": "An approximation before the clock does not change it: 'around 10 AM' is 10:00 America/Los_Angeles (UTC-08:00, 18:00Z) on 2026-11-04, explicit, not ambiguous. The request names a target, so the capture is an action and the reminder attaches to it."
+    },
+    {
+      "id": "day-hedged-restated",
+      "category": "dates",
+      "input": "Remind me today to cancel the subscription probably today around 10 AM",
+      "provenance": "synthetic, restated day behind a likelihood hedge (F64)",
+      "text_basis": "original",
+      "preserve": {
+        "raw_input": true,
+        "user_correction": false
+      },
+      "capture_context": {
+        "capture_type": "text",
+        "capture_instant": "2026-11-04T15:42:00Z",
+        "device_timezone": "America/Los_Angeles",
+        "notes": "07:42 on 2026-11-04 local; the day is named at both ends of the task, and the hedge sits inside the time expression, not before the request"
+      },
+      "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 19,
+            "end": 42,
+            "text": "cancel the subscription"
+          }
+        ],
+        "reminder_proposal": {
+          "timezone_id": "America/Los_Angeles",
+          "quality": "explicit",
+          "instant": "2026-11-04T10:00:00-08:00",
+          "source_span": {
+            "start": 43,
+            "end": 70,
+            "text": "probably today around 10 AM"
+          }
+        }
+      },
+      "forbidden": {
+        "reminder_qualities": [
+          "ambiguous"
+        ],
+        "reminder_timezones": [
+          "UTC"
+        ]
+      },
+      "recoverable": true,
+      "notes": "The hedge 'probably' is about the day and sits inside the time expression, so the request is plain and the time is scheduled as stated: 10:00 America/Los_Angeles (UTC-08:00, 18:00Z) on 2026-11-04. The span may quote the clock, the approximated clock, the trailing expression with or without 'probably', or the whole stretch. The request names a target, so the capture is an action."
+    },
+    {
       "id": "timezone-conflicting",
       "category": "dates",
       "input": "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
