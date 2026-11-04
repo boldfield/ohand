@@ -22,38 +22,33 @@ final class HomeScrollDiagnosticUITests: XCTestCase {
         }
     }
 
-    func testDiagF_auditAllTypesThenScroll() { run("F-audit-all", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: .all) }
-    func testDiagG_auditWithoutDynamicTypeThenScroll() {
+    func testDiagI_scrollThenDynamicTypeAudit() { scrollThenAudit("I-end-dynonly", .dynamicType) }
+    func testDiagJ_scrollThenAuditWithoutDynamicType() {
         var types = XCUIAccessibilityAuditType.all
         types.remove(.dynamicType)
-        run("G-audit-nodyn", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: types)
+        scrollThenAudit("J-end-nodyn", types)
     }
-    func testDiagH_auditDynamicTypeOnlyThenScroll() { run("H-audit-dynonly", ["-OhAndAnnouncementLog", "-OhAndDiagAXFrames"], auditFirst: .dynamicType) }
+    func testDiagK_scrollThenAuditAll() { scrollThenAudit("K-end-all", .all) }
 
-    private func run(_ name: String, _ arguments: [String], auditFirst: XCUIAccessibilityAuditType? = nil) {
+    private func scrollThenAudit(_ name: String, _ types: XCUIAccessibilityAuditType) {
         variant = name
-        app.launchArguments += arguments
+        app.launchArguments += ["-OhAndAnnouncementLog"]
         guard app.launch(fixture: .populated, timeout: 120) else { return log("NO-HOME") }
         _ = app.waitForFixtureReady()
         _ = app.homeCard(containing: "Synthetic").waitForExistence(timeout: 60)
         dismissKeyboard()
-        record("start")
-        if let auditFirst {
-            var count = 0
-            do {
-                try app.performAccessibilityAudit(for: auditFirst) { _ in count += 1; return true }
-                log("AUDIT ran, \(count) issue(s) ignored")
-            } catch {
-                log("AUDIT error \(error)")
-            }
-            Thread.sleep(forTimeInterval: 2)
-            record("after-audit")
-        }
         for _ in 0..<4 { app.swipeUp() }
-        Thread.sleep(forTimeInterval: 1)
-        record("end")
-        Thread.sleep(forTimeInterval: 8)
-        record("end+8s")
+        Thread.sleep(forTimeInterval: 2)
+        record("end-before-audit")
+        var count = 0
+        do {
+            try app.performAccessibilityAudit(for: types) { _ in count += 1; return true }
+            log("AUDIT ran, \(count) issue(s) ignored")
+        } catch {
+            log("AUDIT error \(error)")
+        }
+        Thread.sleep(forTimeInterval: 2)
+        record("end-after-audit")
         probeTap(atY: app.frame.height * 0.45)
     }
 
