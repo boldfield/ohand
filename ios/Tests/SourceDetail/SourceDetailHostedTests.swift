@@ -29,8 +29,7 @@ final class SourceDetailHostedTests: XCTestCase {
     private static let routeID = "route-source-detail-hosted"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
     private var services: AppServices!
@@ -43,8 +42,7 @@ final class SourceDetailHostedTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("source-detail-hosted-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
         let lifecycle = LifecycleCoordinator()
@@ -76,8 +74,7 @@ final class SourceDetailHostedTests: XCTestCase {
         services.shutDown()
         services = nil
         root = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

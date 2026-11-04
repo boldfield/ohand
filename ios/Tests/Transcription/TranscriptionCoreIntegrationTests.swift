@@ -85,23 +85,20 @@ private final class TranscriptionAnswerBox<Value>: @unchecked Sendable {
 /// claimed here.
 final class TranscriptionCoreIntegrationTests: IngressStorageTestCase {
     private let reference = "FinalizedAudio/clip-1.m4a"
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var sessions: [AnyObject] = []
     private var closers: [() -> Void] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDown() {
         closers.forEach { $0() }
         closers = []
         sessions = []
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

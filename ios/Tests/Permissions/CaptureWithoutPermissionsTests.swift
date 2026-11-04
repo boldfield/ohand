@@ -52,7 +52,7 @@ final class CaptureWithoutPermissionsTests: XCTestCase {
 
     func testFreshInstallWithNoProviderAndDeniedNotificationsSavesAndRetrievesASilentCapture() throws {
         let storageRoot = directory.appendingPathComponent("storage", isDirectory: true)
-        let baselineBuffers = CoreHandle.liveResultBufferCount
+        let baselineBuffers = CoreLeakBaseline.capture().buffers
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         let deniedCenter = FakeNotificationCenter()
         deniedCenter.authorizationStatus = .denied

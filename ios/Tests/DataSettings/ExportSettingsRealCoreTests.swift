@@ -16,16 +16,14 @@ final class ExportSettingsRealCoreTests: XCTestCase {
     private static let endpointSentinel = "https://private-endpoint.invalid/v1"
     private static let credentialSentinel = "keychain:credential-sentinel"
 
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreDeletionWorld!
     private var session: RealCoreExportSession!
     private var readSession: ReadAuthenticationSession!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreDeletionWorld()
         try Self.execute(
             world.databasePath,
@@ -53,8 +51,7 @@ final class ExportSettingsRealCoreTests: XCTestCase {
         session = nil
         world?.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

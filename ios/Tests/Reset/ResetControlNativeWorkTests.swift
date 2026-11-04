@@ -6,22 +6,19 @@ import XCTest
 /// over the production `ResetService`, the reset fixture's real marker files and the real Rust core. Everything is
 /// synthetic. The tests are synchronous because the fixture pumps the main run loop for the core's answers.
 final class ResetControlNativeWorkTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreResetWorld!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreResetWorld()
     }
 
     override func tearDown() {
         world?.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

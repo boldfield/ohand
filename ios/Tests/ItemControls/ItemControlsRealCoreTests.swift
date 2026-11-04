@@ -56,8 +56,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
     private static let captureText = "synthetic capture for item controls"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
     private var retainedWindow: UIWindow?
@@ -68,8 +67,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("item-controls-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
         root = try makeRoot()
@@ -80,8 +78,7 @@ final class ItemControlsRealCoreTests: XCTestCase {
         retainedWindow = nil
         root?.shutDown()
         root = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

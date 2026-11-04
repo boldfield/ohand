@@ -50,8 +50,7 @@ private final class PrivacySaveOutcomeBox: @unchecked Sendable {
 final class PrivacySettingsRealCoreTests: XCTestCase {
     private static let interpretableText = "Remind me 2099-01-15 11:00:00 to call the roofer about the quarterly estimate"
 
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreRetentionWorld!
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
@@ -72,8 +71,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         sender = PrivacyUnreachableSender()
         credentialService = CredentialService(
             serviceName: "com.boldfield.ohand.tests.privacy-settings.\(UUID().uuidString)", keychain: keychain)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreRetentionWorld()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
@@ -85,8 +83,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         root = nil
         world.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

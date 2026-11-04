@@ -8,8 +8,7 @@ import XCTest
 final class ShadowReviewServiceTests: ProviderTransportTestCase {
     private var storeDirectory: URL!
     private var session: ShadowReviewSession?
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private let instrumentation = RecordingInstrumentation()
 
     private let enabledPolicy = ShadowReviewPolicy(
@@ -17,8 +16,7 @@ final class ShadowReviewServiceTests: ProviderTransportTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-shadow-review-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -27,8 +25,7 @@ final class ShadowReviewServiceTests: ProviderTransportTestCase {
     override func tearDown() {
         session?.close()
         session = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core was released")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was released")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storeDirectory)
         super.tearDown()
     }

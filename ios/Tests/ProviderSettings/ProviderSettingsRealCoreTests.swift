@@ -107,8 +107,7 @@ private final class LostSaveAnswerControls: ProviderSettingsControlling, @unchec
 /// validation, versioning and default pointer.
 @MainActor
 final class ProviderSettingsRealCoreTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var world: RealCoreRetentionWorld!
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
@@ -123,8 +122,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         credentialService = CredentialService(
             serviceName: "com.boldfield.ohand.tests.provider-settings.\(UUID().uuidString)", keychain: keychain)
         sender = CheckingProviderSettingsSender(credentials: credentialService)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         world = try RealCoreRetentionWorld()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
@@ -136,8 +134,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         root = nil
         world.tearDown()
         world = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

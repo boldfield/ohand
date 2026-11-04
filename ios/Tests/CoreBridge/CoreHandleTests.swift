@@ -6,18 +6,15 @@ import OhandCoreC
 /// Exercises the real Rust core through the Swift wrapper on the simulator. Events arrive on
 /// the Rust worker thread and are hopped to the main queue, which is where XCTest runs.
 final class CoreHandleTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUp() {
         super.setUp()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDown() {
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 
@@ -26,9 +23,9 @@ final class CoreHandleTests: XCTestCase {
     func testRepeatedOpenAndCloseReturnsEveryCounterToItsBaseline() throws {
         for _ in 0..<25 {
             let core = try CoreHandle()
-            XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles + 1)
+            XCTAssertEqual(CoreHandle.liveHandleCount, coreLeakBaseline.handles + 1)
             core.close()
-            XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
+            XCTAssertEqual(CoreHandle.liveHandleCount, coreLeakBaseline.handles)
         }
     }
 
@@ -47,9 +44,9 @@ final class CoreHandleTests: XCTestCase {
         autoreleasepool {
             let core = try? CoreHandle()
             XCTAssertNotNil(core)
-            XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles + 1)
+            XCTAssertEqual(CoreHandle.liveHandleCount, coreLeakBaseline.handles + 1)
         }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
+        XCTAssertEqual(CoreHandle.liveHandleCount, coreLeakBaseline.handles)
     }
 
     func testFileBackedStoreOpensAndReopens() throws {
@@ -425,7 +422,7 @@ final class CoreHandleTests: XCTestCase {
         wait(for: [firstEvent], timeout: 20)
         pumpMainQueue(seconds: 0.5)
         XCTAssertEqual(deliveredCount, 1)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
+        XCTAssertEqual(CoreHandle.liveHandleCount, coreLeakBaseline.handles)
     }
 
     func testRawCloseAndHandlerReplacementFromInsideARawCallbackAreRejected() throws {

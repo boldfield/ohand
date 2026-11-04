@@ -10,8 +10,7 @@ import OhAndCoreBridge
 /// checked together with what the navigation model decided.
 final class ManagementPresentationTests: XCTestCase {
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var services: AppServices!
     private var retainedWindow: UIWindow?
     private var scope: CompositionReadScope = .captureOnly
@@ -24,8 +23,7 @@ final class ManagementPresentationTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("management-presentation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = settledLiveResultBufferCount()
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
             configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
@@ -49,13 +47,7 @@ final class ManagementPresentationTests: XCTestCase {
         navigation = nil
         services.shutDown()
         services = nil
-        // A core read issued before the shutdown completes on its own queue; wait for its buffer to be freed.
-        let bufferDeadline = Date().addingTimeInterval(5)
-        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < bufferDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

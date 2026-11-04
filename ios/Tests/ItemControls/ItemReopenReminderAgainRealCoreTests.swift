@@ -21,8 +21,7 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
     private static let formerInstant = "2090-01-01T09:00:00Z"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var center: FakeNotificationCenter!
     private var root: ServiceCompositionRoot!
     private var retainedWindow: UIWindow?
@@ -36,8 +35,7 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("item-reopen-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         session.authenticate(reason: "test") { _ in }
         center = FakeNotificationCenter()
@@ -56,8 +54,7 @@ final class ItemReopenReminderAgainRealCoreTests: XCTestCase {
         retainedWindow = nil
         root?.shutDown()
         root = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

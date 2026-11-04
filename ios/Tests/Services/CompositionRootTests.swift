@@ -224,38 +224,17 @@ final class CompositionRootTests: XCTestCase {
     private static let captureText = "Remind me 2099-01-15 11:00:00 to call the roofer about the quarterly estimate"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("composition-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        // The previous test's resumed reset can still be finishing on a background task; take the baseline only once
-        // the process-wide counts have stopped moving (two equal reads a moment apart), bounded.
-        var previousHandles = -1
-        var previousBuffers = -1
-        _ = pump(
-            until: {
-                let handles = CoreHandle.liveHandleCount
-                let buffers = CoreHandle.liveResultBufferCount
-                defer { previousHandles = handles; previousBuffers = buffers }
-                return handles == previousHandles && buffers == previousBuffers
-            },
-            timeout: 10)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
     }
 
     override func tearDownWithError() throws {
-        // A core read issued before a root's shutdown (a lifecycle step, a health or status read) completes on its own
-        // queue, so its result buffer is freed a moment after the test body ends. Wait for that, bounded, before
-        // judging a leak; a buffer that is still outstanding after the wait is a real one.
-        _ = pump(
-            until: { CoreHandle.liveResultBufferCount == self.baselineBuffers && CoreHandle.liveHandleCount == self.baselineHandles },
-            timeout: 10)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

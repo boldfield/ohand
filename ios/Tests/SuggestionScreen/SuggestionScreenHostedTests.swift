@@ -53,8 +53,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
     private static let offerText = "synthetic action shown on the suggestion screen"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var services: AppServices!
     private var retainedWindow: UIWindow?
     private var scope: CompositionReadScope = .captureOnly
@@ -67,8 +66,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("suggestion-hosted-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
             configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
@@ -92,8 +90,7 @@ final class SuggestionScreenHostedTests: XCTestCase {
         navigation = nil
         services.shutDown()
         services = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
     }
 

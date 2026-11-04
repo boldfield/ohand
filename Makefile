@@ -57,6 +57,7 @@ release-test:
 ios-check:
 	$(PYTHON) ios/scripts/check_project_config.py
 	$(PYTHON) ios/scripts/check_font_tokens.py
+	$(PYTHON) ios/scripts/check_test_leak_baseline.py
 	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose
 
 # ios-credential-probe: Ad-hoc signed simulator build of CredentialProbe (macOS with Xcode only).

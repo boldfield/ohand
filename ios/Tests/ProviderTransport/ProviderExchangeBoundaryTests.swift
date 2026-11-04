@@ -10,13 +10,11 @@ import XCTest
 final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
     private var storeDirectory: URL!
     private var session: ProviderExchangeSession?
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         storeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-provider-exchange-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
@@ -25,8 +23,7 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
     override func tearDown() {
         session?.close()
         session = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core was released")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was released")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storeDirectory)
         super.tearDown()
     }
@@ -242,7 +239,7 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
         XCTAssertTrue(session.pump(until: { server.requests.count == 1 && !session.events(for: operationID).isEmpty }))
         session.close()
 
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
+        coreLeakBaseline.assertHandlesReturned()
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         XCTAssertEqual(
             session.events(for: operationID).count, 1,

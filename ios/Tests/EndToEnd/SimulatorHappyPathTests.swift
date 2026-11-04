@@ -65,8 +65,7 @@ private final class ReceiptBox: @unchecked Sendable {
 /// `FailureJourneys`.
 final class SimulatorHappyPathTests: XCTestCase {
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var services: AppServices!
     private var sender: CountingOfflineSender!
     private var center: FakeNotificationCenter!
@@ -91,8 +90,7 @@ final class SimulatorHappyPathTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("end-to-end-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         sender = CountingOfflineSender()
         center = FakeNotificationCenter()
         retrieval = RetrievalSearchModule(calendar: utcCalendar)
@@ -130,8 +128,7 @@ final class SimulatorHappyPathTests: XCTestCase {
         settleBackgroundWork()
         services.shutDown()
         services = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }

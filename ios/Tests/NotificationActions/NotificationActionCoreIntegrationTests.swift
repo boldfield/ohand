@@ -14,8 +14,7 @@ private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
 /// The item and its two schedule generations are seeded into the closed store file because no export creates reminders
 /// yet. Generation 1 was superseded by generation 2, and both were handed to the OS.
 final class NotificationActionCoreIntegrationTests: XCTestCase {
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var rootDirectory: URL!
 
     private let itemID = "7d1c5a1e-0000-4000-8000-000000000001"
@@ -29,8 +28,7 @@ final class NotificationActionCoreIntegrationTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         rootDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ohand-action-integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
@@ -39,8 +37,7 @@ final class NotificationActionCoreIntegrationTests: XCTestCase {
 
     override func tearDown() {
         try? FileManager.default.removeItem(at: rootDirectory)
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every opened core was closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "every result buffer was freed")
+        coreLeakBaseline.check()
         super.tearDown()
     }
 

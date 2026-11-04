@@ -29,8 +29,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
     private static let routeID = "route-retrieval-navigation"
 
     private var storageRoot: URL!
-    private var baselineHandles = 0
-    private var baselineBuffers = 0
+    private var coreLeakBaseline = CoreLeakBaseline.empty
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
     private var services: AppServices!
@@ -46,8 +45,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("retrieval-navigation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
-        baselineHandles = CoreHandle.liveHandleCount
-        baselineBuffers = CoreHandle.liveResultBufferCount
+        coreLeakBaseline = CoreLeakBaseline.capture()
         session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         let lifecycle = LifecycleCoordinator()
         root = try ServiceCompositionRoot(
@@ -80,8 +78,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         services.shutDown()
         services = nil
         root = nil
-        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        coreLeakBaseline.check()
         try? FileManager.default.removeItem(at: storageRoot)
         try super.tearDownWithError()
     }
