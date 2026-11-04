@@ -54,7 +54,7 @@ The audit log has one line per decision:
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
 | `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
-| `MOVED` | the audit scrolled the screen by the given number of points; its issues are decided where it left the screen, which a second screenshot (`<screen>-audited`) shows | no |
+| `MOVED` | the audit scrolled the screen by the given number of points; a second screenshot (`<screen>-audited`) shows where it left it. Issues are still decided against the snapshot taken before the audit | no |
 | `FRAMES` | a tap at the card the accessibility frames place in the middle of the clear band opened that card (a mismatch is an `ISSUE`) | no |
 | `RELAUNCH` | the first launch did not reach home and the app was launched once more | no |
 
@@ -151,10 +151,12 @@ it scrolls under the header; the test keeps settling until each excuse has had i
 **The audit scrolls.** `performAccessibilityAudit` scrolls a screen while it checks its elements and leaves it
 elsewhere, at both sizes and with or without `.dynamicType`: a scrolled Home list ends near its top (run 41758689823:
 Today at y = 139 after the audit at the largest size, wherever the list was before it), and Settings, source detail and
-the erase confirmation move by more than 1000 points at the largest size (run 41761876914). So the test decides every issue against a snapshot taken after the audit returns, where the issues'
-elements are, logs `MOVED` with the distance, and saves a second screenshot (`<screen>-audited`, half width) of where
-the audit left the screen. A glass-list element is `CLEAR` only if it is unobstructed both where the test scrolled it
-and where the audit left it.
+the erase confirmation move by more than 1000 points at the largest size (run 41761876914). It checks what is on screen
+where it stands before it scrolls: deciding issues against a snapshot taken after it (tried in runs 41761876914 and
+41767301394) judged contrast issues raised under the glass at positions clear of it, and never settled the last card. So the test decides every issue against the snapshot and the
+screenshot taken just before the audit, as before, logs `MOVED` with the distance when the audit has moved the screen,
+and saves a second screenshot (`<screen>-audited`, half width) of where it left it. That is where a repeated audit
+(`RETRY`) starts, and the repeat decides against its own snapshot taken there.
 
 Earlier rounds read this as stale accessibility frames (runs 41702917752, 41711242088, 41720210504): the screenshot was
 taken before the audit and the logged frames after it. The frames are not stale. Diagnostic runs 41752990749,
@@ -166,9 +168,10 @@ middle of the clear band with the list scrolled to its end, and `testHomePopulat
 audit has moved the list (`FRAMES`; a mismatch fails). The device procedure checks the same on hardware with VoiceOver
 (part 3, step 12).
 
-**At the largest size, Home.** After the audit has returned the list near its top, only the first card lies between the
-header and the composer at the largest size, so a card further down cannot be clear both where the test scrolled it and
-where the audit leaves it. An element still owed at the end of a test at the largest size is therefore settled by the
+**At the largest size, Home.** An audit that found something is repeated from where the first pass left the screen,
+and the audit returns a scrolled Home list near its top, where at the largest size only the first card lies between the
+header and the composer (run 41730405313: `home-populated-end` was repeated on the list back at its top). So a card
+further down may never be audited clear there. An element still owed at the end of a test at the largest size is therefore settled by the
 default-size run's unobstructed audit of the same element (`CLEAR-AT-DEFAULT`; the default run writes what it settled
 to `settled-default.txt`). Contrast is a property of the element's colours, which do not change with the text size; the
 largest size only lowers the bar for large text. A Home card is named by its text without the age in its caption, so

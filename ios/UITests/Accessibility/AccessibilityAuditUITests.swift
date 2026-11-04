@@ -124,10 +124,10 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// At the largest size, an element still owed is settled by the default-size run's unobstructed audit of the same
     /// element (same card, identifier and label). Contrast is a property of the element's colours, which do not change
     /// with the text size; the largest size only lowers the bar for large text. This is needed for the Home list: the
-    /// audit itself scrolls the list back near its top (`MOVED`; run 41758689823), and at the largest size only the first
-    /// card then lies between the header and the composer, so a card further down cannot be clear both where the test
-    /// scrolled it and where the audit leaves it. The accessibility frames are not stale: in that run the snapshot, the
-    /// app's own accessibility frames, the drawn frames and a tap agree before and after the audit
+    /// audit itself scrolls the list back near its top (`MOVED`; run 41758689823), and an audit that found something is
+    /// repeated from there, where at the largest size only the first card lies between the header and the composer (run
+    /// 41730405313: `home-populated-end` was repeated on the list back at its top). The accessibility frames are not
+    /// stale: the snapshot, the app's own accessibility frames, the drawn frames and a tap agree before and after the audit
     /// (`testHomeFramesMatchWhatIsDrawn` keeps checking it).
     private func settleFromTheDefaultSize() {
         guard sizeName == "xxxl", !ledger.unsettled.isEmpty else { return }
@@ -420,8 +420,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// except `.dynamicType`, whose resize probe measures the scroll view's geometry and not the fonts (the deterministic
     /// replacement is `ios/scripts/check_font_tokens.py`; docs/validation/accessibility.md). An issue that is neither in
     /// `isExempt` nor excused by the glass ledger fails the test, and so does an audit that cannot run. The audit can
-    /// scroll the screen; when it does, the log says by how much (`MOVED`), a second screenshot shows where it left the
-    /// screen, and the issues are decided there.
+    /// scroll the screen; when it does, the log says by how much (`MOVED`) and a second screenshot shows where it left the
+    /// screen. Issues are decided against the snapshot and screenshot taken just before the audit.
     private func audit(_ screen: String, checksLabels: Bool = true) {
         capture(screen)
         currentScreen = screen
@@ -435,10 +435,12 @@ final class AccessibilityAuditUITests: XCTestCase {
         var issueCount = 0
         for attempt in 1...2 {
             let before = screenElements()
+            // Pixels from the same moment as the snapshot, for text drawn on glass (`measuredContrast`).
+            let beforeImage = app.screenshot().image.cgImage
             var raised: [RaisedIssue] = []
             var auditError: Error?
             do {
-                // Issues are copied here and decided once the audit has returned, against the screen as it left it.
+                // Issues are copied here and decided once the audit has returned.
                 try app.performAccessibilityAudit(for: auditTypes) { issue in
                     raised.append(RaisedIssue(issue))
                     return true
@@ -453,13 +455,20 @@ final class AccessibilityAuditUITests: XCTestCase {
                 XCTFail("\(screen): the accessibility audit did not run: \(auditError)")
                 break
             }
-            // The audit scrolls while it checks: it leaves a scrolled Home list near its top at either size, and moves
-            // longer screens by more (runs 41758689823 and 41761876914; the snapshot, the in-app accessibility frames, the
-            // drawn frames and a tap agree after it). So every decision below uses the snapshot taken after it, which is
-            // where the issues' elements are.
-            let elements = screenElements()
+            // The audit checks what is on screen where it stands, then scrolls to reach the rest and leaves the screen
+            // elsewhere (a scrolled Home list ends near its top; longer screens move further: runs 41758689823,
+            // 41761876914 and 41767301394, where the snapshot, the in-app accessibility frames, the drawn frames and a tap
+            // agree after it). Issues are decided against the snapshot taken before it, where the test put each element;
+            // the movement is logged, and a second screenshot shows where the audit left the screen, which is where a
+            // retry starts.
+            let after = screenElements()
+            let movedBy = Self.movement(from: before, to: after)
+            if let movedBy {
+                auditLines.append("MOVED \(screen): the audit scrolled the content by \(Int(movedBy.rounded())) pt (screenshot \(screen)-audited)")
+                capture("\(screen)-audited")
+            }
+            let elements = before
             let band = clearBand(from: elements)
-            let movedBy = Self.movement(from: before, to: elements)
             var trialLedger = ledger
             var trialOwed: [String: GlassPlacement] = [:]
             var notes: [String] = []
@@ -474,7 +483,7 @@ final class AccessibilityAuditUITests: XCTestCase {
                     if let shown { flaggedKeys.insert(shown.key) }
                     let decision = trialLedger.decide(
                         contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
-                        others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame) } })
+                        others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame, in: beforeImage) } })
                     let shownFrame = shown?.frame.debugDescription ?? "not shown"
                     switch decision {
                     case .owed:
@@ -498,21 +507,11 @@ final class AccessibilityAuditUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 3)
                 continue
             }
-            if let movedBy {
-                notes.insert("MOVED \(screen): the audit scrolled the content by \(Int(movedBy.rounded())) pt; decisions use where it left it (screenshot \(screen)-audited)", at: 0)
-                capture("\(screen)-audited")
-            }
             ledger = trialLedger
             owedPlacements.merge(trialOwed) { first, _ in first }
             auditLines += notes
-            // Settled only by an element unobstructed both where the test brought it and where the audit left it.
-            let bandBefore = clearBand(from: before)
-            let listed = elements.compactMap { element -> (element: ScreenElement, placement: GlassPlacement)? in
-                guard let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band),
-                      let earlier = before.first(where: { $0.key == element.key }),
-                      GlassContrastLedger.isUnobstructed(earlier, placement: placement, clearBand: bandBefore, screen: screenFrame, others: before)
-                else { return nil }
-                return (element: element, placement: placement)
+            let listed = elements.compactMap { element in
+                glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band).map { (element, $0) }
             }
             let settled = ledger.recordStop(screen, listed: listed, flaggedKeys: flaggedKeys, clearBand: band, screen: screenFrame, others: elements)
             for element in settled {
@@ -733,10 +732,11 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// iPhone simulators the job uses.
     private static let statusBarBottom: CGFloat = 50
 
-    /// The contrast of the text in `frame` as a person sees it, from the screenshot pixels (`ScreenshotContrast`). Called
-    /// only for text drawn on glass with nothing else overlapping its frame, so the darkest glyph in the crop is its own.
-    private func measuredContrast(of frame: CGRect) -> Double? {
-        guard let image = app.screenshot().image.cgImage else { return nil }
+    /// The contrast of the text in `frame` as a person sees it, from the pixels of `image`, the screenshot taken with the
+    /// snapshot before the audit (`ScreenshotContrast`). Called only for text drawn on glass with nothing else overlapping
+    /// its frame in that snapshot, so the darkest glyph in the crop is its own.
+    private func measuredContrast(of frame: CGRect, in image: CGImage?) -> Double? {
+        guard let image else { return nil }
         let screenWidth = app.frame.width
         guard screenWidth > 0 else { return nil }
         let scale = CGFloat(image.width) / screenWidth
