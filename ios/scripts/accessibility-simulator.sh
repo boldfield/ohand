@@ -5,7 +5,7 @@
 # compile runs beside a booted simulator.
 # Usage: accessibility-simulator.sh <simulator-udid> <evidence-dir>
 # Output: <evidence-dir>/accessibility/{audit-<size>.log, <size>-*.png}, accessibility-<size>.log, accessibility-<size>.xcresult. macOS only.
-# The audit log has one line per decision: ISSUE, ERROR, UNVERIFIED, EXEMPT, OWED, CLEAR, CLEAR-AT-DEFAULT, MEASURED,
+# The audit log has one line per decision: ISSUE, ERROR, UNVERIFIED, EXEMPT, OWED, CLEAR, CLEAR-AT-DEFAULT, MEASURED, MOVED, FRAMES,
 # RELAUNCH, then PASS or FAIL per screen. settled-<size>.txt lists what each size audited unobstructed; the largest-size
 # run reads settled-default.txt.
 set -euo pipefail
@@ -59,7 +59,6 @@ for size in default xxxl; do
       -destination "platform=iOS Simulator,id=${udid}" \
       -derivedDataPath .derived/Accessibility \
       -resultBundlePath "${evidence_dir}/accessibility-${size}.xcresult" \
-      -only-testing:OhAndAccessibilityUITests/HomeScrollDiagnosticUITests \
       CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
   ) 2>&1 | tee -a "${evidence_dir}/accessibility-${size}.log" || run_status=$?
   if [ "${run_status}" -ne 0 ]; then
@@ -71,7 +70,7 @@ kill "${matcher_pid}" 2>/dev/null || true
 
 # What the audits found, in the log that goes into the artifact.
 for size in default xxxl; do
-  grep -E "^(ISSUE|ERROR|UNVERIFIED|EXEMPT|OWED|CLEAR|CLEAR-AT-DEFAULT|MEASURED|RELAUNCH|PASS|FAIL) " "${output_dir}/audit-${size}.log" 2>/dev/null || true
+  grep -E "^(ISSUE|ERROR|UNVERIFIED|EXEMPT|OWED|CLEAR|CLEAR-AT-DEFAULT|MEASURED|MOVED|FRAMES|RELAUNCH|PASS|FAIL) " "${output_dir}/audit-${size}.log" 2>/dev/null || true
 done | tee "${evidence_dir}/accessibility-summary.txt"
 
 if [ "${test_status}" -ne 0 ]; then

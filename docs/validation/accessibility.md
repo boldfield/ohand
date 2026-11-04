@@ -21,6 +21,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 | --- | --- | --- |
 | Home, empty | `testHomeEmpty` | empty-first-run |
 | Home, populated | `testHomePopulated` | populated |
+| Home, populated: the accessibility frames match what is drawn after a scroll and after an audit (a tap check, no audit) | `testHomeFramesMatchWhatIsDrawn` (and the end of `testHomePopulated`) | populated |
 | Capture, voice idle | `testCaptureVoiceIdle` | empty-first-run |
 | Capture, voice recording | `testCaptureVoiceRecording` | empty-first-run |
 | Capture, silent text entry | `testCaptureSilentTextEntry` | empty-first-run |
@@ -53,6 +54,8 @@ The audit log has one line per decision:
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
 | `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
+| `MOVED` | the audit scrolled the screen by the given number of points; its issues are decided where it left the screen, which a second screenshot (`<screen>-audited`) shows | no |
+| `FRAMES` | a tap at the card the accessibility frames place in the middle of the clear band opened that card (a mismatch is an `ISSUE`) | no |
 | `RELAUNCH` | the first launch did not reach home and the app was launched once more | no |
 
 `ios/scripts/accessibility-simulator.sh` fails the job on any `ISSUE`, `ERROR`, `UNVERIFIED` or `FAIL` line, or when a
@@ -127,8 +130,7 @@ snapshot of the screen taken just before the audit:
   screen), the issue is real and fails. Otherwise it is excused at that stop (`OWED`), and the same test must audit the
   element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
   element into the middle of the clear band, dragging down the left margin beside the cards (a drag started on a
-  card moves the list but leaves the app's accessibility frames at its top; the right edge would catch the scroll
-  indicator, which scrubs the whole list), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
+  card would press it; the right edge would catch the scroll indicator, which scrubs the whole list), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
   `<first screen of the test>-settle-<n>`); an
   element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
   it is on the list, never something else that shares its frame.
@@ -146,14 +148,30 @@ glass, which is 20 points above its field, placeholder or "Recording" line (the 
 Saved pill above the composer lowers it to 8 points above that line. A settle stop can owe something new, such as a card
 it scrolls under the header; the test keeps settling until each excuse has had its own stop (at most 12).
 
-**At the largest size, Home.** After the Home list scrolls at the largest size, the app's accessibility frames, which
-the audit and the snapshot both read, can stay near the top of the list while the screen shows another part of it: in
-runs 41702917752, 41711242088 and 41720210504 the screenshots in the artifact and the logged frames disagree. A scrolled
-stop there proves nothing either way. So at the largest size, an element still owed at the end of a test is first
-settled by the default-size run's unobstructed audit of the same element (`CLEAR-AT-DEFAULT`; the default run writes
-what it settled to `settled-default.txt`). Contrast is a property of the element's colours, which do not change with the
-text size; the largest size only lowers the bar for large text. A Home card is named by its text without the age in its
-caption, so the same card matches across launches and sizes. Only what neither size settles is scrolled to and audited.
+**The audit scrolls.** `performAccessibilityAudit` moves a scrolled Home list back near its top, at both sizes and
+with or without `.dynamicType` (run 41758689823: Today at y = 139 after the audit at the largest size, wherever the list
+was before it). So the test decides every issue against a snapshot taken after the audit returns, where the issues'
+elements are, logs `MOVED` with the distance, and saves a second screenshot (`<screen>-audited`, half width) of where
+the audit left the screen. A glass-list element is `CLEAR` only if it is unobstructed both where the test scrolled it
+and where the audit left it.
+
+Earlier rounds read this as stale accessibility frames (runs 41702917752, 41711242088, 41720210504): the screenshot was
+taken before the audit and the logged frames after it. The frames are not stale. Diagnostic runs 41752990749,
+41755533965 and 41758689823 (temporary instrumentation, since removed) compared, after scrolling and after audits, at
+both sizes: XCTest's snapshot frames, the frames the app's own accessibility elements report in process (what VoiceOver
+reads), the frames SwiftUI draws the cards at, the screenshot, and the card a tap at the reported frame opens. All five
+agreed in every case. The gate keeps checking it: `testHomeFramesMatchWhatIsDrawn` taps the card the frames place in the
+middle of the clear band with the list scrolled to its end, and `testHomePopulated` does the same after the end stop's
+audit has moved the list (`FRAMES`; a mismatch fails). The device procedure checks the same on hardware with VoiceOver
+(part 3, step 12).
+
+**At the largest size, Home.** After the audit has returned the list near its top, only the first card lies between the
+header and the composer at the largest size, so a card further down cannot be clear both where the test scrolled it and
+where the audit leaves it. An element still owed at the end of a test at the largest size is therefore settled by the
+default-size run's unobstructed audit of the same element (`CLEAR-AT-DEFAULT`; the default run writes what it settled
+to `settled-default.txt`). Contrast is a property of the element's colours, which do not change with the text size; the
+largest size only lowers the bar for large text. A Home card is named by its text without the age in its caption, so
+the same card matches across launches and sizes. Only what neither size settles is scrolled to and audited.
 
 `GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a low-contrast element under
 the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
@@ -212,8 +230,8 @@ size; and, with a keyboard, Tab reaches every control and Space or Return activa
 9. Status with a reminder that needs a time: open the note from Status.
 10. Locked screen: background and reopen the app, listen for the lock announcement; reach and activate Unlock; confirm the authentication prompt appears and can be answered, and that there is no state with nothing to activate.
 11. First run: with permissions not yet asked, open Settings, Permissions.
-12. Home, populated, at the largest text size with VoiceOver on (the gate's frame-agreement check, part 1, is the
-    simulator's view of this): scroll the list to its end, once with a one-finger drag (VoiceOver off for the drag, then
+12. Home, populated, at the largest text size with VoiceOver on (the gate's `FRAMES` check, part 1, is the simulator's
+    view of this): scroll the list to its end, once with a one-finger drag (VoiceOver off for the drag, then
     on) and once with a three-finger swipe up. At each end position, drag one finger slowly over the cards (touch
     exploration), then swipe right through them. Confirm that the focus ring surrounds the card drawn under the finger,
     that the card read aloud is the card drawn there, and that a double tap opens that card. Record any mismatch as a

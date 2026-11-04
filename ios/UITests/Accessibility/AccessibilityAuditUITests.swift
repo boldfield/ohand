@@ -1,6 +1,32 @@
 import UIKit
 import XCTest
 
+/// An audit issue as the handler saw it: its element's identifier, label, frame and type are copied there, because the
+/// element may be gone (scrolled out of a lazy list) by the time the audit returns and the issue is decided.
+@available(iOS 17.0, *)
+struct RaisedIssue {
+    struct Element {
+        let identifier: String
+        let label: String
+        let frame: CGRect
+        let elementType: XCUIElement.ElementType
+    }
+
+    let auditType: XCUIAccessibilityAuditType
+    let compactDescription: String
+    let detailedDescription: String
+    let element: Element?
+
+    init(_ issue: XCUIAccessibilityAuditIssue) {
+        auditType = issue.auditType
+        compactDescription = issue.compactDescription
+        detailedDescription = issue.detailedDescription
+        element = issue.element.map {
+            Element(identifier: $0.identifier, label: $0.label, frame: $0.frame, elementType: $0.elementType)
+        }
+    }
+}
+
 /// Runs `performAccessibilityAudit()` with the default audit types on every screen a person reaches in M1, using the
 /// synthetic fixtures, and asserts what the simulator can prove about VoiceOver: labels, state and announcements.
 ///
@@ -97,10 +123,12 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// At the largest size, an element still owed is settled by the default-size run's unobstructed audit of the same
     /// element (same card, identifier and label). Contrast is a property of the element's colours, which do not change
-    /// with the text size; the largest size only lowers the bar for large text. This is needed for the Home list: after
-    /// it scrolls at the largest size, the app's accessibility frames (which the audit and the snapshot both read) can stay
-    /// near the top of the list while the screen shows another part of it, so a scrolled stop there proves nothing either
-    /// way (runs 41702917752, 41711242088, 41720210504: the screenshots and the logged frames disagree).
+    /// with the text size; the largest size only lowers the bar for large text. This is needed for the Home list: the
+    /// audit itself scrolls the list back near its top (`MOVED`; run 41758689823), and at the largest size only the first
+    /// card then lies between the header and the composer, so a card further down cannot be clear both where the test
+    /// scrolled it and where the audit leaves it. The accessibility frames are not stale: in that run the snapshot, the
+    /// app's own accessibility frames, the drawn frames and a tap agree before and after the audit
+    /// (`testHomeFramesMatchWhatIsDrawn` keeps checking it).
     private func settleFromTheDefaultSize() {
         guard sizeName == "xxxl", !ledger.unsettled.isEmpty else { return }
         let file = outputDirectory.appendingPathComponent("settled-default.txt")
@@ -138,6 +166,22 @@ final class AccessibilityAuditUITests: XCTestCase {
         for _ in 0..<4 { app.swipeUp() }
         Thread.sleep(forTimeInterval: 1)
         audit("home-populated-end")
+        // The audit has moved the list (`MOVED`); the frames it left still match what is drawn.
+        assertTapOpensTheCardItsFramesPlaceMidScreen("home-populated-end, after its audit")
+        _ = goBack()
+    }
+
+    /// VoiceOver's focus ring and touch exploration use the accessibility frames the audit and the snapshot read. With
+    /// the list scrolled to its end (and in `testHomePopulated`, after an audit has moved it), a tap at the card the
+    /// frames place in the middle of the clear band opens that card, so the frames match what is drawn.
+    func testHomeFramesMatchWhatIsDrawn() {
+        guard launch(.populated) else { return }
+        XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: screenTimeout))
+        dismissKeyboardIfShown()
+        currentScreen = "home-scrolled"
+        for _ in 0..<4 { app.swipeUp() }
+        Thread.sleep(forTimeInterval: 1)
+        assertTapOpensTheCardItsFramesPlaceMidScreen("home-scrolled to its end")
     }
 
     func testCaptureVoiceIdle() {
@@ -373,7 +417,9 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// Screenshot, then the audit: every default type at the largest size, and at the default size every default type
     /// except `.dynamicType`, whose resize probe measures the scroll view's geometry and not the fonts (the deterministic
     /// replacement is `ios/scripts/check_font_tokens.py`; docs/validation/accessibility.md). An issue that is neither in
-    /// `isExempt` nor excused by the glass ledger fails the test, and so does an audit that cannot run.
+    /// `isExempt` nor excused by the glass ledger fails the test, and so does an audit that cannot run. The audit can
+    /// scroll the screen; when it does, the log says by how much (`MOVED`), a second screenshot shows where it left the
+    /// screen, and the issues are decided there.
     private func audit(_ screen: String, checksLabels: Bool = true) {
         capture(screen)
         currentScreen = screen
@@ -386,42 +432,13 @@ final class AccessibilityAuditUITests: XCTestCase {
         // ledger takes only the final pass's decisions.
         var issueCount = 0
         for attempt in 1...2 {
-            let elements = screenElements()
-            let band = clearBand(from: elements)
-            var trialLedger = ledger
-            var trialOwed: [String: GlassPlacement] = [:]
-            var notes: [String] = []
-            var found: [String] = []
-            var flaggedKeys: Set<String> = []
+            let before = screenElements()
+            var raised: [RaisedIssue] = []
             var auditError: Error?
             do {
-                try app.performAccessibilityAudit(for: auditTypes) { [self] issue in
-                    let element = issue.element
-                    let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(band)"
-                    if issue.auditType == .contrast, let element,
-                       let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band) {
-                        let shown = displayed(identifier: element.identifier, label: element.label, near: element.frame, in: elements)
-                        if let shown { flaggedKeys.insert(shown.key) }
-                        let decision = trialLedger.decide(
-                            contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
-                            others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame) } })
-                        let shownFrame = shown?.frame.debugDescription ?? "not shown"
-                        switch decision {
-                        case .owed:
-                            if let shown { trialOwed[shown.key] = placement }
-                            notes.append("OWED \(screen): '\(element.label)' (\(placement)) shown at \(shownFrame), obstructed\(obstruction(of: shown, placement: placement, in: elements)); the test must audit it unobstructed")
-                        case .measured(let ratio):
-                            notes.append("MEASURED \(screen): '\(element.label)' shown at \(shownFrame) with nothing overlapping, contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
-                        case .issue(let reason):
-                            found.append("\(description) | shown at \(shownFrame): \(reason)")
-                        }
-                        return true
-                    }
-                    if isExempt(issue) {
-                        notes.append("EXEMPT \(description)")
-                        return true
-                    }
-                    found.append(description)
+                // Issues are copied here and decided once the audit has returned, against the screen as it left it.
+                try app.performAccessibilityAudit(for: auditTypes) { issue in
+                    raised.append(RaisedIssue(issue))
                     return true
                 }
             } catch {
@@ -434,16 +451,65 @@ final class AccessibilityAuditUITests: XCTestCase {
                 XCTFail("\(screen): the accessibility audit did not run: \(auditError)")
                 break
             }
+            // The audit scrolls: it leaves a scrolled Home list near its top at either size (run 41758689823, where the
+            // snapshot, the in-app accessibility frames, the drawn frames and a tap all agree after the audit). So every
+            // decision below uses the snapshot taken after it, which is where the issues' elements are.
+            let elements = screenElements()
+            let band = clearBand(from: elements)
+            let movedBy = Self.movement(from: before, to: elements)
+            var trialLedger = ledger
+            var trialOwed: [String: GlassPlacement] = [:]
+            var notes: [String] = []
+            var found: [String] = []
+            var flaggedKeys: Set<String> = []
+            for issue in raised {
+                let element = issue.element
+                let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(band)"
+                if issue.auditType == .contrast, let element,
+                   let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band) {
+                    let shown = displayed(identifier: element.identifier, label: element.label, near: element.frame, in: elements)
+                    if let shown { flaggedKeys.insert(shown.key) }
+                    let decision = trialLedger.decide(
+                        contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
+                        others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame) } })
+                    let shownFrame = shown?.frame.debugDescription ?? "not shown"
+                    switch decision {
+                    case .owed:
+                        if let shown { trialOwed[shown.key] = placement }
+                        notes.append("OWED \(screen): '\(element.label)' (\(placement)) shown at \(shownFrame), obstructed\(obstruction(of: shown, placement: placement, in: elements)); the test must audit it unobstructed")
+                    case .measured(let ratio):
+                        notes.append("MEASURED \(screen): '\(element.label)' shown at \(shownFrame) with nothing overlapping, contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                    case .issue(let reason):
+                        found.append("\(description) | shown at \(shownFrame): \(reason)")
+                    }
+                    continue
+                }
+                if isExempt(issue) {
+                    notes.append("EXEMPT \(description)")
+                    continue
+                }
+                found.append(description)
+            }
             if !found.isEmpty, attempt == 1 {
                 auditLines.append("RETRY \(screen): \(found.count) issue(s) on the first pass, auditing again after the screen settles")
                 Thread.sleep(forTimeInterval: 3)
                 continue
             }
+            if let movedBy {
+                notes.insert("MOVED \(screen): the audit scrolled the content by \(Int(movedBy.rounded())) pt; decisions use where it left it (screenshot \(screen)-audited)", at: 0)
+                capture("\(screen)-audited")
+            }
             ledger = trialLedger
             owedPlacements.merge(trialOwed) { first, _ in first }
             auditLines += notes
-            let listed = elements.compactMap { element in
-                glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band).map { (element, $0) }
+            // Settled only by an element unobstructed both where the test brought it and where the audit left it.
+            let bandBefore = clearBand(from: before)
+            let listed = elements.compactMap { element -> (element: ScreenElement, placement: GlassPlacement)? in
+                guard let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band),
+                      let earlier = before.first(where: { $0.key == element.key }),
+                      GlassContrastLedger.isUnobstructed(earlier, placement: placement, clearBand: bandBefore, screen: screenFrame, others: before)
+                else { return nil }
+                return (element: element, placement: placement)
             }
             let settled = ledger.recordStop(screen, listed: listed, flaggedKeys: flaggedKeys, clearBand: band, screen: screenFrame, others: elements)
             for element in settled {
@@ -458,6 +524,53 @@ final class AccessibilityAuditUITests: XCTestCase {
             break
         }
         auditLines.append("\(issueCount == 0 ? "PASS" : "FAIL") \(screen) (\(sizeName)), \(issueCount) issue(s)")
+    }
+
+    /// How far the content moved between two snapshots: the largest vertical shift of an element present in both, or nil
+    /// when nothing moved by more than a point.
+    private static func movement(from before: [ScreenElement], to after: [ScreenElement]) -> CGFloat? {
+        var largest: CGFloat = 0
+        for element in after {
+            guard let earlier = before.first(where: { $0.key == element.key }) else { continue }
+            largest = max(largest, abs(element.frame.minY - earlier.frame.minY))
+        }
+        return largest > 1 ? largest : nil
+    }
+
+    /// Taps the screen in the middle of the clear band, at the card the snapshot's frames place there, and asserts that the
+    /// source detail it opens is that card's (`FRAMES` in the log; a mismatch is an `ISSUE`). The tap is a touch, so it
+    /// goes to what is drawn, whatever the accessibility frames say.
+    private func assertTapOpensTheCardItsFramesPlaceMidScreen(_ stop: String) {
+        waitForStillFrames()
+        let elements = screenElements()
+        let band = clearBand(from: elements)
+        let visibleBottom = min(band.upperBound, app.frame.maxY)
+        let middle = (band.lowerBound + visibleBottom) / 2
+        // The card nearest the middle of the band; the tap goes to its centre, kept inside the part of it in the band.
+        let cards = elements.filter {
+            $0.identifier.hasPrefix("home.recents.card.") && $0.frame.minY < visibleBottom && $0.frame.maxY > band.lowerBound
+        }
+        guard let card = cards.min(by: { abs($0.frame.midY - middle) < abs($1.frame.midY - middle) }) else {
+            auditLines.append("ISSUE \(stop): no card's frame is between the header and the composer (\(band))")
+            return XCTFail("\(stop): no card's frame is between the header and the composer (\(band))")
+        }
+        let shownTop = max(card.frame.minY, band.lowerBound), shownBottom = min(card.frame.maxY, visibleBottom)
+        let tapY = min(max(card.frame.midY, shownTop + 4), shownBottom - 4)
+        let point = CGVector(dx: card.frame.midX, dy: tapY)
+        app.coordinate(withNormalizedOffset: .zero).withOffset(point).tap()
+        let detail = app.element(identifier: "source-detail.current-text")
+        guard detail.waitForExistence(timeout: screenTimeout) else {
+            auditLines.append("ISSUE \(stop): a tap at '\(card.label.prefix(60))' (\(point)) opened no source detail")
+            return XCTFail("\(stop): a tap at '\(card.label.prefix(60))' (\(point)) opened no source detail")
+        }
+        let opened = detail.label
+        let line = "\(stop): the frames place '\(card.label.prefix(60))' at \(card.frame.debugDescription); a tap at (\(Int(point.dx)), \(Int(tapY))) opened '\(opened.prefix(60))'"
+        if !opened.isEmpty, card.label.contains(opened) {
+            auditLines.append("FRAMES \(line)")
+        } else {
+            auditLines.append("ISSUE \(line)")
+            XCTFail("the accessibility frames do not match what is drawn: \(line)")
+        }
     }
 
     /// What keeps text drawn on glass from being measured: the elements overlapping it, for the log.
@@ -566,10 +679,8 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
     /// slowly and with a hold at the end so it does not coast. The drag runs down the left margin, 8 points from the edge,
-    /// beside the cards: started on a card (a button), the scroll still moves but the app's accessibility frames stay at
-    /// the top of the list (runs 41702917752 and 41711242088, where the screenshots and the snapshots disagreed); at the
-    /// right edge it catches the scroll indicator, which scrubs the whole list. A vertical drag does not start the back
-    /// gesture. The caller drags again until the element is where it should be, and the frames are read only once two
+    /// beside the cards, so it never starts on a card (a button); at the right edge it would catch the scroll indicator,
+    /// which scrubs the whole list. A vertical drag does not start the back gesture. The caller drags again until the element is where it should be, and the frames are read only once two
     /// snapshots a second apart agree.
     private func scrollContent(by distance: CGFloat, between band: ClosedRange<CGFloat>) {
         let top = band.lowerBound + 20
@@ -598,7 +709,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// The exemptions outside the glass list. Each one is a single named issue on a single element and is listed with its
     /// reason in docs/validation/accessibility.md. Only the default-size run omits `.dynamicType`, as `auditTypes` documents;
     /// no exemption excludes a type.
-    private func isExempt(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
+    private func isExempt(_ issue: RaisedIssue) -> Bool {
         guard let identifier = issue.element?.identifier else { return false }
         // The keyboard's prediction bar is the system's, not the app's.
         if issue.detailedDescription.contains("TUIPredictionViewCell") { return true }

@@ -71,16 +71,7 @@ struct HomeBodyView: View {
                 .padding(.vertical, DSSpacing.sm)
                 .frame(maxWidth: .infinity)
         }
-        .onPreferenceChange(HomeRenderedKey.self) { elements in
-            renderReporter?(elements)
-            #if DEBUG
-            let frames = elements.mapValues(\.frame)
-            Task { @MainActor in
-                HomeAXDiagnostic.shared.rendered = frames
-                HomeAXDiagnostic.shared.start()
-            }
-            #endif
-        }
+        .onPreferenceChange(HomeRenderedKey.self) { elements in renderReporter?(elements) }
         .onAppear {
             if model.bodyState == .locked { AccessibilityAnnouncer.announce(Self.lockedAnnouncement) }
             if needsTimeCount > 0 { AccessibilityAnnouncer.announce(Self.needsTimeAnnouncement) }

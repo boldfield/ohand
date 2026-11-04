@@ -637,14 +637,18 @@ jobs:
         shell: bash
         run: cat ios/.evidence/host-pressure.txt || true
 
-      # The large-text screenshots go up as quality-60 JPEGs, about a fifth of the PNG size (CI artifact budget).
+      # The large-text screenshots go up as quality-60 JPEGs, about a fifth of the PNG size (CI artifact budget). The
+      # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40.
       - name: Compress large-text screenshots
         if: always()
         shell: bash
         run: |
-          for png in ios/.evidence/accessibility/xxxl-*.png ios/.evidence/accessibility/default-diag-*.png; do
+          for png in ios/.evidence/accessibility/xxxl-*.png; do
             [ -e "${png}" ] || continue
-            sips -s format jpeg -s formatOptions 60 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true
+            case "${png}" in
+              *-audited-*) sips --resampleWidth 603 -s format jpeg -s formatOptions 40 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true ;;
+              *) sips -s format jpeg -s formatOptions 60 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true ;;
+            esac
           done
           du -sh ios/.evidence/accessibility || true
 
@@ -660,7 +664,6 @@ jobs:
             ios/.evidence/accessibility/settled-*.txt
             ios/.evidence/accessibility/xxxl-*.jpg
             ios/.evidence/accessibility/xxxl-*.png
-            ios/.evidence/accessibility/default-diag-*.jpg
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
             ios/.evidence/simulator.txt
