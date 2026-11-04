@@ -17,8 +17,7 @@ jobs:
       matrix:
         target:
           - "OhAndTests/ProviderAndPermissionFailureJourneyTests/testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact"
-          - "OhAndTests/PrivacySettingsModelTests/testAskingForMoreRetiredWorkTwiceWhileOnePageIsBeingReadListsThatPageOnce"
-          - "OhAndTests/ExportSettingsViewTests/testAFailedShareAndACompletedShareShowTheirOwnOutcome"
+          - "OhAndTests/ProviderAndPermissionFailureJourneyTests/testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact#2"
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -50,6 +49,7 @@ jobs:
       - name: Iterate (up to 250, stop at first failure)
         shell: bash
         env:
+          TARGET: ${{ matrix.target }}
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -uo pipefail
@@ -57,7 +57,7 @@ jobs:
           xcodebuild test-without-building \
             -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-            -derivedDataPath .derived -only-testing:"${{ matrix.target }}" \
+            -derivedDataPath .derived -only-testing:"${TARGET%%#*}" \
             -test-iterations 250 -run-tests-until-failure \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/iter.log
           status=${PIPESTATUS[0]}
