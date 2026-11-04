@@ -168,7 +168,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         audit("home-populated-end")
         // The audit has moved the list (`MOVED`); the frames it left still match what is drawn.
         assertTapOpensTheCardItsFramesPlaceMidScreen("home-populated-end, after its audit")
-        _ = goBack()
+        // Back on Home the composer takes the focus again; the settle stops audit without the keyboard, as above.
+        guard goBack() else { return }
+        dismissKeyboardIfShown()
     }
 
     /// VoiceOver's focus ring and touch exploration use the accessibility frames the audit and the snapshot read. With
