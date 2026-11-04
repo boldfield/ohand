@@ -147,7 +147,6 @@ final class CaptureStatusTests: XCTestCase {
         audioOnly.audioReference = "staging/capture-audio.m4a"
         _ = try first.save(audioOnly)
         first.close()
-        coreLeakBaseline.assertHandlesReturned()
 
         try seed([
             itemInsert(itemID: "7d1c5a1e-0000-4000-8000-000000000001", captureID: "capture-status"),
@@ -212,6 +211,7 @@ final class CaptureStatusTests: XCTestCase {
         let first = try Session(path: storePath)
         _ = try first.save(capture).decode(SaveCaptureAcknowledgment.self)
         first.close()
+        coreLeakBaseline.assertHandlesReturned()
 
         let second = try Session(path: storePath)
         defer { second.close() }
