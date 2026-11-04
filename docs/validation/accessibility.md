@@ -148,9 +148,10 @@ glass, which is 20 points above its field, placeholder or "Recording" line (the 
 Saved pill above the composer lowers it to 8 points above that line. A settle stop can owe something new, such as a card
 it scrolls under the header; the test keeps settling until each excuse has had its own stop (at most 12).
 
-**The audit scrolls.** `performAccessibilityAudit` moves a scrolled Home list back near its top, at both sizes and
-with or without `.dynamicType` (run 41758689823: Today at y = 139 after the audit at the largest size, wherever the list
-was before it). So the test decides every issue against a snapshot taken after the audit returns, where the issues'
+**The audit scrolls.** `performAccessibilityAudit` scrolls a screen while it checks its elements and leaves it
+elsewhere, at both sizes and with or without `.dynamicType`: a scrolled Home list ends near its top (run 41758689823:
+Today at y = 139 after the audit at the largest size, wherever the list was before it), and Settings, source detail and
+the erase confirmation move by more than 1000 points at the largest size (run 41761876914). So the test decides every issue against a snapshot taken after the audit returns, where the issues'
 elements are, logs `MOVED` with the distance, and saves a second screenshot (`<screen>-audited`, half width) of where
 the audit left the screen. A glass-list element is `CLEAR` only if it is unobstructed both where the test scrolled it
 and where the audit left it.

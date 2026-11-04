@@ -453,9 +453,10 @@ final class AccessibilityAuditUITests: XCTestCase {
                 XCTFail("\(screen): the accessibility audit did not run: \(auditError)")
                 break
             }
-            // The audit scrolls: it leaves a scrolled Home list near its top at either size (run 41758689823, where the
-            // snapshot, the in-app accessibility frames, the drawn frames and a tap all agree after the audit). So every
-            // decision below uses the snapshot taken after it, which is where the issues' elements are.
+            // The audit scrolls while it checks: it leaves a scrolled Home list near its top at either size, and moves
+            // longer screens by more (runs 41758689823 and 41761876914; the snapshot, the in-app accessibility frames, the
+            // drawn frames and a tap agree after it). So every decision below uses the snapshot taken after it, which is
+            // where the issues' elements are.
             let elements = screenElements()
             let band = clearBand(from: elements)
             let movedBy = Self.movement(from: before, to: elements)
