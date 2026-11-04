@@ -590,19 +590,17 @@ jobs:
           mkdir -p ios/.evidence
           sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
           xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
-          if python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
-              --max-runtime "${sdk_version}" --family iPhone > ios/.evidence/simulator.txt; then
-            cat ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
-          fi
+          # No iPhone simulator fails the job here: this gate never skips its audits (test_accessibility_gate.py).
+          python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
+            --max-runtime "${sdk_version}" --family iPhone | tee ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          grep -q '^udid=.' ios/.evidence/simulator.txt
           cat ios/.evidence/simulator.txt
 
       - name: Generate Xcode project
-        if: steps.simulator.outputs.udid != ''
         run: cd ios && ./scripts/generate.sh
 
       # Compile before the simulator is booted, as the walkthrough does.
       - name: Build accessibility UI tests (no simulator booted yet)
-        if: steps.simulator.outputs.udid != ''
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
@@ -626,7 +624,6 @@ jobs:
           vm_stat | head -4
 
       - name: Accessibility audits
-        if: steps.simulator.outputs.udid != ''
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
