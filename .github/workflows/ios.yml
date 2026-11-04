@@ -642,7 +642,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          for png in ios/.evidence/accessibility/xxxl-*.png; do
+          for png in ios/.evidence/accessibility/xxxl-*.png ios/.evidence/accessibility/default-diag-*.png; do
             [ -e "${png}" ] || continue
             sips -s format jpeg -s formatOptions 60 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true
           done
@@ -660,6 +660,7 @@ jobs:
             ios/.evidence/accessibility/settled-*.txt
             ios/.evidence/accessibility/xxxl-*.jpg
             ios/.evidence/accessibility/xxxl-*.png
+            ios/.evidence/accessibility/default-diag-*.jpg
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
             ios/.evidence/simulator.txt

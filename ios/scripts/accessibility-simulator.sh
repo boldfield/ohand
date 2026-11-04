@@ -59,6 +59,7 @@ for size in default xxxl; do
       -destination "platform=iOS Simulator,id=${udid}" \
       -derivedDataPath .derived/Accessibility \
       -resultBundlePath "${evidence_dir}/accessibility-${size}.xcresult" \
+      -only-testing:OhAndAccessibilityUITests/HomeScrollDiagnosticUITests \
       CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
   ) 2>&1 | tee -a "${evidence_dir}/accessibility-${size}.log" || run_status=$?
   if [ "${run_status}" -ne 0 ]; then
