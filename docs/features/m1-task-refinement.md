@@ -4709,3 +4709,91 @@ Acceptance:
 4. **Exact-head macOS CI evidence**, green.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F64
+
+Schedule approximate and hedged times at the time that was said
+
+Found by the maintainer on the trial iPhone on 2026-11-04. A spoken capture "Remind me today to cancel the honey bucket probably today around 10 AM" (confidence 95%) was typed `action` with a reminder stored `not_scheduled_yet`. Reproduced at 06392195 against `core/src/time/` directly: the resolver has no approximation vocabulary at all, so "today around 10 AM", "at about 10 AM", "today at approximately 10 AM" and "today at roughly 10 AM" all fail to parse ("Invalid date format"), and "today at 10 AM ish" is `UnsupportedQualifier`. Separately, `span_covers_time_expression` (`core/src/time/expression.rs`, `made_inexact_by_modifier` around line 950) treats a hedge directly before a day-naming span as making the day inexact, so "probably today around 10 AM" is covered only when the span includes "probably", and the split shape (F46) rejects a task that restates the first part's day word or that ends with "around" before the clock. The capture therefore cannot be scheduled by any span the model could quote.
+
+Decision (coordinator, 2026-11-04). People say approximate times by voice far more often than exact ones, and a reminder at the stated time is the right default for every approximation: "around 10 AM" means 10:00 to anyone, and the person can move it. The same holds for a likelihood hedge attached to the time inside a request that is itself plain: "Remind me … probably today around 10 AM" commits to being reminded; the hedge is about the day, and a reminder on the stated day that may need moving beats one that never fires. F29 is not reopened: a hedge on the request itself ("Maybe remind me Friday …") still means the request is unconfirmed, is never scheduled, and `date-ambiguous-maybe-friday` keeps its oracle. The line is where the hedge sits: before the request cue, it hedges the request; inside the time expression, it hedges the time, which is scheduled as said.
+
+Owned paths:
+- `core/src/time/` and `core/tests/time/`;
+- `core/tests/proposal_application/` (end-to-end tests);
+- `fixtures/intent/contrastive-fixtures.json` and `docs/validation/intent-fixtures.md` (two fixture rows each);
+- existing tests under `core/src/time/`, `core/tests/`, `tools/bench/` and `tools/evaluation/` whose asserted outcome changes only because a phrase listed below now resolves or is now covered; each flipped assertion is listed in the PR description with its old and new expectation. No other test changes.
+
+Not owned: `core/src/interpretation/` (the guard calls the time module and is unchanged), the fast path, the instruction text, `core/src/reminders/`.
+
+Dependencies: none. F62 (day parts) is on main; the shapes below compose with it.
+
+Acceptance:
+
+1. **Clock approximations resolve to the stated clock.** The resolver accepts, directly before the clock and optionally after `at` (`at around 10 AM`, `around 10 AM`, `at about 10`, `approximately 10:30`, `roughly 10 AM`): `around`, `about`, `approximately`, `approx`, `roughly`. After the clock it accepts: `ish` (also attached, `10ish`, `10amish`, `10am-ish`, `10:30ish`), `or so`, `thereabouts`, `approximately`, `roughly`, `sharp`, `exactly`, `precisely`, `on the dot`. The resolved instant is the clock as stated; the result is not ambiguous and no new quality or field is introduced. Everything F28 and F62 hold still holds around the approximation: a bare hour without a meridiem or day part stays `MissingMeridiem`, a zone after the clock stays `UnsupportedQualifier`, DST rules are unchanged, and a day part supplies or checks the meridiem exactly as F62 says ("tomorrow morning around 9" is 09:00).
+2. **Likelihood hedges on the time resolve as if absent.** `probably`, `maybe`, `perhaps`, `possibly`, `likely` and `hopefully` directly before the day word, the day part, or the clock of a phrase ("probably today around 10 AM", "maybe Friday at 3 p.m.", "possibly at 10 AM", "hopefully tomorrow morning at 9") resolve to what the rest of the phrase resolves to. The hedge is not a request hedge: `request_hedge` in `core/src/interpretation/apply/mod.rs` and F29's rule are untouched, and "Maybe remind me Friday at 3 p.m." is still stored as hedged and unscheduled.
+3. **A consistent restated day is not a contradiction.** In the split shape ("Remind me today to <task> … today around 10 AM"), the last part may restate the first part's day word, optionally behind a likelihood hedge, before the clock: `[hedge] [<same day word>] [at] [approximation] <clock> [qualifier]`. `split_shape_combined_phrase` reads the stretch as the one phrase "today around 10 AM". A different day word in the task ("today to call Sam tomorrow at 10am") stays uncovered, as F46 requires.
+4. **Guard coverage follows.** `span_covers_time_expression` treats an approximation before the clock, every qualifier in item 1 after it, and a likelihood hedge in item 2 before the day or clock as part of the time expression, so:
+   - a span that quotes the expression with or without a leading likelihood hedge is covered ("probably today around 10 AM" and "today around 10 AM" both cover "Remind me to cancel the subscription probably today around 10 AM");
+   - a span that stops before a trailing qualifier is narrower than the expression and is not covered, as today ("today at 10 AM" does not cover "… today at 10 AM ish");
+   - in the split shape, the clock part is `[at] [approximation] <clock> [qualifier]`, and a span quoting it with or without the approximation is covered ("10 AM", "around 10 AM" and the whole stretch all cover the maintainer's capture);
+   - `by`, `before`, `after`, `until`, `no later than`, negations (`not Friday`) and every other relative modifier keep making the time inexact exactly as today. Only the words listed in items 1 and 2 change meaning.
+5. **End to end.** `core/tests/proposal_application/` applies interpreter proposals for "Remind me today to cancel the subscription probably today around 10 AM", captured 2026-11-04T15:42:00Z in America/Los_Angeles, with each span in item 4 (the clock alone, the approximated clock, the trailing expression with and without "probably", and the whole stretch), and stores a scheduled reminder at 2026-11-04T10:00:00-08:00 each time. A proposal claiming 22:00 for it is rejected by the existing guard. "Maybe remind me Friday at 3 p.m. to call Sam" is still stored hedged, with F29's reason.
+6. **Fixtures.** Two rows, synthetic content, oracle explicit: `clock-approximate` ("Remind me to cancel the subscription today around 10 AM") and `day-hedged-restated` ("Remind me today to cancel the subscription probably today around 10 AM"), with their `docs/validation/intent-fixtures.md` lines. `date-ambiguous-maybe-friday` is unchanged.
+7. **Table-driven unit tests** in `core/src/time/` and `core/tests/time/` cover every word in items 1 and 2 in at least one phrase, each attached `ish` form, both orders with F62 day parts, the restated day in item 3, the coverage cases in item 4 including each modifier that stays inexact, and that `date-ambiguous-maybe-friday`'s capture is still a request hedge.
+8. `make check` and `make test` pass. The coordinator reruns the live harness after landing.
+
+Validation: `make check` and `make test`. No native code changes; the iOS simulator job still runs on the PR and must be green at the exact head.
+
+### F65
+
+Put the core leak baseline and its teardown wait in one shared helper, and keep it there
+
+F50's diagnosis (2026-10-24) found the one failure that reproduces on the hosted runner: a test's `tearDownWithError` compares the process-wide `CoreHandle.liveResultBufferCount` with a baseline taken in `setUp`, and a core read issued by the test (a lifecycle step, a health or status read) frees its buffer a moment after the body ends, so the count is 1 at teardown, or already 1 at the next test's `setUp`. F47 fixed it in the files the diagnosis named: `CompositionRootTests` and `LifecycleCoordinatorTests` poll both counts back to the baseline with a 10 s deadline, `Playback` does the same, and `ios/Tests/Support/WaitUntil.swift` gained `settledLiveResultBufferCount` for the `setUp` side, used by four `AppAssembly` files. The remaining 63 test files that make the same comparison still snapshot or assert directly (the four `AppAssembly` files settle only the `setUp` side), and files added after F47 copied the direct pattern (`ItemReopenReminderAgainRealCoreTests`, F59). It failed F62's macOS run on 2026-11-03 in `JobConfigurationRootIntegrationTests.swift:77` (run 41625262049, attempt 1). Each such failure costs a rerun of a 20-minute job.
+
+Owned paths:
+- `ios/Tests/Support/WaitUntil.swift` (or a new file beside it);
+- every file under `ios/Tests/` that assigns `CoreHandle.liveResultBufferCount` or `CoreHandle.liveHandleCount` to a stored baseline or passes either to an `XCTAssert`, only on those lines and the `setUp`/`tearDown` lines that call the helper (66 files at 06392195; `grep -rl "liveResultBufferCount, baselineBuffers" ios/Tests` lists them);
+- a new `ios/scripts/check_test_leak_baseline.py` with its unit test, and the `ios-check` line of the `Makefile` that runs it.
+
+Dependencies: none. F66 depends on this task because both edit `ios/Tests/FailureJourneys/`.
+
+Acceptance:
+
+1. **One helper.** A shared type in `ios/Tests/Support/` captures the baseline and judges the leak: capture waits, bounded (10 s), until the live buffer count is zero or both counts have stopped changing, as `CompositionRootTests.swift` (around line 236) and `settledLiveResultBufferCount` do today, and records both counts; the check waits, bounded (10 s), for both counts to return to the baseline and then asserts equality with the existing messages ("every core handle is closed", "no result buffer leaks"), reporting at the caller's file and line. A buffer or handle still live after the wait fails the test exactly as today. The helper never widens the assertion: equality with the baseline, not "at most".
+2. **Every file uses it.** No test file outside `ios/Tests/Support/` assigns either count to a baseline or asserts on either count directly; each `setUp` captures through the helper and each `tearDown` checks through it, keeping its other teardown work. The four `AppAssembly` files move from `settledLiveResultBufferCount` to the helper, and `settledLiveResultBufferCount` is removed or becomes the helper's implementation. Tests that read a count mid-body to test the counter itself (`CoreBridge/CoreHandleTests.swift`) keep those reads; only baseline capture and teardown assertions move.
+3. **The rule is checked mechanically.** `ios/scripts/check_test_leak_baseline.py` fails when a file under `ios/Tests/` outside `Support/` contains a line that names `CoreHandle.liveResultBufferCount` or `CoreHandle.liveHandleCount` and either assigns it to a property or passes it to an `XCTAssert`; its unit test covers a passing tree, each violation shape, and the `Support/` and mid-body exemptions, with synthetic files in a temporary directory. `make ios-check` runs it, so `make check` on Linux enforces it.
+4. **No test weakened.** Every test's body is unchanged; the diff outside `Support/`, the script and the `Makefile` line touches only `setUp`/`tearDown` and the baseline properties. `ios/scripts/test_prepare_simulator.py::test_workflow_does_not_weaken_tests` and the rest of `ios-check` still pass.
+5. **Exact-head macOS CI evidence**, green, and `make check` and `make test` on Linux.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### F66
+
+Diagnose the three intermittent macOS failures of 2026-11-03 and fix each reproduced cause
+
+Three tests failed on branches that did not touch them, on 2026-11-03, and passed on rerun:
+
+1. `ProviderAndPermissionFailureJourneyTests.testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact` (`ios/Tests/FailureJourneys/ProviderAndPermissionFailureJourneyTests.swift:130`), twice: run 41625262049 attempt 2 (F62, a Rust-only change) and run 41773093713 attempt 2 (U10a). The test captures an explicit reminder decades ahead with notification permission denied, runs `reconcileReminders(trigger: .foreground)` on the root, and waits its full 30 s for the reminder's `schedule_state` to become `schedule_failed`; it stayed `pending_…` (the message is cut in the log; the assertion appends the state). Twice in two days on unrelated branches is not noise. Candidates: `ios/Services/NotificationPermission/` (`CoreReminderReconciler`, `NotificationPermissionReconciler`), `reconcileReminders` in `ios/Services/Assembly/CompositionRoot.swift` (around line 1732), and `core/src/reminders/reconcile/`.
+2. `PrivacySettingsModelTests.testAskingForMoreRetiredWorkTwiceWhileOnePageIsBeingReadListsThatPageOnce` (`ios/Tests/PrivacySettings/PrivacySettingsModelTests.swift:894`), run 41773093713 attempt 1: `XCTAssertEqual(controls.retiredReads.count, readsBefore + 1)` failed with "0 is not equal to 3". The count went down, not up, which points at the test double's array being read while mutated off the main actor, or reset by a refresh, rather than at `loadMoreRetiredWork` (`app/privacy-settings/PrivacySettingsModel.swift`, around line 536). Find out which.
+3. `ExportSettingsViewTests.testAFailedShareAndACompletedShareShowTheirOwnOutcome` (`ios/Tests/DataSettings/ExportSettingsViewTests.swift:173`), run 41625262049 attempt 3: after the second share completed, the rendered state label still read "The export is ready. Choose where to send it." The test's `settle()` (line 81) is three fixed 100 ms sleeps with layout passes, which is the fixed wait `ios/Tests/Support/WaitUntil.swift` exists to replace.
+
+F50 showed the method: a temporary workflow on an intermediate commit of the branch, `xcodebuild test-without-building -only-testing:<test> -test-iterations 250 -run-tests-until-failure` on the standard runner, removed before the final head. Its finding, that a cause which does not reproduce is reported and not "fixed", stands.
+
+Owned paths:
+- the three test files above and `ios/Tests/FailureJourneys/FailureJourneyRig.swift`, for a cause shown to be test-side;
+- for a cause shown to be in product code, only the product file where it is reproduced, among `ios/Services/NotificationPermission/`, the `reconcileReminders` functions of `ios/Services/Assembly/CompositionRoot.swift`, `core/src/reminders/reconcile/`, `app/privacy-settings/PrivacySettingsModel.swift` and `app/data-settings/` (the export model and view);
+- a temporary workflow file on intermediate commits only.
+
+Dependencies: F65 (both edit `ios/Tests/FailureJourneys/`; F65's helper is in place first so this task does not reintroduce the direct pattern).
+
+Acceptance:
+
+1. **Each test is run at least 250 iterations** on the hosted macOS runner at a commit of this branch, and each run is linked in the PR description and the task result. A failure in fewer iterations ends that run early; the count reached is reported.
+2. **Each reproduced failure is diagnosed to a named cause**, stated in the PR as either test-side (a fixed wait, a double read off its actor, an assertion before the work it waits for) or product-side (a race or ordering fault in the product paths above), with the evidence (the failing iteration's log lines, and for a product race the interleaving). The fix matches the diagnosis: a test-side cause is fixed in the test with a bounded wait on the asserted condition (`waitUntil` or `waitUntilPumping`), never a longer fixed sleep or a looser assertion; a product-side cause is fixed in product code, with a test that fails before the fix and passes after it.
+3. **A cause that does not reproduce in 250 iterations is reported as such**, with the run, and that test is left unchanged. For test 1, which has failed twice, a non-reproduction must also report the host-pressure record of the two failing runs' attempts (`ios-evidence-failure` or the job log) so the next diagnosis starts from the loaded-host hypothesis.
+4. **After the fixes, each changed test is run 250 iterations again** at the final head's parent or an intermediate commit, with zero failures, linked.
+5. **No assertion is weakened** and no test is deleted or skipped. `ios/scripts/test_prepare_simulator.py::test_workflow_does_not_weaken_tests` passes; the temporary workflow is gone at the final head.
+6. **Exact-head macOS CI evidence**, green, and `make check` and `make test` on Linux.
+
+Validation: `make check` and `make test`, plus the exact-head macOS CI run.
