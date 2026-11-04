@@ -107,11 +107,14 @@ struct DSRow: View {
             Text(label)
                 .font(DSFont.rowLabel)
                 .foregroundColor(DSColor.ink.color)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let value {
                 Text(value)
                     .font(DSFont.rowLabel)
                     .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
             }
             if showsChevron {
                 Image(systemName: "chevron.right")
@@ -178,6 +181,7 @@ struct DSToggleRow: View {
                 DSIconTile(systemName: iconSystemName)
             }
             Toggle(label, isOn: $isOn)
+                .accessibilityLabel(label)
                 .font(DSFont.rowLabel)
                 .foregroundColor(DSColor.ink.color)
                 .tint(DSColor.accent.color)
@@ -198,9 +202,10 @@ struct DSChip: View {
         Button(action: action) {
             Text(title)
                 .font(DSFont.chip)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundColor((isSelected ? DSColor.onAccent : DSColor.ink).color)
                 .padding(.horizontal, DSSpacing.md)
-                .frame(height: DSLayout.chipHeight)
+                .frame(minHeight: DSLayout.chipHeight)
                 .background(Capsule().fill((isSelected ? DSColor.accent : DSColor.surface2).color))
                 .frame(minWidth: DSLayout.minimumTouchTarget, minHeight: DSLayout.minimumTouchTarget)
                 .contentShape(Rectangle())

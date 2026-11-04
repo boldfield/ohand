@@ -150,7 +150,7 @@ struct ResetSettingsView: View {
             deletionNote(DeletionText.resetExplanation, identifier: Self.explanationIdentifier)
             deletionNote(DeletionText.resetLimitsNote, identifier: Self.limitsIdentifier)
             deletionNote(DeletionText.resetCaptureNote, identifier: Self.captureNoteIdentifier)
-            Text(DeletionText.credentialQuestion).font(.headline)
+            Text(DeletionText.credentialQuestion).font(.headline).foregroundColor(DSColor.ink.color)
             if model.isChoiceOpen {
                 choice(.keep, title: DeletionText.keepCredentialsTitle, identifier: Self.keepIdentifier)
                 choice(.remove, title: DeletionText.removeCredentialsTitle, identifier: Self.removeIdentifier)
@@ -170,11 +170,13 @@ struct ResetSettingsView: View {
         } label: {
             HStack {
                 Image(systemName: model.credentialChoice == value ? "largecircle.fill.circle" : "circle")
+                    .foregroundColor((model.credentialChoice == value ? DSColor.accent : DSColor.inkMuted).color)
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundColor(DSColor.ink.color)
             }
             .frame(minHeight: 44)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(UndimmedChoiceButtonStyle())
         .accessibilityAddTraits(model.credentialChoice == value ? .isSelected : [])
         .accessibilityIdentifier(identifier)
         .reportDataSettingsRendered(identifier, text: title)
@@ -223,5 +225,15 @@ extension ResetSettingsModel {
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ResetSettingsModel {
         ResetSettingsModel(
             controls: root.resetControl, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+    }
+}
+
+/// A button that draws its label as given. The system's plain style dims a disabled label on top of the colours set here,
+/// which leaves the unchanged choices too faint while a reset waits for confirmation.
+private struct UndimmedChoiceButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .environment(\.isEnabled, true)
+            .opacity(configuration.isPressed ? 0.6 : 1)
     }
 }

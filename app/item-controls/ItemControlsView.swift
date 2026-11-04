@@ -168,6 +168,7 @@ struct ItemControlsView: View {
                 .font(DSFont.groupHeading)
                 .foregroundColor(DSColor.inkMuted.color)
             TextField("Corrected words", text: $model.textDraft, axis: .vertical)
+                .accessibilityLabel("Corrected words")
                 .lineLimit(1...8)
                 .dsFieldStyle()
                 .accessibilityIdentifier(Self.textFieldIdentifier)
@@ -190,6 +191,7 @@ struct ItemControlsView: View {
                 }
             }
             .pickerStyle(.menu)
+            .tint(DSColor.accent.color)
             .accessibilityIdentifier(Self.typePickerIdentifier)
             if model.pendingTypeMakesAction {
                 Text(Self.actionWarning)

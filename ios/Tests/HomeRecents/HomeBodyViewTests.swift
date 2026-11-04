@@ -23,15 +23,18 @@ final class HomeBodyViewTests: XCTestCase {
     private var rendered: [String: HomeRenderedElement] = [:]
     private var window: UIWindow?
     private var openedItems: [String] = []
+    private let announcements = AnnouncementRecorder()
 
     override func setUp() {
         super.setUp()
+        announcements.install()
         source = FakeHomeRecentsSource()
         rendered = [:]
         openedItems = []
     }
 
     override func tearDown() {
+        announcements.uninstall()
         model?.shutDown()
         model = nil
         window?.isHidden = true
@@ -164,6 +167,27 @@ final class HomeBodyViewTests: XCTestCase {
         let words = rendered.values.compactMap(\.text).joined(separator: "\n")
         XCTAssertFalse(words.contains(Self.todayText), "no stored text is shown", file: file, line: line)
         XCTAssertFalse(words.contains(Self.earlierText), "no stored text is shown", file: file, line: line)
+    }
+
+    // MARK: announcements
+
+    func testLockingIsAnnounced() async {
+        source.pages[nil] = CoreRecentItemsPage(items: [todayItem], nextCursor: nil)
+        await show(
+            waitingFor: [HomeBodyView.lockedCardIdentifier, HomeBodyView.unlockButtonIdentifier], thenSettling: true)
+
+        XCTAssertTrue(announcements.messages.contains(HomeBodyView.lockedAnnouncement), "\(announcements.messages)")
+    }
+
+    func testAReminderThatNeedsATimeIsAnnounced() async {
+        source.isAuthenticated = true
+        let marked = item("marked-1", type: "action", text: "Call Joe", hoursBefore: 1, needsTime: true)
+        source.pages[nil] = CoreRecentItemsPage(items: [marked], nextCursor: nil)
+        await show(
+            waitingFor: [Self.cardIdentifier("marked-1"), HomeBodyView.cardNeedsTimeIdentifierPrefix + "marked-1"],
+            thenSettling: true)
+
+        XCTAssertTrue(announcements.messages.contains(HomeBodyView.needsTimeAnnouncement), "\(announcements.messages)")
     }
 
     // MARK: capture_only

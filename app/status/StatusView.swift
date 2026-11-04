@@ -117,6 +117,7 @@ struct StatusView: View {
             if model.facts.contains(where: { $0.actions.contains(.retry) }) {
                 Button(StatusText.retryLabel, action: retryAction)
                     .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                     .padding(.horizontal, DSSpacing.md)
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.retryIdentifier)
@@ -143,6 +144,7 @@ struct StatusView: View {
             if model.facts.contains(where: { $0.actions.contains(.openSettings) }) {
                 Button(StatusText.openSettingsLabel) { model.openSettings() }
                     .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                     .padding(.horizontal, DSSpacing.md)
                     .frame(minHeight: DSLayout.rowMinimumHeight)
                     .accessibilityIdentifier(Self.openSettingsIdentifier)
@@ -150,6 +152,7 @@ struct StatusView: View {
             }
             Button(StatusText.refreshLabel) { Task { await model.refresh() } }
                 .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.accent.color)
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.rowMinimumHeight)
                 .accessibilityIdentifier(Self.refreshIdentifier)
@@ -158,6 +161,9 @@ struct StatusView: View {
         .onPreferenceChange(StatusRenderedKey.self) { renderReporter?($0) }
         .onPreferenceChange(StatusActionsKey.self) { actionReporter?($0.byIdentifier) }
         .task { await model.refresh() }
+        .onChange(of: model.failedNotes.count) { count in
+            if count > 0 { AccessibilityAnnouncer.announce(count == 1 ? "1 note failed to sort." : "\(count) notes failed to sort.") }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refresh() }
         }
@@ -181,7 +187,7 @@ struct FailedNoteRow: View {
             Text(firstLine)
                 .font(DSFont.rowLabel)
                 .foregroundColor(DSColor.ink.color)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             Text(captured)
                 .font(DSFont.footer)
                 .foregroundColor(DSColor.inkMuted.color)
@@ -222,7 +228,7 @@ struct NeedsTimeNoteRow: View {
                 Text(firstLine)
                     .font(DSFont.rowLabel)
                     .foregroundColor(DSColor.ink.color)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(captured)
                     .font(DSFont.footer)
                     .foregroundColor(DSColor.inkMuted.color)
@@ -253,7 +259,11 @@ struct FailedNotesActions: View {
 
     var body: some View {
         if model.offersNoteRetry {
-            Button(StatusText.retryLabel, action: retryAction)
+            Button(action: retryAction) {
+                Text(StatusText.retryLabel)
+                    .foregroundColor((model.isRerunning ? DSColor.inkMuted : DSColor.accent).color)
+                    .environment(\.isEnabled, true)
+            }
                 .font(DSFont.rowLabel)
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.rowMinimumHeight)

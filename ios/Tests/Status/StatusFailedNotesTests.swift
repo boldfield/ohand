@@ -86,13 +86,17 @@ final class StatusFailedNotesTests: XCTestCase {
     /// Counts hosted screens, so a report from a screen that has been replaced is ignored.
     private var generation = 0
 
+    private let announcements = AnnouncementRecorder()
+
     override func setUpWithError() throws {
         try super.setUpWithError()
+        announcements.install()
         rendered = [:]
         actions = [:]
     }
 
     override func tearDownWithError() throws {
+        announcements.uninstall()
         window?.isHidden = true
         window = nil
         try super.tearDownWithError()
@@ -164,6 +168,13 @@ final class StatusFailedNotesTests: XCTestCase {
             XCTAssertNil(rendered[StatusView.showAllIdentifier], "one note needs no Show all")
             XCTAssertEqual(rendered[StatusView.retryNotesIdentifier], StatusText.retryLabel)
             XCTAssertNil(rendered[StatusView.unlockIdentifier])
+        }
+    }
+
+    func testAProcessingFailureIsAnnounced() {
+        host(makeModel(FakeFailedWork(.success([failedNote(1)]))), style: .light)
+        wait("the failed note is announced") {
+            self.announcements.messages.contains("1 note failed to sort.")
         }
     }
 

@@ -246,6 +246,7 @@ struct RetrievalSearchView: View {
             }
         } label: {
             menuChipFace(title: model.itemType?.title ?? "Type", isSelected: model.itemType != nil)
+            .accessibilityHidden(true)
         }
         .accessibilityLabel("Type filter")
         .accessibilityValue(model.itemType != nil ? model.itemType?.title ?? "Type" : "Any")
@@ -268,6 +269,7 @@ struct RetrievalSearchView: View {
             Button("Choose dates…") { filterPresentation.sheet = .dates }
         } label: {
             menuChipFace(title: timeTitle, isSelected: model.since != nil || model.until != nil)
+            .accessibilityHidden(true)
         }
         .accessibilityLabel("Time filter")
         .accessibilityValue(model.since != nil || model.until != nil ? timeTitle : "Any")
@@ -288,6 +290,7 @@ struct RetrievalSearchView: View {
             Button("Choose topic…") { filterPresentation.sheet = .topic }
         } label: {
             menuChipFace(title: topicTitle, isSelected: topicIsActive)
+            .accessibilityHidden(true)
         }
         .accessibilityLabel("Topic filter")
         .accessibilityValue(topicIsActive ? topicTitle : "Any")

@@ -74,6 +74,7 @@ struct HomeComposer: View {
             if state == .typing {
                 micButton(foreground: DSColor.accent, fill: DSColor.tint)
                 DSPillButton(title: "Save", style: .primary, action: onSave)
+                    .fixedSize()
                     .accessibilityIdentifier(Self.saveIdentifier)
                     .modifier(ReportsEnabledFrame(identifier: Self.saveIdentifier))
                     .disabled(!(entryActionsAreEnabled && saveIsEnabled))

@@ -59,7 +59,7 @@ struct CaptureEntryView: View {
                 updateSavedPill(for: acknowledgment?.save)
                 guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
                 let spoken = CaptureMessages.message(for: acknowledgment) ?? model.message(for: acknowledgment)
-                UIAccessibility.post(notification: .announcement, argument: spoken)
+                AccessibilityAnnouncer.announce(spoken)
             }
             // A voice attempt that fails to start leaves the acknowledgment alone, so its notice hides the pill.
             .onReceive(model.$voiceNotice) { voiceNotice in
@@ -75,7 +75,7 @@ struct CaptureEntryView: View {
 
     private func announceRecordingStartIfPending() {
         if model.consumeRecordingStartAnnouncement() {
-            UIAccessibility.post(notification: .announcement, argument: "Recording started.")
+            AccessibilityAnnouncer.announce("Recording started.")
         }
     }
 
