@@ -89,6 +89,23 @@ final class ExportSettingsViewTests: XCTestCase {
 
     private func text(_ identifier: String) -> String? { rendered[identifier]?.text }
 
+    /// Waits until the screen shows the export as ready and the share sheet is on screen, so an ending is delivered
+    /// to a sheet that exists, as a person's would be, and not to a screen still catching up with the model.
+    private func waitForShareSheetToBeOffered() async {
+        await waitUntil("the screen offers the prepared export") {
+            renderedAfterLayout(ExportSettingsView.stateIdentifier) == ExportSettingsText.readyText
+        }
+        let sheet = await presentedShareSheet()
+        XCTAssertNotNil(sheet, "the share sheet is presented for the prepared export")
+    }
+
+    /// What the screen shows for `identifier` after a layout pass, which is what makes it report a changed render.
+    private func renderedAfterLayout(_ identifier: String) -> String? {
+        window?.rootViewController?.view.setNeedsLayout()
+        window?.rootViewController?.view.layoutIfNeeded()
+        return text(identifier)
+    }
+
     /// Polls on the main actor, where the window and its presentations live.
     private func waitForScreen(timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
@@ -161,14 +178,20 @@ final class ExportSettingsViewTests: XCTestCase {
         await withScreen { model, world in
             model.setScope(.personal, selected: true)
             await model.startExport()
+            await waitForShareSheetToBeOffered()
             model.shareEnded(.failed)
             await settle()
             guard case .finished(.failed(let failed)) = model.phase else { return XCTFail("got \(model.phase)") }
+            await waitUntil("the failed share is shown on the screen") { renderedAfterLayout(ExportSettingsView.stateIdentifier) == failed }
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), failed)
 
             await model.startExport()
+            await waitForShareSheetToBeOffered()
             model.shareEnded(.completed)
             await settle()
+            await waitUntil("the completed share is shown on the screen") {
+                renderedAfterLayout(ExportSettingsView.stateIdentifier)?.hasPrefix("Shared") == true
+            }
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
             XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertTrue(shown.contains("cannot recall"))
