@@ -44,6 +44,9 @@ public actor NotificationPermissionReconciler {
     private let promptCandidates: @Sendable () -> [OptionalPromptCandidate]
     private var inFlight: (id: UUID, sequence: Int, task: Task<NotificationPermissionReport, Error>)?
     private var passesStarted = 0
+    /// Explicit refreshes currently waiting for a pass that began before they were asked; read by tests to know a
+    /// caller has reached that state without guessing at scheduling.
+    private(set) var explicitRefreshesAwaitingEarlierPass = 0
     private var lastKnownReminders: [ReminderFacts] = []
 
     public init(
@@ -66,7 +69,9 @@ public actor NotificationPermissionReconciler {
             if let running = inFlight {
                 if trigger == .explicit && running.sequence <= passesStartedBeforeCall {
                     // The running pass may predate the change this call is for; its own outcome is not ours.
+                    explicitRefreshesAwaitingEarlierPass += 1
                     _ = try? await running.task.value
+                    explicitRefreshesAwaitingEarlierPass -= 1
                     continue
                 }
                 let joined = try await running.task.value

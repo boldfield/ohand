@@ -25,7 +25,8 @@ final class NotificationPermissionExplicitRefreshTests: XCTestCase {
 
         let firstExplicit = Task { try await reconciler.refresh(trigger: .explicit) }
         let secondExplicit = Task { try await reconciler.refresh(trigger: .explicit) }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let bothWaiting = await awaitingCount(of: reconciler, is: 2)
+        XCTAssertTrue(bothWaiting, "both explicit refreshes reached the running pass before it is released")
         gate.release()
 
         let launchReport = try await launch.value
@@ -47,7 +48,8 @@ final class NotificationPermissionExplicitRefreshTests: XCTestCase {
         XCTAssertTrue(reachedCore)
 
         let explicit = Task { try await reconciler.refresh(trigger: .explicit) }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let waiting = await awaitingCount(of: reconciler, is: 1)
+        XCTAssertTrue(waiting, "the explicit refresh reached the running pass before it is released")
         gate.release()
 
         let launchReport = try await launch.value
@@ -55,5 +57,15 @@ final class NotificationPermissionExplicitRefreshTests: XCTestCase {
         XCTAssertNotNil(launchReport.reconciliationFailure)
         XCTAssertNil(explicitReport.reconciliationFailure, "the earlier pass's failure is not the explicit refresh's")
         XCTAssertEqual(core.requests.map(\.trigger), [.launch, .explicit])
+    }
+
+    /// Polls the reconciler's own count of explicit refreshes waiting on an earlier pass, bounded at five seconds.
+    private func awaitingCount(of reconciler: NotificationPermissionReconciler, is expected: Int) async -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await reconciler.explicitRefreshesAwaitingEarlierPass == expected { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return await reconciler.explicitRefreshesAwaitingEarlierPass == expected
     }
 }
