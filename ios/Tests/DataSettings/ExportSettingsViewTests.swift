@@ -181,7 +181,10 @@ final class ExportSettingsViewTests: XCTestCase {
                 renderedAfterLayout(ExportSettingsView.stateIdentifier)?.hasPrefix("Shared") == true
             }
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
-            XCTAssertTrue(shown.hasPrefix("Shared"), shown)
+            let presentedNow = window?.rootViewController?.presentedViewController
+            XCTAssertTrue(
+                shown.hasPrefix("Shared"),
+                shown + " DIAG phase=\(model.phase) pendingShare=\(String(describing: model.pendingShare?.id)) presented=\(String(describing: presentedNow)) beingPresented=\(presentedNow?.isBeingPresented ?? false) beingDismissed=\(presentedNow?.isBeingDismissed ?? false) renderedKeys=\(rendered.keys.sorted())")
             XCTAssertTrue(shown.contains("cannot recall"))
             XCTAssertEqual(world.exportRemnants(), [])
         }
@@ -254,7 +257,10 @@ final class ExportSettingsViewTests: XCTestCase {
             await settle()
 
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
-            XCTAssertTrue(shown.hasPrefix("Shared"), shown)
+            let presentedNow = window?.rootViewController?.presentedViewController
+            XCTAssertTrue(
+                shown.hasPrefix("Shared"),
+                shown + " DIAG phase=\(model.phase) pendingShare=\(String(describing: model.pendingShare?.id)) presented=\(String(describing: presentedNow)) beingPresented=\(presentedNow?.isBeingPresented ?? false) beingDismissed=\(presentedNow?.isBeingDismissed ?? false) renderedKeys=\(rendered.keys.sorted())")
             XCTAssertEqual(world.exportRemnants(), [])
 
             handler?(nil, false, nil, nil)
