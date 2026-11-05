@@ -126,20 +126,11 @@ final class ProviderAndPermissionFailureJourneyTests: FailureJourneyTestCase {
         XCTAssertTrue(
             pump { self.itemColumn("item_type", of: itemID) == "action" }, "the saved capture is classified without a provider")
 
-        var diagnosticReport = "no report"
-        let rowsBefore = scalar("SELECT group_concat(request_state || '/' || schedule_state, ';') FROM reminders")
-        runMain {
-            do {
-                let report = try await self.services.root.reconcileReminders(trigger: .foreground)
-                diagnosticReport = "\(report.trigger) failure=\(String(describing: report.reconciliationFailure)) converged=\(report.converged) permission=\(report.permission) transition=\(report.transition)"
-            } catch { diagnosticReport = "threw \(error)" }
-        }
-        let rowsAfterCall = scalar("SELECT group_concat(request_state || '/' || schedule_state, ';') FROM reminders")
+        runMain { _ = try? await self.services.root.reconcileReminders(trigger: .foreground) }
         XCTAssertTrue(
             pump { self.scalar("SELECT schedule_state FROM reminders WHERE item_id = '\(itemID)'") == "schedule_failed" },
-            "DIAG scheduling failed without permission: "
-                + scalar("SELECT schedule_state FROM reminders WHERE item_id = '\(itemID)'")
-                + " | report=\(diagnosticReport) | rowsBefore=\(rowsBefore) | rowsAfterCall=\(rowsAfterCall) | rowsNow=\(scalar("SELECT group_concat(request_state || '/' || schedule_state, ';') FROM reminders"))")
+            "scheduling failed without permission: "
+                + scalar("SELECT schedule_state FROM reminders WHERE item_id = '\(itemID)'"))
 
         // Three dimensions, three answers: saved, interpreted, and not scheduled.
         XCTAssertEqual(itemColumn("save_state", of: itemID), "saved_local")

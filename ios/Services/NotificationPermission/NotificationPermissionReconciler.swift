@@ -31,12 +31,19 @@ public struct NotificationPermissionReport: Equatable, Sendable {
 /// a second, so concurrent launch and foreground events cannot repeat a re-arm or install a
 /// request twice; the permission is read once more afterwards, and a change that happened during
 /// the pass starts a new one. The core's pass is also idempotent.
+///
+/// A joined pass began before the joiner asked, so it may have read the core before the change the joiner knows
+/// about. A lifecycle event (launch, foreground, return from Settings) accepts that: the next event repeats the pass.
+/// An explicit refresh, which a caller makes because durable reminder state just changed, does not: it waits for the
+/// running pass and then joins or starts a pass that began after its call. Explicit refreshes that wait together
+/// share that one later pass.
 public actor NotificationPermissionReconciler {
     private let center: NotificationCenterProviding
     private let reconciliation: ReminderReconciling
     private let observations: NotificationPermissionObservationStore
     private let promptCandidates: @Sendable () -> [OptionalPromptCandidate]
-    private var inFlight: (id: UUID, task: Task<NotificationPermissionReport, Error>)?
+    private var inFlight: (id: UUID, sequence: Int, task: Task<NotificationPermissionReport, Error>)?
+    private var passesStarted = 0
     private var lastKnownReminders: [ReminderFacts] = []
 
     public init(
@@ -53,15 +60,23 @@ public actor NotificationPermissionReconciler {
 
     @discardableResult
     public func refresh(trigger: NotificationReconcileTrigger) async throws -> NotificationPermissionReport {
+        let passesStartedBeforeCall = passesStarted
         while true {
             try Task.checkCancellation()
             if let running = inFlight {
+                if trigger == .explicit && running.sequence <= passesStartedBeforeCall {
+                    // The running pass may predate the change this call is for; its own outcome is not ours.
+                    _ = try? await running.task.value
+                    continue
+                }
                 let joined = try await running.task.value
                 let current = NotificationPermissionState(await center.authorization())
                 if current == joined.permission { return joined }
                 continue
             }
             let id = UUID()
+            passesStarted += 1
+            let sequence = passesStarted
             let task = Task { [self] in
                 do {
                     let report = try await runPass(trigger: trigger)
@@ -72,7 +87,7 @@ public actor NotificationPermissionReconciler {
                     throw error
                 }
             }
-            inFlight = (id, task)
+            inFlight = (id, sequence, task)
             return try await task.value
         }
     }
