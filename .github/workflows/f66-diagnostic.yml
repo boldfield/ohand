@@ -16,7 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - "OhAndTests/ProviderAndPermissionFailureJourneyTests/testDeniedNotificationPermissionFailsSchedulingHonestlyWhileSaveAndProcessingStayIntact"
           - "OhAndTests/ExportSettingsViewTests/testAFailedShareAndACompletedShareShowTheirOwnOutcome"
           - "OhAndTests/ExportSettingsViewTests/testAFailedShareAndACompletedShareShowTheirOwnOutcome#2"
     steps:

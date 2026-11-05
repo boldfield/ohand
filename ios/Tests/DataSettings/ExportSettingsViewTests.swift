@@ -89,6 +89,16 @@ final class ExportSettingsViewTests: XCTestCase {
 
     private func text(_ identifier: String) -> String? { rendered[identifier]?.text }
 
+    /// Waits until the screen shows the export as ready and the share sheet is on screen, so an ending is delivered
+    /// to a sheet that exists, as a person's would be, and not to a screen still catching up with the model.
+    private func waitForShareSheetToBeOffered() async {
+        await waitUntil("the screen offers the prepared export") {
+            renderedAfterLayout(ExportSettingsView.stateIdentifier) == ExportSettingsText.readyText
+        }
+        let sheet = await presentedShareSheet()
+        XCTAssertNotNil(sheet, "the share sheet is presented for the prepared export")
+    }
+
     /// What the screen shows for `identifier` after a layout pass, which is what makes it report a changed render.
     private func renderedAfterLayout(_ identifier: String) -> String? {
         window?.rootViewController?.view.setNeedsLayout()
@@ -168,6 +178,7 @@ final class ExportSettingsViewTests: XCTestCase {
         await withScreen { model, world in
             model.setScope(.personal, selected: true)
             await model.startExport()
+            await waitForShareSheetToBeOffered()
             model.shareEnded(.failed)
             await settle()
             guard case .finished(.failed(let failed)) = model.phase else { return XCTFail("got \(model.phase)") }
@@ -175,16 +186,14 @@ final class ExportSettingsViewTests: XCTestCase {
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), failed)
 
             await model.startExport()
+            await waitForShareSheetToBeOffered()
             model.shareEnded(.completed)
             await settle()
             await waitUntil("the completed share is shown on the screen") {
                 renderedAfterLayout(ExportSettingsView.stateIdentifier)?.hasPrefix("Shared") == true
             }
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
-            let presentedNow = window?.rootViewController?.presentedViewController
-            XCTAssertTrue(
-                shown.hasPrefix("Shared"),
-                shown + " DIAG phase=\(model.phase) pendingShare=\(String(describing: model.pendingShare?.id)) presented=\(String(describing: presentedNow)) beingPresented=\(presentedNow?.isBeingPresented ?? false) beingDismissed=\(presentedNow?.isBeingDismissed ?? false) renderedKeys=\(rendered.keys.sorted())")
+            XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertTrue(shown.contains("cannot recall"))
             XCTAssertEqual(world.exportRemnants(), [])
         }
@@ -257,10 +266,7 @@ final class ExportSettingsViewTests: XCTestCase {
             await settle()
 
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
-            let presentedNow = window?.rootViewController?.presentedViewController
-            XCTAssertTrue(
-                shown.hasPrefix("Shared"),
-                shown + " DIAG phase=\(model.phase) pendingShare=\(String(describing: model.pendingShare?.id)) presented=\(String(describing: presentedNow)) beingPresented=\(presentedNow?.isBeingPresented ?? false) beingDismissed=\(presentedNow?.isBeingDismissed ?? false) renderedKeys=\(rendered.keys.sorted())")
+            XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertEqual(world.exportRemnants(), [])
 
             handler?(nil, false, nil, nil)
