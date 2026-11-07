@@ -156,11 +156,12 @@ Common to every case: the **expected outcome** is the protocol's own criterion, 
 - **Settings:** Airplane Mode on, then off.
 
 #### `offline-5`
-- **Prepare:** Settings → Privacy & Security on the phone: Microphone denied for Oh And; Notifications denied for Oh And. Speech Recognition denied as a third step.
-- **Steps:** On Home tap "Record". Then open Settings → Permissions. Type and save `S-PLAIN`. Capture `S-DENTIST` as text and read the line under the composer. Repeat with Speech Recognition denied.
-- **Expect:** (protocol) offline text capture still works, the permission state is honest, and there is no automatic fallback to another source: "Record" does not start a recording and says why (microphone unavailable); Settings → Permissions shows the "Microphone" headline "Voice recording is unavailable. …" and, for notifications, "Reminders are saved but cannot alert you, and the daily prompt stays quiet. …"; the text note saves; the reminder line reads "Reminder not scheduled: notifications are not allowed."
-- **Evidence:** `offline-5-01.png` (Permissions with all three denied), `offline-5-02.png` (the composer message after the text save).
-- **Settings:** Microphone, Speech Recognition and Notifications denied for Oh And.
+- **Prepare:** Settings → Privacy & Security on the phone: Microphone denied for Oh And; Notifications denied for Oh And; Speech Recognition not yet asked.
+- **Steps:** (a) Microphone and Notifications denied: on Home tap "Record". Then open Settings → Permissions. Type and save `S-PLAIN`. Capture `S-DENTIST` as text and read the line under the composer. (b) Speech Recognition denied with Microphone allowed: in iOS Settings → Oh And turn Microphone on (Notifications stay off). Return to Home, tap "Record", read `S-PLAIN` aloud and tap "Stop recording". When iOS asks whether Oh And may use Speech Recognition, tap "Don't Allow" (if it was already decided, turn Speech Recognition off in iOS Settings → Oh And before recording). Read the line under the composer, open the item from Home for Source detail and tap "Play audio", then open Settings → Permissions. Wait two minutes with the normal data connection on and look at the item again. (c) Turn Microphone off again in iOS Settings → Oh And, so all three are denied for `offline-6`.
+- **Expect:** (protocol) offline text capture still works, the permission state is honest, and there is no automatic fallback to another source. (a) "Record" does not start a recording and says why (microphone unavailable); Settings → Permissions shows the "Microphone" headline "Voice recording is unavailable. …" and, for notifications, "Reminders are saved but cannot alert you, and the daily prompt stays quiet. …"; the text note saves; the reminder line reads "Reminder not scheduled: notifications are not allowed." (b) the recording is saved and kept as audio with transcription explicitly not done: the line reads "Audio saved." followed by "It has not been transcribed yet." or "Transcription failed; the audio is kept."; "Play audio" plays it; the "Speech recognition" row reads "Recordings are still saved as audio and nothing is sent anywhere to be transcribed. Transcripts wait until you allow Speech Recognition for Oh And in iOS Settings."; after two minutes online no transcript has appeared, so nothing was sent to another recognizer. A transcript appearing, or the audio missing, is `failed`.
+- **Automated evidence (supporting, not a substitute):** `ios/Tests/Permissions/CaptureWithoutPermissionsTests.swift` (`testRefusedSpeechPermissionKeepsTheAudioAndAppliesNothing`: only the on-device recognizer is consulted, no transcript is applied, the audio is untouched).
+- **Evidence:** `offline-5-01.png` (Permissions with Microphone and Notifications denied), `offline-5-02.png` (the composer message after the text save), `offline-5-03.png` (the composer message after the voice save with Speech Recognition denied), `offline-5-04.png` (Permissions with Speech Recognition denied), `offline-5-05.png` (Source detail of the voice item after two minutes).
+- **Settings:** Microphone and Notifications denied for (a); Microphone allowed and Speech Recognition denied for (b); all three denied at the end.
 
 #### `offline-6`
 - **Prepare:** permissions denied as at the end of `offline-5`, then a text note `S-DENTIST` already saved with "Reminder not scheduled: notifications are not allowed."
@@ -234,7 +235,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 #### `reminder-3`
 - **Prepare:** a cloud provider set as default and verified (Settings → Processing → "With a cloud provider", via "Add provider", with a synthetic-usage test key you control, as in `offline-4`); `S-PAST`. Without a key, record `blocked` with the reason: the offline fast path cannot produce this state.
 - **Steps:** (1) Save `S-PAST` as text with the network on. When it has sorted, read the composer line and open the item's reminder. (2) In that item's reminder editor, set "Date and time" to a minute in the past and tap "Save time".
-- **Expect:** (protocol) the explicit `time_in_past` state, no fabricated rescheduling: (1) "Reminder not scheduled: that time has passed." and, in the item, "Time has passed" with "Choose a later date and time."; the item keeps the time that was asked for and no notification is pending for it. (2) the editor refuses with "Choose a time in the future. Nothing was changed." and the stored time is unchanged. If the provider's answer is not recorded as `time_in_past` (the item reads "No time set" or shows no reminder), the case is `failed` with what the item shows in `notes`.
+- **Expect:** (protocol) the explicit `time_in_past` state, no fabricated rescheduling: (1) "Reminder not scheduled: that time has already passed." and, in the item, "Time has passed" with "Choose a later date and time."; the item keeps the time that was asked for and no notification is pending for it. (2) the editor refuses with "Choose a time in the future. Nothing was changed." and the stored time is unchanged. If the provider's answer is not recorded as `time_in_past` (the item reads "No time set" or shows no reminder), the case is `failed` with what the item shows in `notes`.
 - **Route, checked against the code:** the provider's explicit candidate is checked against the core resolver and recorded as `unschedulable(time_in_past)` with the instant kept (`core/tests/proposal_application/main.rs`, `a_time_already_past_at_capture_is_unschedulable_without_adjustment`); the editor's refusal is `reminder_controls`' `time_in_past` outcome (`core/tests/reminder_controls/main.rs`).
 - **Evidence:** `reminder-3-01.png` (composer line), `reminder-3-02.png` (item reminder), `reminder-3-03.png` (editor refusal).
 - **Settings:** network on.
@@ -256,7 +257,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 #### `reminder-6`
 - **Prepare:** more reminders than the system holds (64 pending). Create 70 text captures "Remind me <date> <distinct time> to call the dentist" with distinct `YYYY-MM-DD HH:MM:SS` times over several days (use `S-DENTIST` variations; this takes time, batch it).
 - **Steps:** Save them one after another. Open Status.
-- **Expect:** (protocol) an explicit `capacity_exceeded` state, a documented refill policy and no silent dropping: the later reminders read "Reminder not scheduled: too many pending reminders." or "Held back"; Status says the system holds only so many and that the rest wait until there is room; counts add up (scheduled + held back = saved).
+- **Expect:** (protocol) an explicit `capacity_exceeded` state, a documented refill policy and no silent dropping: the later reminders read "Reminder not scheduled: there are too many pending reminders." or "Held back"; Status says the system holds only so many and that the rest wait until there is room; counts add up (scheduled + held back = saved).
 - **Evidence:** `reminder-6-01.png` (Status), `reminder-6-02.png` (one held-back item). Notes: counts only. Citations: P05 capacity finding in `docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json`.
 - **Settings:** none.
 
@@ -497,11 +498,13 @@ The shipped app cannot obtain either state. `NotificationPermissionAsker` (`ios/
 - **Settings:** Notifications toggled.
 
 #### `deferred-pending-slots-delivered`
-- **Prepare:** the daily prompt on (Settings → Daily prompt), and three reminders a few minutes ahead.
-- **Steps:** Let the three reminders be delivered and leave them in Notification Center. Then add reminders as in `reminder-6` until Status reports a hold; write down how many reminders were scheduled before the first was held back.
-- **Expect:** (P09 amendment 4) delivered notifications do not use pending slots: the hold begins at the same count as with an empty Notification Center (64 pending requests in all, the three delivered ones not counted, the daily prompt's pending occurrences counted); Status reports the counts honestly ("<n> daily prompt(s) wait(s) for room …" only when true).
-- **Evidence:** `deferred-pending-slots-delivered-01.png` (Status at the hold). Notes: counts only (delivered, scheduled, held back, prompt occurrences).
-- **Settings:** none.
+The shipped allocator never plans to the OS limit of 64 pending requests: it keeps four replacement slots free, so its usable budget is 60 (`OS_PENDING_LIMIT` 64 minus `REPLACEMENT_HEADROOM` 4, `core/src/reminders/capacity/allocation.rs`). Explicit reminders take slots first, soonest due first; daily prompt occurrences get only what the reminders leave; pending requests that are neither a known reminder nor a prompt reduce the budget; a reminder whose time has passed needs no slot (`core/src/reminders/capacity/mod.rs`). The case therefore compares two runs at that budget instead of looking for 64.
+- **Prepare:** the daily prompt on (Settings → Daily prompt). Run A starts with an empty Notification Center and no reminders pending (clear Notification Center; complete or delete earlier reminders, or use the counts from `reminder-6` if it ran on this candidate with nothing delivered). Run B starts from three reminders a few minutes ahead (`S-DENTIST` variations with today's date and times 3, 4 and 5 minutes away).
+- **Steps:** Run B: let the three reminders be delivered and leave them in Notification Center. In both runs, add reminders as in `reminder-6` (distinct future `YYYY-MM-DD HH:MM:SS` times) until a save reads "Reminder not scheduled: there are too many pending reminders."; then open Settings → Status. Write down, per run, the reminders scheduled before the first was held back, the held-back count, the number of delivered notifications in Notification Center, and the daily prompt line in Status.
+- **Expect:** (P09 amendment 4) delivered notifications do not use pending slots: both runs hold back at the same count, 60 future reminders scheduled (fewer only by pending requests the app did not create, which a fresh candidate has none of); the three delivered reminders are not counted in run B. Daily prompt occurrences do not lower the reminder count: once reminders fill the budget, the Notifications fact in Status reads "<k> saved reminder(s) is/are not scheduled, so … will not alert as things stand. The reminder itself is kept." with "The system holds only so many; the rest wait until there is room." and "<n> daily prompt(s) wait(s) for room with the system; reminders come first." with n greater than zero; k equals the saves that read "Reminder not scheduled: there are too many pending reminders.", and the 60 scheduled plus the k held back equals the future reminders saved. A hold at 64, or a run B hold three lower than run A, is `failed` with the counts in `notes`.
+- **Automated evidence (supporting):** `core/src/reminders/capacity/tests.rs` (the budget of 60, reminders before prompts, foreign requests charged).
+- **Evidence:** `deferred-pending-slots-delivered-01.png` (Status at the hold, run A), `deferred-pending-slots-delivered-02.png` (Status at the hold, run B), `deferred-pending-slots-delivered-03.png` (Notification Center with the three delivered reminders). Notes: counts only (per run: delivered, scheduled, held back, prompts waiting).
+- **Settings:** daily prompt on.
 
 #### `deferred-pending-slots-repeating`
 The shipped app schedules no repeating trigger, so whether one consumes a pending slot cannot be observed on the candidate. The daily prompt is planned as up to `PROMPT_HORIZON_DAYS` (3) separate dated occurrences (`core/src/suggestions/schedule/plan.rs`), and `SystemNotificationCenter.makeRequest` (`ios/Services/Notifications/SystemNotificationCenter.swift`) builds every request with `UNCalendarNotificationTrigger(..., repeats: false)`; each pending occurrence is one ordinary one-shot request, which `deferred-pending-slots-delivered` counts.
@@ -547,9 +550,9 @@ The shipped app schedules no repeating trigger, so whether one consumes a pendin
 
 #### `deferred-text-field-ready`
 - **Prepare:** screen recording.
-- **Steps:** Launch the app (cold and warm); measure from touch-down on the icon to a focused field "What's on your mind?" with the caret (section 5).
-- **Expect:** (P09 amendment 3) the field takes input at once; timing reported as `trigger_to_ready.text_field`.
-- **Evidence:** `deferred-text-field-ready-01.mp4`.
+- **Steps:** Cold: force-quit Oh And, then tap its icon; five trials. Warm: with Oh And in the background, tap its icon; five trials. In each trial measure from touch-down on the icon to a focused field "What's on your mind?" with the caret (section 5).
+- **Expect:** (P09 amendment 3) the field takes input at once; timing reported as the two series `trigger_to_ready.text_field_cold` and `trigger_to_ready.text_field_warm`, at least five trials each.
+- **Evidence:** `deferred-text-field-ready-01.mp4` (cold), `deferred-text-field-ready-02.mp4` (warm). Notes: sample counts.
 - **Settings:** none.
 
 ### 4.8 Plan items
@@ -618,7 +621,8 @@ The method is the one in [`evidence/device-feasibility/2026-10-10-latency-access
 | `trigger_to_ready.locked_handoff` | Control Center control press on the lock screen to ready | `state-3` |
 | `trigger_to_ready.shortcut_cold` | Action button or Shortcut press on a force-quit app to ready | `deferred-entry-latency-cold-warm` |
 | `trigger_to_ready.shortcut_warm` | the same press with Oh And in the background to ready | `deferred-entry-latency-cold-warm` |
-| `trigger_to_ready.text_field` | icon touch-down to a focused text field | `deferred-text-field-ready` |
+| `trigger_to_ready.text_field_cold` | icon touch-down on a force-quit app to a focused text field | `deferred-text-field-ready` |
+| `trigger_to_ready.text_field_warm` | icon touch-down with Oh And in the background to a focused text field | `deferred-text-field-ready` |
 | `end_of_input_to_save.voice` | "Stop recording" tapped to the "Saved" pill | `offline-1`, `deferred-untimed-voice-start` |
 | `end_of_input_to_save.text` | "Save" tapped to the "Saved" pill | `offline-1` |
 

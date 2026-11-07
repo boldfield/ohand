@@ -47,7 +47,7 @@ capability is enabled must not be; `not_applicable` is refused for every other c
 ### `latency.<series>`
 
 The series are `trigger_to_ready.cold_launch`, `trigger_to_ready.warm_switch`, `trigger_to_ready.locked_handoff`,
-`trigger_to_ready.shortcut_cold`, `trigger_to_ready.shortcut_warm`, `trigger_to_ready.text_field`, `end_of_input_to_save.voice` and
+`trigger_to_ready.shortcut_cold`, `trigger_to_ready.shortcut_warm`, `trigger_to_ready.text_field_cold`, `trigger_to_ready.text_field_warm`, `end_of_input_to_save.voice` and
 `end_of_input_to_save.text`. Each entry:
 
 | Key | Value |

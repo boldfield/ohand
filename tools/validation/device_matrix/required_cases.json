@@ -79,7 +79,8 @@
     "trigger_to_ready.locked_handoff",
     "trigger_to_ready.shortcut_cold",
     "trigger_to_ready.shortcut_warm",
-    "trigger_to_ready.text_field",
+    "trigger_to_ready.text_field_cold",
+    "trigger_to_ready.text_field_warm",
     "end_of_input_to_save.voice",
     "end_of_input_to_save.text"
   ]
