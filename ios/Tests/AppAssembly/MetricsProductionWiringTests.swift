@@ -119,7 +119,7 @@ final class MetricsProductionWiringTests: XCTestCase {
     private func saveReminder(_ services: AppServices) {
         let box = AnswerBox<CompositionSaveOutcome>()
         services.root.saveText(
-            captureID: "capture-metrics-sink", text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
+            captureID: UUID().uuidString.lowercased(), text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
         ) { box.set($0) }
         waitUntilPumping("the reminder was saved", timeout: 30) { box.value != nil }
         guard case .saved? = box.value else { return XCTFail("the reminder was not saved: \(String(describing: box.value))") }
