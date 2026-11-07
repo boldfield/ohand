@@ -12,7 +12,13 @@ import OhAndServices
 /// export without an ending (leaving the screen or locking), a sheet still on screen is dismissed with its handler
 /// detached.
 private struct ExportShareSheetPresenter: UIViewControllerRepresentable {
-    let export: PreparedExport?
+    /// What to share: an identifier for the pending export and the files in it.
+    struct Share: Equatable {
+        let id: String
+        let items: [URL]
+    }
+
+    let export: Share?
     let onEnding: (_ exportID: String, _ ending: ExportShareEnding) -> Void
 
     final class Coordinator {
@@ -46,7 +52,10 @@ private struct ExportShareSheetPresenter: UIViewControllerRepresentable {
                 onEnding(export.id, .failed)
                 return
             }
-            let sheet = ExportShareSheet.makeController(for: export) { ending in onEnding(export.id, ending) }
+            let sheet = UIActivityViewController(activityItems: export.items, applicationActivities: nil)
+            sheet.completionWithItemsHandler = { _, completed, _, error in
+                onEnding(export.id, ExportShareSheet.ending(completed: completed, error: error))
+            }
             sheet.popoverPresentationController?.sourceView = anchor.view
             coordinator.sheet = sheet
             anchor.present(sheet, animated: true)
@@ -101,7 +110,9 @@ struct ExportSettingsView: View {
         }
         .onDisappear { model.clear() }
         .background(
-            ExportShareSheetPresenter(export: model.pendingShare) { exportID, ending in
+            ExportShareSheetPresenter(
+                export: model.pendingShare.map { .init(id: $0.id, items: $0.shareItems) }
+            ) { exportID, ending in
                 model.shareEnded(ending, exportID: exportID)
             }
             .frame(width: 0, height: 0)
@@ -136,6 +147,9 @@ struct ExportSettingsView: View {
                     .reportDataSettingsRendered(Self.stateIdentifier, text: message)
             } else {
                 DSGroupedSection { exportButton }
+            }
+            if let metrics = model.metrics {
+                MetricsExportSection(model: metrics)
             }
         }
     }
@@ -182,6 +196,89 @@ extension ExportSettingsModel {
     /// The model as the app assembles it: the root's export service, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ExportSettingsModel {
         ExportSettingsModel(
-            controls: root.exportService, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: root.exportService, readScope: { [weak root] in root?.readScope ?? .captureOnly },
+            metrics: .assembled(root: root))
+    }
+}
+
+/// The metrics part of the export screen: the content-free report export and the recording controls. It is offered
+/// only in an authenticated read session; a capture-only session sees why instead.
+struct MetricsExportSection: View {
+    static let exportIdentifier = "data-settings.export.metrics.export"
+    static let pauseIdentifier = "data-settings.export.metrics.pause"
+    static let clearIdentifier = "data-settings.export.metrics.clear"
+    static let footerIdentifier = "data-settings.export.metrics.footer"
+    static let stateIdentifier = "data-settings.export.metrics.state"
+    static let lockedIdentifier = "data-settings.export.metrics.locked"
+    static let holdsIdentifier = "data-settings.export.metrics.holds"
+
+    @ObservedObject var model: MetricsExportSettingsModel
+
+    var body: some View {
+        Group {
+            if model.isAvailable {
+                DSGroupedSection(title: ExportSettingsText.metricsHeading, footer: footer) {
+                    Text(ExportSettingsText.metricsHolds + " " + ExportSettingsText.metricsHoldsNot)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(DSSpacing.sm)
+                        .accessibilityIdentifier(Self.holdsIdentifier)
+                    button(ExportSettingsText.metricsExportTitle, Self.exportIdentifier, enabled: model.canExport) {
+                        await model.startExport()
+                    }
+                    button(
+                        model.isRecording ? ExportSettingsText.metricsPauseTitle : ExportSettingsText.metricsResumeTitle,
+                        Self.pauseIdentifier, enabled: model.canExport
+                    ) { await model.setRecording(!model.isRecording) }
+                    button(ExportSettingsText.metricsClearTitle, Self.clearIdentifier, enabled: model.canExport) {
+                        await model.clearMetrics()
+                    }
+                }
+                .reportDataSettingsRendered(Self.footerIdentifier, text: footer)
+            } else {
+                Text(ExportSettingsText.metricsLockedText)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier(Self.lockedIdentifier)
+                    .reportDataSettingsRendered(Self.lockedIdentifier, text: ExportSettingsText.metricsLockedText)
+            }
+        }
+        .task { await model.refresh() }
+        .onDisappear { model.clear() }
+        .background(
+            ExportShareSheetPresenter(
+                export: model.pendingShare.map { .init(id: $0.id, items: [$0.file]) }
+            ) { exportID, ending in
+                model.shareEnded(ending, exportID: exportID)
+            }
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        )
+    }
+
+    private var footer: String {
+        if case .finished(let text) = model.phase { return text }
+        switch model.phase {
+        case .preparing: return ExportSettingsText.preparingText
+        case .sharing: return ExportSettingsText.readyText
+        default:
+            return model.isRecording
+                ? ExportSettingsText.metricsRecordingOnFooter : ExportSettingsText.metricsRecordingOffFooter
+        }
+    }
+
+    private func button(
+        _ title: String, _ identifier: String, enabled: Bool, action: @escaping () async -> Void
+    ) -> some View {
+        DSPillButton(title: title) { Task { await action() } }
+            .frame(maxWidth: .infinity)
+            .padding(DSSpacing.sm)
+            .accessibilityIdentifier(identifier)
+            .reportDataSettingsRendered(identifier, text: title)
+            .disabled(!enabled)
     }
 }

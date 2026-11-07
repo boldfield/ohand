@@ -51,13 +51,19 @@ final class ExportSettingsModel: ObservableObject {
 
     private let controls: ExportControlling
     private let readScope: () -> CompositionReadScope
+    /// The metrics export and recording controls shown below the notes export; nil where none are offered.
+    let metrics: MetricsExportSettingsModel?
     /// Advanced by `clear()`; an answer for an earlier screen is discarded and its export removed.
     private var session = 0
     private var preparing: Task<Void, Never>?
 
-    nonisolated init(controls: ExportControlling, readScope: @escaping () -> CompositionReadScope) {
+    nonisolated init(
+        controls: ExportControlling, readScope: @escaping () -> CompositionReadScope,
+        metrics: MetricsExportSettingsModel? = nil
+    ) {
         self.controls = controls
         self.readScope = readScope
+        self.metrics = metrics
     }
 
     static let selectableScopes: [CoreExportScope] = [.personal, .work]
@@ -152,6 +158,7 @@ final class ExportSettingsModel: ObservableObject {
         pendingShare = nil
         selectedScopes = []
         includeAudio = false
+        metrics?.clear()
         phase = .idle
     }
 
