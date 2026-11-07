@@ -19,7 +19,7 @@ Screens and controls are named as they exist on `main` (checked against `app/`, 
 | `S-PAST` | "Remind me to water the plants yesterday at nine" |
 | `S-EVERY` | "Remind me every Monday to check the synthetic ledger" |
 | `S-VAGUE` | "Remind me next week to review the synthetic plan" |
-| `S-WORK` | "Synthetic work note about the quarterly checklist" (scope Work) |
+| `S-WORK` | "Synthetic work note about the quarterly checklist" (the shipped capture screens stamp the configured default scope, Personal, and expose no control to choose Work, so on a candidate that stamps only Personal this item is saved as Personal) |
 | `S-PERSONAL` | "Synthetic personal note about a bicycle" (scope Personal) |
 | `S-CORRECTED` | "Synthetic note with a mistaken word" corrected to "Synthetic note with the right word" |
 
@@ -35,7 +35,7 @@ The record's `capabilities_enabled` lists the optional capabilities the installe
 | Capability (`capabilities_enabled` value) | How to read it from the installed candidate | Cases it gates |
 | --- | --- | --- |
 | `self_hosted_provider` | Settings → Processing → "Sort my captures". The third choice "With my own server" (detail "Sent only to the server you name") is selectable, and does not read "Not available in this build, so it cannot be the default." Settings → Processing → Advanced → "Saved profiles" can hold a profile of type "Private server". | `config-4`, `capability-self-hosted` |
-| `shadow` | Settings → Privacy offers a "Quality review" grant ("Allow Quality review via …") for a provider, and the candidate record or release notes claim shadow review. | `capability-shadow` |
+| `shadow` | Settings → Privacy offers a "Quality review" grant ("Allow quality review via …") for a provider, and the candidate record or release notes claim shadow review. | `capability-shadow` |
 | `previews` | The candidate record or release notes claim previews and a screen offers them. On `main` no screen offers a preview feature. (The Daily prompt screen's notification preview is part of that screen and is tested by `retrieval-6`.) | `capability-previews` |
 
 Rules:
@@ -224,7 +224,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** Airplane Mode on.
 
 #### `reminder-2`
-- **Prepare:** a reminder one to two minutes ahead (use "in two minutes" wording, e.g. "Remind me in two minutes to check the synthetic ledger").
+- **Prepare:** a reminder one to two minutes ahead (the offline grammar takes a day word and a clock, not a relative duration: read the phone clock and say a clock one to two minutes ahead, e.g. "Remind me today at 3:42 pm to check the synthetic ledger").
 - **Steps:** Save it. Force-quit the app. Lock the phone. When the notification arrives ("Oh And": "You have a reminder. Open Oh And to see it."), tap it.
 - **Expect:** (protocol) the system notification is delivered with the UI closed and opens correctly when tapped: Oh And opens to the item.
 - **Evidence:** `reminder-2-01.png` (the notification on the lock screen — private, keep local), `reminder-2-02.png` (the item after the tap).
@@ -278,7 +278,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Prepare:** `S-DENTIST`.
 - **Steps:** Save it. Open the item, change the time with "Date and time", tap "Save time". Then tap "Cancel reminder". Check Settings → Status and the notification list.
 - **Expect:** (protocol) the OS notification is removed and state reconciled: after "Save time", one reminder at the new time ("Saved."); after "Cancel reminder", "Reminder cancelled."; the reminder history lists "Time saved" and "Cancelled"; no notification arrives at either time.
-- **Evidence:** `reminder-9-01.png` (editor), `reminder-9-02.png` (history). Notes: notifications received (0 expected).
+- **Evidence:** `reminder-9-01.png` (editor), `reminder-9-02.png` (history). Notes: whether the Suggestion screen showed the deleted item (it must not).
 - **Settings:** none.
 
 #### `reminder-10`
@@ -312,9 +312,9 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** Face ID on; decline authentication.
 
 #### `retrieval-4`
-- **Prepare:** `S-PERSONAL` and `S-WORK` saved.
-- **Steps:** Unlock with "Unlock" and authenticate. Search for each phrase and open each item. Search offers Type, Time and Topic chips and "Include done"; it has no scope chip, so scope is read from the "Work" or "Personal" label on each result and in Source detail (if the candidate shows no scope, say so in `notes`).
-- **Expect:** (protocol) personal and work items are both retrievable with no cross-scope leakage: each result is labelled "Work" or "Personal" correctly, and a search for one phrase never returns the other scope's item.
+- **Prepare:** `S-PERSONAL` saved. A Work-scoped item cannot be created through the shipped screens: Home, the Capture entry and the Shortcut action stamp the configured default scope (Personal), and Source detail shows scope without a control to change it. Read the scope label of a saved `S-WORK` on the candidate; only if it reads "Work" (a candidate configured with a Work default) is the cross-scope half observable.
+- **Steps:** Unlock with "Unlock" and authenticate. Search for each phrase and open each item. Search offers Type, Time and Topic chips and "Include done"; it has no scope chip, so scope is read from the "Work" or "Personal" label on each result and in Source detail.
+- **Expect:** (protocol) personal and work items are both retrievable with no cross-scope leakage: each result is labelled "Work" or "Personal" correctly, and a search for one phrase never returns the other scope's item. When the candidate cannot produce a Work item, record `blocked` with the reason `no shipped control creates a Work-scoped item`, put "Personal label verified" in `notes` if the `S-PERSONAL` half held, and cite the automated cross-scope evidence at `core/tests/retrieval/main.rs`. Do not mark it passed on the Personal half alone.
 - **Evidence:** `retrieval-4-01.png`, `retrieval-4-02.png`.
 - **Settings:** Face ID on.
 
@@ -333,10 +333,10 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** Notifications allowed.
 
 #### `retrieval-7`
-- **Prepare:** as `retrieval-6`, the prompt set for five minutes ahead.
-- **Steps:** Before it fires, open the eligible item and "Delete this item" → "Delete permanently". Wait past the time.
-- **Expect:** (protocol) the pending prompt is removed and no stale notification remains: no notification fires for the deleted item, and Settings → Daily prompt "Next prompt" shows the next date or none.
-- **Evidence:** `retrieval-7-01.png` (the Daily prompt screen after the deletion). Notes: notifications received (0 expected).
+- **Prepare:** as `retrieval-6`, the prompt set for five minutes ahead, with exactly one eligible item.
+- **Steps:** Before it fires, open the eligible item and "Delete this item" → "Delete permanently". Wait past the time; the generic prompt ("Anything to jot down? Open Oh And.") still fires because it carries no item. Tap it.
+- **Expect:** (protocol) no stale item is resurfaced: the shipped prompt is generic and picks from current eligibility only when opened, so the deleted item does not appear on the Suggestion screen (which shows no eligible item), and nothing from the deleted note appears in the notification. Settings → Daily prompt "Next prompt" shows the next date.
+- **Evidence:** `retrieval-7-01.png` (the Daily prompt screen after the deletion). Notes: whether the Suggestion screen showed the deleted item (it must not).
 - **Settings:** Notifications allowed.
 
 ### 4.5 Configuration and switching
@@ -349,9 +349,9 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** network on.
 
 #### `config-2`
-- **Prepare:** a provider profile whose "Transcription" or "Embeddings" capability reads "unavailable".
-- **Steps:** Settings → Processing → Advanced; read the capability lines; try "Make default" and capture a note.
-- **Expect:** (protocol) explicit unavailable or unsupported messaging: "<Capability>: unavailable, not verified. It will not process notes until verification evidence exists."; no silent use.
+- **Prepare:** a provider profile whose "Text interpretation" capability reads "unavailable, not verified" in Advanced. A profile with only Transcription or Embeddings unavailable does not qualify: a text capture uses text interpretation and may process legitimately. If no available profile has Text interpretation unavailable, record `blocked` with that reason.
+- **Steps:** Settings → Processing → Advanced; read the capability lines; try "Make default" and capture `S-PLAIN` as text; open Status.
+- **Expect:** (protocol) explicit unavailable or unsupported messaging: "Text interpretation: unavailable, not verified. It will not process notes until verification evidence exists." and the default notice "This default cannot process notes yet…"; the text capture is saved and waits on the device (Status shows it waiting), never sent to another provider.
 - **Evidence:** `config-2-01.png`.
 - **Settings:** none.
 
@@ -521,7 +521,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 #### `deferred-entry-latency-cold-warm`
 - **Prepare:** a Shortcut with the action "Open Oh And Capture" (Destination "Capture", "Voice capture" or "Silent capture"); there is no built-in shortcut, so create it in the Shortcuts app and assign it to the Action button (iOS Settings → Action Button → Shortcut) on a device that has one.
 - **Steps:** Screen-record. Cold: force-quit Oh And, press the Action button, wait for ready. Warm: with Oh And in the background, press again. Five trials each (section 5).
-- **Expect:** (P09 amendment 3) the latency is measured and reported as `trigger_to_ready.shortcut_or_action_button`; the entry opens the capture surface.
+- **Expect:** (P09 amendment 3) the latency is measured and reported as the two series `trigger_to_ready.shortcut_cold` and `trigger_to_ready.shortcut_warm`; the entry opens the capture surface.
 - **Evidence:** `deferred-entry-latency-cold-warm-01.mp4` (cold), `deferred-entry-latency-cold-warm-02.mp4` (warm). Notes: sample counts.
 - **Settings:** Action button assigned to the Shortcut.
 
@@ -584,7 +584,7 @@ Each roll-up is `passed` only if all the listed cases are `passed` in this candi
 
 #### `capability-shadow`
 - **Applies:** when Settings → Privacy offers a "Quality review" grant and the candidate claims shadow review.
-- **Steps:** "Allow Quality review via …"; capture `S-PLAIN`; confirm the review does not alter the stored item or change any state the user sees as authoritative; "Stop Quality review" to revoke.
+- **Steps:** "Allow quality review via …"; capture `S-PLAIN`; confirm the review does not alter the stored item or change any state the user sees as authoritative; "Stop quality review" to revoke.
 - **Expect:** nothing stored is mutated by the review, and revoking stops it.
 - **Evidence:** `capability-shadow-01.png`.
 
@@ -603,14 +603,15 @@ The method is the one in [`evidence/device-feasibility/2026-10-10-latency-access
 | `trigger_to_ready.cold_launch` | icon touch-down on a force-quit app to ready | `state-1` |
 | `trigger_to_ready.warm_switch` | switch from another app or from the lock screen to ready | `state-2` |
 | `trigger_to_ready.locked_handoff` | Control Center control press on the lock screen to ready | `state-3` |
-| `trigger_to_ready.shortcut_or_action_button` | Action button or Shortcut press to ready, cold and warm in one series | `deferred-entry-latency-cold-warm` |
+| `trigger_to_ready.shortcut_cold` | Action button or Shortcut press on a force-quit app to ready | `deferred-entry-latency-cold-warm` |
+| `trigger_to_ready.shortcut_warm` | the same press with Oh And in the background to ready | `deferred-entry-latency-cold-warm` |
 | `trigger_to_ready.text_field` | icon touch-down to a focused text field | `deferred-text-field-ready` |
 | `end_of_input_to_save.voice` | "Stop recording" tapped to the "Saved" pill | `offline-1`, `deferred-untimed-voice-start` |
 | `end_of_input_to_save.text` | "Save" tapped to the "Saved" pill | `offline-1` |
 
 Rules:
 
-- At least **five trials per series**, counted. The checker refuses a series with fewer than five samples.
+- At least **five trials per series**, counted; cold and warm launches are separate series and each needs its five. The checker refuses a series with fewer than five samples.
 - The record holds, per series, `sample_count`, `median_ms`, `p95_ms`, `min_ms` and `max_ms`, and nothing else from the recordings (no per-trial list, no recording content).
 - Exclude network time; the end point of a save is the device-local acknowledgment, not interpretation.
 - If the candidate contains F67 (the in-app content-free metrics export, Settings → Export → "Export metrics"), attach its export as a second source under its own artifact name, e.g. `metrics-export-01.json`, set as `second_source_artifact` on the series it covers. Do not wait for F67; a candidate without it records screen-recording timing only.

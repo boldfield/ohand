@@ -47,7 +47,7 @@ capability is enabled must not be; `not_applicable` is refused for every other c
 ### `latency.<series>`
 
 The series are `trigger_to_ready.cold_launch`, `trigger_to_ready.warm_switch`, `trigger_to_ready.locked_handoff`,
-`trigger_to_ready.shortcut_or_action_button`, `trigger_to_ready.text_field`, `end_of_input_to_save.voice` and
+`trigger_to_ready.shortcut_cold`, `trigger_to_ready.shortcut_warm`, `trigger_to_ready.text_field`, `end_of_input_to_save.voice` and
 `end_of_input_to_save.text`. Each entry:
 
 | Key | Value |
@@ -72,7 +72,7 @@ a `failed` case, not an issue.
 
 ## What a record never holds
 
-No capture text, and no team, profile, certificate or device identifier, and no hash of one. The checker refuses a value
+The scan below is a best-effort guard, not proof. No capture text, and no team, profile, certificate or device identifier, and no hash of one. The checker refuses a value
 that looks like a device UDID, a UUID or a hex run of 32 or more digits (the `revision` is checked by name). The device is
 recorded by model and iOS version only.
 

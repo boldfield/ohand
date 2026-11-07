@@ -76,7 +76,8 @@
     "trigger_to_ready.cold_launch",
     "trigger_to_ready.warm_switch",
     "trigger_to_ready.locked_handoff",
-    "trigger_to_ready.shortcut_or_action_button",
+    "trigger_to_ready.shortcut_cold",
+    "trigger_to_ready.shortcut_warm",
     "trigger_to_ready.text_field",
     "end_of_input_to_save.voice",
     "end_of_input_to_save.text"
