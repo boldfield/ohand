@@ -1146,6 +1146,14 @@ public final class ServiceCompositionRoot {
     /// interrupted reset is resumed at launch, before the job runner activates.
     public let resetControl: ResetControl
 
+    /// The one content-free metrics service the capture entry model, the job runner and the reminder reconciler record
+    /// to; its report leaves only through `metricsReport`.
+    let metricsService: MetricsService
+    public var metrics: MetricsRecording { metricsService }
+    /// Exports the content-free metrics report for the share sheet and pauses or clears recording; every operation
+    /// needs an authenticated read session.
+    public let metricsReport: MetricsReportControl
+
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
     var readSession: ReadAuthenticationSession { adapters.readSession }
@@ -1177,6 +1185,8 @@ public final class ServiceCompositionRoot {
     private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
     private let routePolicyClient: CoreRoutePolicyClient
     private let exportClient: CoreExportClient
+    /// Internal so a test can shut it down and see which metrics service counts the records the core then refuses.
+    let metricsClient: CoreMetricsClient
     private let resetClient: CoreResetClient
     private let resetStaging: NativeResetIngress
     private let resetItemCleanup: ResetItemCleanupBridge
@@ -1297,6 +1307,9 @@ public final class ServiceCompositionRoot {
         providerConfiguration = assembly.providerConfiguration
         providerCredentials = assembly.providerCredentials
         exportClient = assembly.exportClient
+        metricsClient = assembly.metricsClient
+        metricsService = assembly.metrics
+        metricsReport = assembly.metricsReport
         exportService = assembly.exportService
         resetClient = assembly.resetClient
         resetStaging = assembly.resetStaging
@@ -1516,6 +1529,7 @@ public final class ServiceCompositionRoot {
         providerConnectionCheckClient.shutDown()
         routePolicyClient.shutDown()
         exportClient.shutDown()
+        metricsClient.shutDown()
         resetStaging.retire()
         resetClient.shutDown()
         reminderCore.invalidate()
@@ -1959,6 +1973,9 @@ public final class ServiceCompositionRoot {
         let providerConfiguration: ProviderConfigurationService
         let providerCredentials: ProviderCredentialEntry
         let exportClient: CoreExportClient
+        let metricsClient: CoreMetricsClient
+        let metrics: MetricsService
+        let metricsReport: MetricsReportControl
         let exportService: ExportService
         let resetClient: CoreResetClient
         let resetStaging: NativeResetIngress
@@ -2063,8 +2080,12 @@ public final class ServiceCompositionRoot {
             // callbacks, so they reach the journal and the core instead of a discarded handler.
             let bridge = NotificationBridge(
                 center: adapters.notificationCenter, ingestor: notificationActions.ingestor, now: environment.now)
+            let metricsClient = CoreMetricsClient(core: core)
+            router.register { metricsClient.handle($0) }
+            undo.append { metricsClient.shutDown() }
+            let metrics = MetricsService(core: metricsClient, session: adapters.readSession)
             let reminderCore = try CoreReminderReconciler(
-                core: core, bridge: bridge, center: adapters.notificationCenter)
+                core: core, bridge: bridge, center: adapters.notificationCenter, metrics: metrics)
             undo.append { reminderCore.invalidate() }
             router.register { reminderCore.handle($0) }
 
@@ -2148,6 +2169,7 @@ public final class ServiceCompositionRoot {
             router.register { exportClient.handle($0) }
             undo.append { exportClient.shutDown() }
             let exportService = ExportService(core: exportClient, session: adapters.readSession, layout: layout)
+            let metricsReport = MetricsReportControl(service: metrics, session: adapters.readSession, layout: layout)
             let resetClient = CoreResetClient(core: core)
             router.register { resetClient.handle($0) }
             undo.append { resetClient.shutDown() }
@@ -2200,7 +2222,7 @@ public final class ServiceCompositionRoot {
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
-                retryDelay: configuration.jobRetryDelaySeconds)
+                retryDelay: configuration.jobRetryDelaySeconds, metrics: metrics)
             undo.append { jobRunner.shutDown() }
             // Each drain's end is checked as it happens, not only the last one of a re-run chain: a drain that
             // applied results and was followed at once by an empty or failed drain must still refresh the lists.
@@ -2243,8 +2265,9 @@ public final class ServiceCompositionRoot {
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
-                exportClient: exportClient, exportService: exportService,
-                resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
+                exportClient: exportClient, metricsClient: metricsClient, metrics: metrics,
+                metricsReport: metricsReport,
+                exportService: exportService, resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
                 permissionReconciler: permissionReconciler, foreground: foreground, itemChanges: itemChanges)
         } catch {
             for step in undo.reversed() {
@@ -2252,5 +2275,166 @@ public final class ServiceCompositionRoot {
             }
             throw error
         }
+    }
+}
+
+/// A metrics report written to a protected temporary file, ready for the share sheet.
+public struct PreparedMetricsExport: Equatable, Sendable {
+    public let id: String
+    /// `MetricsExport.json`: the report's bytes exactly as the metrics service produced them.
+    public let file: URL
+}
+
+public enum MetricsReportFailure: Error, Equatable, Sendable {
+    /// The session is capture-only; nothing was requested from the core.
+    case notAuthenticated
+    /// The session relocked while the report was being prepared; its file was removed.
+    case interrupted
+    /// The core could not answer or the protected temporary location could not be prepared.
+    case unavailable
+}
+
+/// The app's way to hand the content-free metrics report to the share sheet and to pause or clear recording. It adds
+/// no data to the report: the file is the metrics service's JSON byte for byte, written to the protected temporary
+/// store and removed when the share ends, the screen goes away or the session relocks. Leftovers from an earlier run
+/// are removed when the control is built.
+public final class MetricsReportControl: @unchecked Sendable {
+    public static let fileName = "MetricsExport.json"
+    static let directoryName = "MetricsExports"
+
+    private struct ActiveExport {
+        let authorization: ReadAuthorization
+        let directory: URL
+        var isInvalidated: Bool
+    }
+
+    private let service: MetricsService
+    private let session: ReadAuthenticationSession
+    private let directory: URL
+    private let fileSystem: ExportFileSystem
+    private let lock = NSLock()
+    private var active: [String: ActiveExport] = [:]
+    private var scopeObserver: SessionScopeObserverToken?
+
+    init(
+        service: MetricsService, session: ReadAuthenticationSession, layout: ProtectedStorageLayout,
+        fileSystem: ExportFileSystem = FileManagerExportFileSystem()
+    ) {
+        self.service = service
+        self.session = session
+        self.directory = layout.directory(for: .temporaryFiles).appendingPathComponent(Self.directoryName, isDirectory: true)
+        self.fileSystem = fileSystem
+        try? fileSystem.remove(at: directory)
+        scopeObserver = session.observeScope { [weak self] transition in
+            guard transition.scope == .captureOnly else { return }
+            self?.invalidateAll()
+        }
+    }
+
+    deinit {
+        if let scopeObserver { session.removeScopeObserver(scopeObserver) }
+    }
+
+    /// Whether the core is recording, read in an authenticated session; `nil` when it cannot be read.
+    public func recordingEnabled() async -> Bool? {
+        guard let export = try? await service.exportReport() else { return nil }
+        return export.report.recordingEnabled
+    }
+
+    @discardableResult
+    public func setRecordingEnabled(_ enabled: Bool) async -> Bool { await service.setRecordingEnabled(enabled) }
+
+    @discardableResult
+    public func clearAll() async -> Bool { await service.clearAll() }
+
+    public func prepareExport() async throws -> PreparedMetricsExport {
+        guard let authorization = session.currentAuthorization() else { throw MetricsReportFailure.notAuthenticated }
+        let export: MetricsExport
+        do {
+            export = try await service.exportReport()
+        } catch let failure as MetricsExportFailure {
+            switch failure {
+            case .notAuthenticated: throw MetricsReportFailure.notAuthenticated
+            case .interrupted: throw MetricsReportFailure.interrupted
+            case .core, .unreadable: throw MetricsReportFailure.unavailable
+            }
+        } catch {
+            throw MetricsReportFailure.unavailable
+        }
+        let exportID = UUID().uuidString.lowercased()
+        let exportDirectory = directory.appendingPathComponent(exportID, isDirectory: true)
+        let file = exportDirectory.appendingPathComponent(Self.fileName)
+        lock.lock()
+        active[exportID] = ActiveExport(authorization: authorization, directory: exportDirectory, isInvalidated: false)
+        lock.unlock()
+        do {
+            try fileSystem.createPrivateDirectory(at: exportDirectory)
+            try export.json.write(to: file)
+            try fileSystem.protectFile(at: file)
+        } catch {
+            discard(exportID)
+            throw MetricsReportFailure.unavailable
+        }
+        guard isValid(exportID, authorization: authorization) else {
+            discard(exportID)
+            throw MetricsReportFailure.interrupted
+        }
+        return PreparedMetricsExport(id: exportID, file: file)
+    }
+
+    /// Records how the share sheet ended and removes the file. `shared` only when the sheet completed an activity and
+    /// the session never relocked meanwhile.
+    @discardableResult
+    public func finishShare(exportID: String, ending: ExportShareEnding) -> ExportShareOutcome {
+        lock.lock()
+        let entry = active[exportID]
+        lock.unlock()
+        guard let entry else { return ExportShareOutcome(result: .interrupted, temporariesRemoved: true) }
+        let result: ExportShareResult
+        if entry.isInvalidated || !session.isCurrent(entry.authorization) {
+            result = .interrupted
+        } else {
+            switch ending {
+            case .completed: result = .shared
+            case .cancelled: result = .cancelled
+            case .failed: result = .failed
+            }
+        }
+        return ExportShareOutcome(result: result, temporariesRemoved: discard(exportID))
+    }
+
+    /// Removes a prepared file that will not be shared.
+    @discardableResult
+    public func cancelExport(exportID: String) -> ExportShareOutcome {
+        ExportShareOutcome(result: .cancelled, temporariesRemoved: discard(exportID))
+    }
+
+    private func isValid(_ exportID: String, authorization: ReadAuthorization) -> Bool {
+        lock.lock()
+        let invalidated = active[exportID]?.isInvalidated ?? true
+        lock.unlock()
+        return !invalidated && session.isCurrent(authorization)
+    }
+
+    private func invalidateAll() {
+        lock.lock()
+        var directories: [URL] = []
+        for exportID in Array(active.keys) {
+            active[exportID]?.isInvalidated = true
+            if let exportDirectory = active[exportID]?.directory { directories.append(exportDirectory) }
+        }
+        lock.unlock()
+        for exportDirectory in directories { try? fileSystem.remove(at: exportDirectory) }
+    }
+
+    /// Forgets the export and removes its directory. Returns whether nothing is left on disk.
+    @discardableResult
+    private func discard(_ exportID: String) -> Bool {
+        lock.lock()
+        let entry = active.removeValue(forKey: exportID)
+        lock.unlock()
+        guard let exportDirectory = entry?.directory, fileSystem.fileExists(at: exportDirectory) else { return true }
+        try? fileSystem.remove(at: exportDirectory)
+        return !fileSystem.fileExists(at: exportDirectory)
     }
 }

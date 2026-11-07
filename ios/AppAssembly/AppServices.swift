@@ -120,7 +120,8 @@ final class AppServices {
             progressReader: RootCaptureProgressReader(root: root),
             defaultMode: defaultMode(),
             access: access,
-            now: captureNow)
+            now: captureNow,
+            metrics: root.metrics)
         self.captureEntry = captureEntry
         let navigation = ManagementNavigationModel(
             readScope: { [weak root] in root?.readScope ?? .captureOnly },
