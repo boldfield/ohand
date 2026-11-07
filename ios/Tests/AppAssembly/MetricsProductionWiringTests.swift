@@ -113,9 +113,57 @@ final class MetricsProductionWiringTests: XCTestCase {
         XCTAssertTrue(runnerSink === service, "the job runner records to the root's one metrics service")
         let entrySink = try XCTUnwrap(sink(of: services.captureEntry), "the capture entry model was given a metrics sink")
         XCTAssertTrue(entrySink === service, "the capture entry model records to the root's one metrics service")
-        XCTAssertTrue(
-            services.root.reminderMetricsSink as AnyObject === service,
-            "the reminder reconciler was built with the root's one metrics service")
+    }
+
+    /// Saves a reminder through the root itself, not the capture entry model, so the save records no timing.
+    private func saveReminder(_ services: AppServices) {
+        let box = AnswerBox<CompositionSaveOutcome>()
+        services.root.saveText(
+            captureID: "capture-metrics-sink", text: "remind me 2099-01-01 09:00:00 to call mom", capturedAt: Date()
+        ) { box.set($0) }
+        waitUntilPumping("the reminder was saved", timeout: 30) { box.value != nil }
+        guard case .saved? = box.value else { return XCTFail("the reminder was not saved: \(String(describing: box.value))") }
+    }
+
+    /// The reconciler keeps its sink only inside a native-effects closure, so its identity is shown by behaviour: once
+    /// the metrics client is shut down the core refuses every record, and a refused record is counted only by the
+    /// `MetricsService` instance that submitted it. A reconciler given any other sink, even a second service over the
+    /// same client, would leave the root's count at zero.
+    func testTheReminderReconcilerRecordsThroughTheRootsOneMetricsService() throws {
+        center.authorizationStatus = .denied
+        let services = try makeServices()
+        authenticate(services)
+        services.start(isActive: true)
+        let service = services.root.metricsService
+        services.root.metricsClient.shutDown()
+        XCTAssertEqual(service.droppedRecordCount, 0)
+
+        saveReminder(services)
+        let root = services.root
+        eventually("the reconciler's refused scheduling failure is counted by the root's metrics service") {
+            _ = try? await root.reconcileReminders()
+            return service.droppedRecordCount > 0
+        }
+    }
+
+    /// The control for the test above: the same save and reminder pass with permission granted records no scheduling
+    /// failure, and nothing else in that flow is counted, so the count above can only come from the reconciler.
+    func testTheSameFlowWithPermissionGrantedLeavesTheRootsDropCountAtZero() throws {
+        center.authorizationStatus = .authorized
+        let services = try makeServices()
+        authenticate(services)
+        services.start(isActive: true)
+        let service = services.root.metricsService
+        services.root.metricsClient.shutDown()
+
+        saveReminder(services)
+        let root = services.root
+        let center = self.center
+        eventually("the reminder is scheduled") {
+            _ = try? await root.reconcileReminders()
+            return !center.addedRequests.isEmpty
+        }
+        XCTAssertEqual(service.droppedRecordCount, 0, "only a scheduling failure is recorded in this flow")
     }
 
     func testATriggerToReadyRecordMadeThroughTheCaptureEntryModelAppearsInTheExport() throws {
