@@ -14,9 +14,9 @@ Screens and controls are named as they exist on `main` (checked against `app/`, 
 
 | Name | Text |
 | --- | --- |
-| `S-DENTIST` | "Remind me to call the dentist tomorrow at nine" |
+| `S-DENTIST` | "Remind me <D> 09:00:00 to call the dentist", where `<D>` is tomorrow's date as YYYY-MM-DD (the offline fast path takes only `YYYY-MM-DD HH:MM:SS` for an exact time and a closed content lexicon; "tomorrow", a weekday or a bare date give no instant offline) |
 | `S-PLAIN` | "Synthetic note one about a garden bench" |
-| `S-PAST` | "Remind me to water the plants yesterday at nine" |
+| `S-PAST` | "Remind me <P> 09:00:00 to call the dentist", where `<P>` is yesterday's date as YYYY-MM-DD |
 | `S-EVERY` | "Remind me every Monday to check the synthetic ledger" |
 | `S-VAGUE` | "Remind me next week to review the synthetic plan" |
 | `S-WORK` | "Synthetic work note about the quarterly checklist" (the shipped capture screens stamp the configured default scope, Personal, and expose no control to choose Work, so on a candidate that stamps only Personal this item is saved as Personal) |
@@ -224,7 +224,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** Airplane Mode on.
 
 #### `reminder-2`
-- **Prepare:** a reminder one to two minutes ahead (the offline grammar takes a day word and a clock, not a relative duration: read the phone clock and say a clock one to two minutes ahead, e.g. "Remind me today at 3:42 pm to check the synthetic ledger").
+- **Prepare:** a reminder one to two minutes ahead (the offline grammar takes only `YYYY-MM-DD HH:MM:SS`, not a relative duration: read the phone clock and type today's date with a time one to two minutes ahead, e.g. "Remind me 2026-11-08 15:42:00 to call the dentist").
 - **Steps:** Save it. Force-quit the app. Lock the phone. When the notification arrives ("Oh And": "You have a reminder. Open Oh And to see it."), tap it.
 - **Expect:** (protocol) the system notification is delivered with the UI closed and opens correctly when tapped: Oh And opens to the item.
 - **Evidence:** `reminder-2-01.png` (the notification on the lock screen — private, keep local), `reminder-2-02.png` (the item after the tap).
@@ -252,7 +252,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** none.
 
 #### `reminder-6`
-- **Prepare:** more reminders than the system holds (64 pending). Create 70 text captures "Remind me tomorrow at <distinct time> to check synthetic item <n>" with distinct times over several days (use `S-DENTIST` variations; this takes time, batch it).
+- **Prepare:** more reminders than the system holds (64 pending). Create 70 text captures "Remind me <date> <distinct time> to call the dentist" with distinct `YYYY-MM-DD HH:MM:SS` times over several days (use `S-DENTIST` variations; this takes time, batch it).
 - **Steps:** Save them one after another. Open Status.
 - **Expect:** (protocol) an explicit `capacity_exceeded` state, a documented refill policy and no silent dropping: the later reminders read "Reminder not scheduled: too many pending reminders." or "Held back"; Status says the system holds only so many and that the rest wait until there is room; counts add up (scheduled + held back = saved).
 - **Evidence:** `reminder-6-01.png` (Status), `reminder-6-02.png` (one held-back item). Notes: counts only. Citations: P05 capacity finding in `docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json`.
@@ -278,7 +278,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Prepare:** `S-DENTIST`.
 - **Steps:** Save it. Open the item, change the time with "Date and time", tap "Save time". Then tap "Cancel reminder". Check Settings → Status and the notification list.
 - **Expect:** (protocol) the OS notification is removed and state reconciled: after "Save time", one reminder at the new time ("Saved."); after "Cancel reminder", "Reminder cancelled."; the reminder history lists "Time saved" and "Cancelled"; no notification arrives at either time.
-- **Evidence:** `reminder-9-01.png` (editor), `reminder-9-02.png` (history). Notes: whether the Suggestion screen showed the deleted item (it must not).
+- **Evidence:** `reminder-9-01.png` (editor), `reminder-9-02.png` (history). Notes: notifications received (0 expected).
 - **Settings:** none.
 
 #### `reminder-10`
@@ -463,7 +463,7 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** none.
 
 #### `deferred-time-zone-change`
-- **Prepare:** `S-DENTIST` scheduled for tomorrow at nine.
+- **Prepare:** `S-DENTIST` scheduled for tomorrow at 09:00:00.
 - **Steps:** In iOS Settings → General → Date & Time turn off Set Automatically and change the time zone by several hours. Open the item; open Settings → Status.
 - **Expect:** (P09 amendment 2) the reminder keeps the zone it was scheduled in or says so honestly: the reminder editor reads "Time zone of this reminder: <zone>"; the due instant matches the zone the person said it in; nothing is rescheduled without a record.
 - **Evidence:** `deferred-time-zone-change-01.png`.
