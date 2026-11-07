@@ -233,6 +233,15 @@
       ],
       "old_task_id": "ddc1fc6c-a3d9-41a1-ba79-e33855644a3f",
       "old_pr": 356
+    },
+    "T05": {
+      "reason": "The device-matrix procedure on the shipped UI, the record format and its checker are fleet work; running the matrix on the trial iPhone is a maintainer input. Separate them so the procedure is reviewed before the device session and the record is checked mechanically.",
+      "children": [
+        "T05a",
+        "T05b"
+      ],
+      "old_task_id": "10d059a0-a027-4c85-9077-caa13b55d8b2",
+      "old_pr": null
     }
   },
   "tasks": [
@@ -4303,7 +4312,7 @@
         "core/tests/status/",
         "ios/Tests/CoreBridge/ (additive)"
       ],
-      "intent": "Item status gains rerun_state, set while an uninterpreted or abstained item's latest interpret job is not terminal, so Sorting… survives screens and relaunch.",
+      "intent": "Item status gains rerun_state, set while an uninterpreted or abstained item's latest interpret job is not terminal, so Sorting\u2026 survives screens and relaunch.",
       "acceptance": [
         "See the F56 section of m1-task-refinement.md."
       ],
@@ -4550,6 +4559,96 @@
         "ios/Tests/DataSettings/ExportSettingsViewTests.swift",
         "ios/Services/NotificationPermission/",
         "core/src/reminders/reconcile/"
+      ]
+    },
+    {
+      "key": "T05a",
+      "parent": "T05",
+      "title": "Write the device-matrix procedure for the production app, the record format and its checker",
+      "file_scope": [
+        "docs/validation/m1-device-results.md",
+        "docs/validation/evidence/device-matrix/README.md",
+        "tools/validation/device_matrix/",
+        "Makefile (device-matrix-check and device-matrix-test targets only)"
+      ],
+      "intent": "Map every required case of the protocol's functional matrix, the P09 deferrals and the plan's own items to steps on the shipped UI, define the ohand.device-matrix.v1 record and check records on Linux.",
+      "acceptance": [
+        "See the T05a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        2,
+        3,
+        4
+      ],
+      "depends_on": [
+        "T10a",
+        "U10a",
+        "F07"
+      ],
+      "source_pointers": [
+        "docs/validation/m1-protocol.md",
+        "docs/validation/accessibility.md",
+        "docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json"
+      ]
+    },
+    {
+      "key": "T05b",
+      "parent": "T05",
+      "title": "Record the actual-device functional exit matrix",
+      "file_scope": [
+        "docs/validation/m1-device-results.md",
+        "docs/validation/evidence/device-matrix/"
+      ],
+      "intent": "Fold the maintainer's run of the T05a procedure on the signed candidate into the results document as cited evidence.",
+      "acceptance": [
+        "See the T05b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "depends_on": [
+        "T05a",
+        "T10b",
+        "U10b",
+        "B05",
+        "E02",
+        "P08b",
+        "T01",
+        "T02b",
+        "T03",
+        "T04b",
+        "T09",
+        "T12b"
+      ],
+      "source_pointers": [
+        "docs/validation/m1-device-results.md"
+      ]
+    },
+    {
+      "key": "F67",
+      "parent": null,
+      "title": "Record and export the content-free metrics in the shipped app",
+      "file_scope": [
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/CompositionRoot.swift (additive)",
+        "app/data-settings/ExportSettings*.swift",
+        "ios/Tests/Metrics/",
+        "ios/Tests/DataSettings/",
+        "ios/Tests/AppAssembly/"
+      ],
+      "intent": "Construct T01's MetricsService at the composition root, pass it to the capture entry model, job runner and reminder reconciler, and offer the content-free export on the Settings \u2192 Export screen.",
+      "acceptance": [
+        "See the F67 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Metrics/MetricsService.swift",
+        "ios/Capture/Entry/CaptureEntryModel.swift",
+        "ios/AppAssembly/AppServices.swift"
       ]
     }
   ],
@@ -5089,21 +5188,8 @@
     "T12b": [
       "T12a"
     ],
-    "T05": [
-      "B05",
-      "E02",
-      "P08b",
-      "T01",
-      "T02b",
-      "T03",
-      "T04b",
-      "T09",
-      "T10b",
-      "T12b",
-      "U10b"
-    ],
     "T06": [
-      "T05"
+      "T05b"
     ],
     "T07": [
       "T06"
@@ -5401,7 +5487,27 @@
     "F65": [],
     "F66": [
       "F65"
-    ]
+    ],
+    "T05a": [
+      "F07",
+      "T10a",
+      "U10a"
+    ],
+    "T05b": [
+      "B05",
+      "E02",
+      "P08b",
+      "T01",
+      "T02b",
+      "T03",
+      "T04b",
+      "T05a",
+      "T09",
+      "T10b",
+      "T12b",
+      "U10b"
+    ],
+    "F67": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5670,7 +5776,7 @@
     },
     {
       "date": "2026-10-28",
-      "change": "F56 added: item status rerun_state for in-flight reruns of uninterpreted and abstained items. F44 amendment 2: Sorting… from rerun_state, fresh-model tests, rerun batching at MAX_RERUN_BATCH, Status refresh on unlock; F44 and F54b depend on F56."
+      "change": "F56 added: item status rerun_state for in-flight reruns of uninterpreted and abstained items. F44 amendment 2: Sorting\u2026 from rerun_state, fresh-model tests, rerun batching at MAX_RERUN_BATCH, Status refresh on unlock; F44 and F54b depend on F56."
     },
     {
       "date": "2026-10-28",
@@ -5711,6 +5817,10 @@
     {
       "date": "2026-11-04",
       "change": "F64 added after the maintainer's trial capture \"Remind me today to cancel the honey bucket probably today around 10 AM\" was stored as not scheduled yet: the resolver has no approximation words (around, about, ish, roughly) and the guard treats a hedge before the day as making it inexact. Decision: approximations and likelihood hedges inside the time expression schedule at the stated time; F29's request hedge is unchanged. F65 and F66 added for the macOS flakiness: F65 applies F47's leak-baseline wait through one helper in all 66 files with a Linux check; F66 runs the three tests that failed on 2026-11-03 (the denied-permission journey twice) 250 iterations each and fixes each reproduced cause where it is. F66 depends on F65."
+    },
+    {
+      "date": "2026-11-06",
+      "change": "Split T05 into T05a (device-matrix procedure on the shipped UI, ohand.device-matrix.v1 record, Linux checker under tools/validation/device_matrix/) and T05b (maintainer's record from the trial iPhone), before T05 was claimed; original task 10d059a0 retired unclaimed. T06 depends on T05b. F67 added: the shipped app constructs no MetricsService, so T01's latency and failure metrics are never recorded or exportable; F67 wires the sink at the composition root and adds the export to Settings \u2192 Export. T05a does not wait for F67."
     }
   ]
 }

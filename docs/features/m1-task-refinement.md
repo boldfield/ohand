@@ -10,6 +10,8 @@ Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity,
 
 Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
 
+Addendum 2026-11-06: T05 is split the same way as V08, P08, U10 and T10, before it is claimed, into T05a (the device-matrix procedure on the production app, the record format and its Linux checker) and T05b (the maintainer's record from the trial iPhone). The original task `10d059a0` is retired unclaimed: its substance is device evidence only the maintainer can produce, and every earlier task of that shape cost rejected rounds before it was split. T06 now depends on T05b. See the T05a and T05b sections.
+
 Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
 
 ## Execution authority
@@ -345,6 +347,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | P08 | P08a, P08b | Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block. |
 | U10 | U10a, U10b | Automated audits and their fixes can be done and checked in the simulator; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them instead of finding them. |
 | T10 | T10a, T10b | The fleet can version builds, test the signing wrapper with stubbed tools and check an upgrade in the simulator; the signed candidate and the upgrade on the trial iPhone are maintainer inputs. Separate them so the tooling and the automated check land while the device evidence stays an honest block. |
+| T05 | T05a, T05b | The fleet can write the device-matrix procedure against the shipped UI, define the record and check a record mechanically; running the matrix on the trial iPhone is a maintainer input. Separate them so the procedure is reviewed before the device session and the record is checked instead of argued over. |
 
 ## Retained unstarted tasks
 
@@ -4797,3 +4800,83 @@ Acceptance:
 6. **Exact-head macOS CI evidence**, green, and `make check` and `make test` on Linux.
 
 Validation: `make check` and `make test`, plus the exact-head macOS CI run.
+
+### T05a
+
+Write the device-matrix procedure for the production app, the record format and its checker
+
+Turn the functional matrix of `docs/validation/m1-protocol.md` into a step-by-step procedure on the app as it ships, so the maintainer's device session (T05b) runs a reviewed list against named screens instead of interpreting the protocol on the phone, and so the resulting record is checked by a tool instead of argued over in review.
+
+Owned paths: `docs/validation/m1-device-results.md` (the procedure, case table, latency method and record-format sections; the results section belongs to T05b), `docs/validation/evidence/device-matrix/README.md`, `tools/validation/device_matrix/` (the checker, its required-case list and tests), and `Makefile` (two additive targets: `device-matrix-check`, added to `check`, and `device-matrix-test`, added to `test`).
+
+Not owned: the app, `ios/`, `core/`, `docs/validation/m1-protocol.md` (F07's protocol is the source; this task maps it, it does not amend it), `docs/releases/`, `docs/testing/`.
+
+Dependencies: T10a (the candidate record the matrix record cites), U10a (`docs/validation/accessibility.md` is the model for a device procedure on the shipped UI) and F07. All three are done, so this task is claimable at once.
+
+Acceptance:
+
+1. **Every required case has an identifier and nothing is dropped.** `tools/validation/device_matrix/required_cases.json` lists one stable identifier per required case (for example `offline-1` … `offline-6`, `state-1` … `state-6`, `reminder-1` … `reminder-10`, `retrieval-1` … `retrieval-7`, `config-1` … `config-4`, `processing-1` … `processing-3`) for the six sections of the protocol's functional matrix, plus one identifier for each item P09 deferred to T05 by name (amendments 2 and 3 above: offline speech recognition with an immediate lock, capture before first unlock after reboot, termination between control handoff and commit, refusal under low free space, notification survival of Focus and summaries, Low Power Mode, reboot, a time-zone change after scheduling, provisional and ephemeral authorization, reinstall or OS upgrade, keychain behaviour after passcode removal, the previous audio fixture after a background permission revoke, Shortcuts or Action-button entry latency cold and warm, untimed voice Start, text-field trigger-to-ready), plus the plan's own items (`docs/features/m1-plan.md#t05`: cold, locked and permission paths, offline recording and text, process interruption, reminders with the UI closed, pipeline faults, Mac asleep). A test asserts that the case table in `docs/validation/m1-device-results.md` and `required_cases.json` name the same identifiers, so neither can drift.
+2. **Each case is a procedure on the shipped UI.** For every identifier the document gives: the synthetic data to prepare; the steps, naming the screens and controls as they exist on current `main` (Home and its composer, Source detail, Search, Settings → Processing, Settings → Privacy, Settings → Status, Settings → Export, Settings → Daily prompt, the notification and its actions, the capture control), with names matching `docs/features/m1-ui-design.md` and the app source; the expected observable outcome, stated as the protocol's own criterion; the evidence to capture (which screenshot, screen recording or Status count) and its artifact name pattern; and the device settings involved (Airplane Mode, Focus, Low Power Mode, Settings → Privacy & Security permissions). A reviewer checks a sample of control names against `app/` and `ios/` and rejects an invented one.
+3. **Cases the device cannot drive directly get a surrogate and a citation, never a waiver.** Transport replay and idempotency (`reminder-8`), injected provider timeouts or invalid responses (`processing-2`) and a forced partial batch failure (`processing-3`) are not injectable on a signed device build. For each, the document gives a device-observable surrogate (for example Airplane Mode toggled during a running job; a credential replaced with an invalid one in Settings → Processing; the self-hosted endpoint made unreachable; two notes of which one targets a provider that is unavailable), states what the surrogate does and does not show, and cites the automated evidence that covers the injected form by test path (`ios/Tests/FailureJourneys/`, `ios/Tests/JobRunner/`, `core/tests/job_runner/`, `core/tests/job_queue/`, `core/tests/interpretation_dispatch/`, and the T02b, T04a, T04b, T12a and T12b evidence). No case is marked out of scope by this task. The only `not_applicable` outcomes the procedure allows are those the protocol itself defines (Mac asleep without a Mac inlet) and a capability the candidate does not enable, and each needs its reason in the record.
+4. **The capabilities section is driven by the candidate.** The procedure says how to read, from the installed candidate, which optional capabilities are enabled (self-hosted provider, shadow, previews: Settings → Processing, Settings → Privacy and Settings → Daily prompt) and which cases apply to each. A capability the candidate enables is tested (T05 criterion 4); one it does not enable is recorded `not_applicable` with reason `capability not enabled in candidate`.
+5. **Latency method.** Trigger-to-ready (cold launch, warm switch, locked handoff, Shortcuts or Action button) and end-of-input-to-save (voice and text) are measured with the screen-recording frame-timing method recorded in `docs/validation/evidence/device-feasibility/2026-10-10-latency-accessibility.json` (`method.latency`): touch-down frame to ready frame, one-frame resolution, upper bounds on release-to-ready, at least five trials per launch type. The record holds sample count, median, p95, minimum and maximum per series, and nothing else from the recordings. If the candidate contains F67, the in-app content-free metrics export is attached as a second source under its own artifact name; the method does not wait for F67.
+6. **Record format `ohand.device-matrix.v1`**, documented in `docs/validation/evidence/device-matrix/README.md` and modelled on `docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json`: `schema`, `collected_at`, `candidate_record` (a path under `docs/releases/m1-trial/`), `build_number`, `revision`, `device` (model and iOS version only), `capabilities_enabled`, `cases` (one entry per identifier: `outcome` ∈ `passed`, `failed`, `blocked`, `not_applicable`; `artifacts` (names); `observed_at`; `reason` for `blocked` and `not_applicable`; `notes` holding counts and outcomes only), `latency` (the series in item 5), `private_evidence_reference` and `issues` (each with severity and either a follow-up task key or an explicit acceptance for the trial). The record holds no capture text, no team, profile, certificate or device identifier, and no hash of one.
+7. **Checker.** `tools/validation/device_matrix/check_device_matrix.py RECORD` exits non-zero, naming the problem, when: a required identifier is missing or repeated; an outcome is outside the enumeration; a `passed` or `failed` case has no artifact or no `observed_at`; a `blocked` or `not_applicable` case has no reason; `candidate_record` does not name an existing file whose `build_number` and `revision` match the record's; a latency series lacks a sample count or has fewer than five samples; or a key outside the format appears. It is pure Python 3 with no dependencies, and `make device-matrix-check` runs it over every record in `docs/validation/evidence/device-matrix/` (passing when the directory holds no record yet). Tests under `tools/validation/device_matrix/` cover one passing synthetic record and one failing record per rule, and run under `make device-matrix-test`.
+8. No application change, no new UI test and no device evidence. This task writes the procedure and the checker only.
+
+Validation: `make check` and `make test`. Keep fixtures synthetic.
+
+Execution: Sonnet (the checker and its tests are tooling), escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Never weaken acceptance to force completion.
+
+Contributes to original T05 criteria: 2 (the sanitized results format and the reproduction fields), 3 (citation of a named artifact, build and time for every result), 4 (capabilities read from the candidate).
+
+### T05b
+
+Record the actual-device functional exit matrix
+
+Fold the maintainer's run of the T05a procedure on the trial iPhone into `docs/validation/m1-device-results.md` as cited evidence.
+
+Owned paths: `docs/validation/m1-device-results.md` (the results section) and `docs/validation/evidence/device-matrix/` (the records; not the README).
+
+Dependencies: T05a, T10b and U10b (the one signed candidate serves all three), and the prerequisites T05 already carried: B05, E02, P08b, T01, T02b, T03, T04b, T09, T12b.
+
+Context: this task starts blocked. The maintainer:
+1. runs the T05a procedure on the candidate that T10b's device record names, with synthetic data, over as many sessions as it takes;
+2. writes `docs/validation/evidence/device-matrix/device-<collection date>-<candidate build number>.json` in the `ohand.device-matrix.v1` format and checks it with `make device-matrix-check`;
+3. commits the record and unblocks this task naming that file.
+
+A worker claimed without such a file must re-block, naming the exact missing file, and must not substitute simulator, walkthrough or probe-build results. Do not certify a probe build as the production app.
+
+Acceptance:
+1. Every identifier in `required_cases.json` has an outcome in the results section, cited from the named record with the candidate build, revision and `observed_at`. `make device-matrix-check` passes on the committed record.
+2. A `failed` case keeps this task blocked until a fix lands and the affected cases are re-recorded against a new candidate; a new candidate repeats T10b's upgrade procedure first. A `blocked` case leaves M1 evidence incomplete under the protocol's "Blocked, not completed" rule and keeps this task blocked unless a written scope amendment in this document defers that case by name. `not_applicable` is accepted only with one of the reasons T05a allows.
+3. The latency series are reproduced as tables (sample count, median, p95, minimum, maximum per launch type and capture type) from the record, with no other content from the recordings.
+4. Each issue the run found is listed with its severity and either a follow-up task or an explicit acceptance for the trial; an issue that loses an acknowledged capture, duplicates or invents a reminder, or leaks private content to locked access is a `failed` case, not an issue.
+5. Raw recordings, screenshots and personal content stay with the maintainer; the repository holds the sanitized record and an auditable reference to the private evidence. T06 distributes the candidate this record names and nothing else.
+
+Contributes to original T05 criteria: 1, 2, 3, 4.
+
+Execution: Haiku, escalate=true, independent Opus and gpt-5.6-sol review, separate automatic merger. Never weaken acceptance to force completion.
+
+### F67
+
+Record and export the content-free metrics in the shipped app
+
+Found by the coordinator on 2026-11-06 while writing T05a. T01 built `MetricsService` (`ios/Services/Metrics/MetricsService.swift`), the core metrics store and the recording hooks: `CaptureEntryModel` records trigger-to-ready and end-of-input-to-save when it is given a `metrics` sink (`ios/Capture/Entry/CaptureEntryModel.swift:178`, `:323`), `JobRunnerService` counts processing failures when given one (`ios/Services/JobRunner/JobRunnerService.swift:48`), and `CoreReminderReconciler` counts scheduling failures (`ios/Services/NotificationPermission/CoreReminderReconciler.swift:70`). Production passes none of them a sink: `AppServices.swift:117` constructs `CaptureEntryModel` without `metrics:`, nothing constructs `MetricsService`, and no screen offers `exportReport()`. The shipped app therefore records no latency or reliability metric, and T08's criterion 1 (separate latency distributions and errors from the trial) has no source but screen recordings. This is the composition-root gap of 2026-10-15 again, for one service.
+
+Scope: construct one `MetricsService` at the composition root over the existing `CoreMetricsClient`; pass it as the `metrics` sink to `CaptureEntryModel`, `JobRunnerService` and `CoreReminderReconciler` where they are built in production; add an "Export metrics" control to the Settings → Export screen that, in an authenticated read session, hands `MetricsExport.json` to the share sheet the way the notes export does, with copy following `docs/features/m1-ui-design.md` and `ExportSettingsText` (what the file holds: timings and counts for this build, no note content; what it does not hold). Recording stays on by default, since the report is content-free, and the existing `setRecordingEnabled` and `clearAll()` are exposed in the same section as "Pause recording" and "Clear metrics".
+
+Owned paths: `ios/AppAssembly/AppServices.swift` (the metrics construction and the three `metrics:` arguments), `ios/Services/Assembly/CompositionRoot.swift` (additive: the metrics client offered to the assembly, if it is not already), `app/data-settings/ExportSettings*.swift`, `ios/Tests/Metrics/`, `ios/Tests/DataSettings/`, `ios/Tests/AppAssembly/` (the wiring assertion).
+
+Not owned: `ios/Services/Metrics/` (T01's service is used as it is; a defect in it is a separate task), `core/`, `ios/Capture/`, `ios/Services/JobRunner/`, `ios/Services/NotificationPermission/`.
+
+Acceptance:
+1. A test over the production assembly asserts that the capture entry model, the job runner and the reminder reconciler share one metrics sink, and that a trigger-to-ready record made through the capture entry model appears in the export.
+2. The export control is present only in an authenticated read session (a capture-only session shows why, as the notes export does), produces a file whose content is `MetricsExport.json` byte for byte, and the file names the build (`CoreMetricsBuild.current()`).
+3. A test inspects the exported JSON of a fixture session and asserts it contains no capture text and no identifier beyond the build identity and machine labels.
+4. `docs/validation/m1-device-results.md` is not edited by this task; T05a cites the export by name once it exists.
+5. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. T05a does not depend on F67; T05b and T08 record its export when the candidate contains it.
