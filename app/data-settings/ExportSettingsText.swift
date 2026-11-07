@@ -77,6 +77,34 @@ enum ExportSettingsText {
         return text
     }
 
+    // MARK: Metrics
+
+    static let metricsHeading = "Metrics"
+    static let metricsExportTitle = "Export metrics"
+    static let metricsPauseTitle = "Pause recording"
+    static let metricsResumeTitle = "Resume recording"
+    static let metricsClearTitle = "Clear metrics"
+    static let metricsHolds =
+        "The metrics file holds timings and counts for this build: how long the capture screen took to be ready, how long "
+        + "saving took, and how often processing or reminder scheduling failed, with the build's version and revision."
+    static let metricsHoldsNot =
+        "It holds no note content: no text, audio, titles, times, names or identifiers of your notes, and nothing about "
+        + "what you did with them. It is created only when you export, and this app sends it nowhere itself."
+    static let metricsRecordingOnFooter = "Recording is on. Pausing keeps what is stored; clearing removes it."
+    static let metricsRecordingOffFooter = "Recording is paused. Nothing new is stored until you resume."
+    static let metricsLockedText =
+        "Metrics are available only after you unlock your saved items. Go back and open Settings again to unlock them."
+    static let metricsExportFailed = "The metrics file could not be prepared. Nothing was sent; try again."
+    static let metricsActionFailed = "The change could not be made. Try again."
+    static let metricsPaused = "Recording is paused. Stored figures are kept."
+    static let metricsResumed = "Recording is on."
+    static let metricsCleared = "Stored metrics were removed."
+    static func metricsShared(temporariesRemoved: Bool) -> String {
+        let text = "Shared the metrics file. The app you chose now holds a copy that this app cannot recall."
+        return temporariesRemoved ? text : text + " " + leftoverNote
+    }
+    static let metricsInfoParagraphs = [metricsHolds, metricsHoldsNot]
+
     static func failure(_ failure: ExportFailure) -> String {
         switch failure {
         case .noScopeSelected: return noScopeNote
