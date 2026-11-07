@@ -164,7 +164,7 @@ final class MetricsProductionWiringTests: XCTestCase {
 
         let service = services.root.metricsService
         let root = services.root
-        let captureText = "remind me 2099-01-01 09:00:00 to water the zebra-orchid quietly"
+        let captureText = "remind me 2099-01-01 09:00:00 to call mom"
         services.captureEntry.textModel.updateText(captureText)
         services.captureEntry.saveText()
         eventually("the withheld schedule is counted as a scheduling failure") {
@@ -189,7 +189,7 @@ final class MetricsProductionWiringTests: XCTestCase {
         let data = try Data(contentsOf: exported.file)
         let text = try XCTUnwrap(String(data: data, encoding: .utf8))
 
-        for fragment in ["zebra-orchid", "water the", "remind me", "2099", "entry-privacy-1", "entry-", "item-", "job-"] {
+        for fragment in ["call mom", "remind me", "2099", "entry-privacy-1", "entry-", "item-", "job-"] {
             XCTAssertFalse(text.contains(fragment), "the file must not hold \(fragment)")
         }
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
