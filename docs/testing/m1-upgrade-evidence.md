@@ -111,3 +111,7 @@ Do not paste capture text into any record; write counts and outcomes only.
 
    A device record holds no team identifier, profile, certificate, device identifier or hash of one. If any check fails, record
    `"outcome": "failed"` with the check named in `notes`, and do not delete the app: keep it for diagnosis.
+
+The committed result is `docs/validation/evidence/upgrade/device-2026-11-07-398.json`: collected 2026-11-07T20:50:00Z on an iPhone 16 Pro upgrading from candidate build 397 to candidate build 398 (44904c1f). All checks passed. The exports that verified the record are archived in private storage with their SHA-256 recorded in the notes; the reminder that was monitored (scheduled for 2026-11-07T22:00:00Z) is named in the notes with its time; the provider was Anthropic and its secret was verified present. No capture text or credentials are in the record.
+
+The device's result is committed under `docs/validation/evidence/upgrade/` (format in the README there).
