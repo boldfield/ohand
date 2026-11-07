@@ -16,7 +16,7 @@ Screens and controls are named as they exist on `main` (checked against `app/`, 
 | --- | --- |
 | `S-DENTIST` | "Remind me <D> 09:00:00 to call the dentist", where `<D>` is tomorrow's date as YYYY-MM-DD (the offline fast path takes only `YYYY-MM-DD HH:MM:SS` for an exact time and a closed content lexicon; "tomorrow", a weekday or a bare date give no instant offline) |
 | `S-PLAIN` | "Synthetic note one about a garden bench" |
-| `S-PAST` | "Remind me <P> 09:00:00 to call the dentist", where `<P>` is yesterday's date as YYYY-MM-DD |
+| `S-PAST` | "Remind me <P> 09:00:00 to check the synthetic ledger", where `<P>` is yesterday's date as YYYY-MM-DD (the content is outside the fast path's lexicon, so the fast path does not claim it and a configured provider interprets it; the fast path itself never records a past time, because it emits an ambiguous candidate that the core rejects) |
 | `S-EVERY` | "Remind me every Monday to check the synthetic ledger" |
 | `S-VAGUE` | "Remind me next week to review the synthetic plan" |
 | `S-WORK` | "Synthetic work note about the quarterly checklist" (the shipped capture screens stamp the configured default scope, Personal, and expose no control to choose Work, so on a candidate that stamps only Personal this item is saved as Personal) |
@@ -100,7 +100,8 @@ Rules:
 | `deferred-clock-date-dst` | P09 amendment 4: clock, date change and DST | | |
 | `deferred-provisional-ephemeral-authorization` | P09 amendment 2: provisional and ephemeral authorization | | |
 | `deferred-authorization-change-pending` | P09 amendment 4: authorization changed in Settings while requests are pending | | |
-| `deferred-pending-slots` | P09 amendment 4: delivered notifications and pending slots | | |
+| `deferred-pending-slots-delivered` | P09 amendment 4: delivered notifications and pending slots | | |
+| `deferred-pending-slots-repeating` | P09 amendment 4: repeating triggers and pending slots | | |
 | `deferred-reinstall-os-upgrade` | P09 amendment 2: reinstall or OS upgrade | | |
 | `deferred-keychain-passcode-removal` | P09 amendment 2: keychain behaviour after passcode removal | | |
 | `deferred-audio-fixture-after-revoke` | P09 amendment 2: the previous audio fixture after a background permission revoke | | |
@@ -231,11 +232,12 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** Focus off.
 
 #### `reminder-3`
-- **Prepare:** `S-PAST`.
-- **Steps:** Save `S-PAST`. Read the composer line and open the item's reminder.
-- **Expect:** (protocol) the explicit `time_in_past` state, no fabricated rescheduling: "Reminder not scheduled: that time has passed." and, in the item, "Time has passed" with "Choose a later date and time."
-- **Evidence:** `reminder-3-01.png`, `reminder-3-02.png`.
-- **Settings:** none.
+- **Prepare:** a cloud provider set as default and verified (Settings → Processing → "With a cloud provider", via "Add provider", with a synthetic-usage test key you control, as in `offline-4`); `S-PAST`. Without a key, record `blocked` with the reason: the offline fast path cannot produce this state.
+- **Steps:** (1) Save `S-PAST` as text with the network on. When it has sorted, read the composer line and open the item's reminder. (2) In that item's reminder editor, set "Date and time" to a minute in the past and tap "Save time".
+- **Expect:** (protocol) the explicit `time_in_past` state, no fabricated rescheduling: (1) "Reminder not scheduled: that time has passed." and, in the item, "Time has passed" with "Choose a later date and time."; the item keeps the time that was asked for and no notification is pending for it. (2) the editor refuses with "Choose a time in the future. Nothing was changed." and the stored time is unchanged. If the provider's answer is not recorded as `time_in_past` (the item reads "No time set" or shows no reminder), the case is `failed` with what the item shows in `notes`.
+- **Route, checked against the code:** the provider's explicit candidate is checked against the core resolver and recorded as `unschedulable(time_in_past)` with the instant kept (`core/tests/proposal_application/main.rs`, `a_time_already_past_at_capture_is_unschedulable_without_adjustment`); the editor's refusal is `reminder_controls`' `time_in_past` outcome (`core/tests/reminder_controls/main.rs`).
+- **Evidence:** `reminder-3-01.png` (composer line), `reminder-3-02.png` (item reminder), `reminder-3-03.png` (editor refusal).
+- **Settings:** network on.
 
 #### `reminder-4`
 - **Prepare:** `S-EVERY`.
@@ -470,18 +472,22 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Settings:** time zone changed; restore after.
 
 #### `deferred-clock-date-dst`
-- **Prepare:** a reminder scheduled for tomorrow at nine.
-- **Steps:** Move the date forward one day with Set Automatically off (and across a DST change date if one is near); return; check the reminder and Status.
-- **Expect:** (P09 amendment 4) the reminder is not duplicated and not silently lost: it fires once at the right local time or reads "Time has passed" if its time passed; Status is honest.
-- **Evidence:** `deferred-clock-date-dst-01.png`.
-- **Settings:** date changed; restore after.
+This case always crosses both known US transitions in America/New_York; an ordinary date change alone is not evidence. The next ones after the session date are 2027-03-14 (02:00 EST becomes 03:00 EDT, a gap) and 2027-11-07 (02:00 EDT becomes 01:00 EST, so 01:00–01:59 happens twice, a fold). If the session runs later, use the next pair (second Sunday of March, first Sunday of November) and write the dates in `notes`.
+- **Prepare:** iOS Settings → General → Date & Time: Set Automatically off, time zone New York. No provider needed. With the real date, save four text captures: "Remind me 2027-03-14 02:30:00 to call the dentist" (inside the gap), "Remind me 2027-11-07 01:30:00 to call the dentist" (inside the fold), "Remind me 2027-03-14 03:05:00 to call the dentist" and "Remind me 2027-11-07 02:05:00 to call the dentist" (just after each transition).
+- **Steps:** (1) Open the first two items' reminders. (2) Set the clock to 2027-03-14 01:58 and keep Oh And closed; wait for the 03:05 reminder (about seven minutes, the clock jumps from 01:59:59 to 03:00:00); open the app and Status. (3) Set the clock to 2027-11-07 01:55 (EDT, before the fold) and keep Oh And closed; wait through 01:59:59 EDT → 01:00 EST and on to 02:05 EST (about 70 minutes); open the app and Status. (4) Move the date forward one more day and back to the real date; open Status. Restore Set Automatically.
+- **Expect:** (P09 amendment 4) DST gap and fold times are not guessed and the clock and date changes neither duplicate nor lose a reminder: (1) both read "Time incomplete" with "… but a clock change means that time does not exist or happens twice, so nothing is scheduled. Choose a date and time." and nothing is pending for them; (2) the 03:05 reminder fires once, at 03:05 EDT; (3) the 02:05 reminder fires once, at 02:05 EST, not during the first pass through 01:55–02:00 EDT; (4) every reminder stays as recorded (delivered ones are not re-delivered; others read "Time has passed" only if their time passed) and Status counts are honest.
+- **Route, checked against the code:** the fast path records the gap and fold phrases as `not_scheduled_yet` with the resolver's DST reason (`core/tests/fast_path/main.rs`, `dst_fold_and_gap_are_ambiguous_without_an_instant`; `core/src/time/resolver.rs`), which the editor shows as the clock-change problem (`app/reminders/ReminderEditText.swift`); the two after-transition phrases resolve to 07:05Z on each date. If the device will not take the date (a managed phone), record `blocked` with the reason.
+- **Evidence:** `deferred-clock-date-dst-01.png` (gap item), `deferred-clock-date-dst-02.png` (fold item), `deferred-clock-date-dst-03.mp4` and `deferred-clock-date-dst-04.mp4` (lock screen through each delivery — private, keep local), `deferred-clock-date-dst-05.png` (Status after step 4). Notes: notifications received per reminder and the clock time of each.
+- **Settings:** Set Automatically off, time zone New York, clock set to each transition; restore after.
 
 #### `deferred-provisional-ephemeral-authorization`
+The shipped app cannot obtain either state. `NotificationPermissionAsker` (`ios/Services/Permissions/NotificationPermissionAsker.swift`) requests only `.alert` and `.sound`; iOS grants provisional authorization only to a request that includes `.provisional`, and choosing Deliver Quietly after an ordinary grant leaves the status `authorized`, not `provisional`. Ephemeral authorization exists only for App Clips, and the candidate is the full app. A quiet authorized notification is not evidence for this case.
 - **Prepare:** a fresh install (delete and reinstall the same candidate), Notifications not asked.
-- **Steps:** Open Settings → Permissions and observe notification state; allow Notifications in the way iOS offers for a provisional grant (Deliver Quietly) if it is offered; schedule a reminder and wait.
-- **Expect:** (P09 amendment 2) provisional authorization is reported honestly and does not claim the same as full: Permissions and Status report what iOS granted (note the wording shown in `notes`); the reminder is delivered quietly to Notification Center, not as a banner. Ephemeral authorization is not offered to a normal app on the device; record that as an observation in `notes`.
-- **Evidence:** `deferred-provisional-ephemeral-authorization-01.png`.
-- **Settings:** Notifications → Deliver Quietly.
+- **Steps:** Open Oh And and do nothing that asks for Notifications. Check iOS Settings → Notifications → Oh And: on this candidate it must not exist yet (it would exist, with quiet delivery, only if provisional had been granted without a prompt). Then trigger the ask (Settings → Permissions) and note the alert iOS shows.
+- **Expect:** (P09 amendment 2) the outcome is `blocked`, reason `candidate requests only alert and sound authorization; provisional and ephemeral (App Clip only) states cannot be obtained`, unless the candidate differs from `main` and the steps show a provisional grant (Oh And listed in iOS Notifications settings before any prompt, with quiet delivery), in which case continue: schedule a reminder, and expect Permissions and Status to report what iOS granted without claiming full authorization and the reminder to arrive quietly in Notification Center. The ephemeral half stays `blocked` on the full app in any case; write it in `notes`.
+- **Automated evidence (mapping only, not the device state):** `ios/Tests/NotificationPermission/NotificationReadinessTests.swift` and `ios/Tests/Permissions/PermissionsServiceTests.swift` map `.provisional` (and `ios/Services/NotificationPermission/NotificationPermissionModels.swift` maps `.ephemeral`) to usable.
+- **Evidence:** `deferred-provisional-ephemeral-authorization-01.png` (iOS Notifications list before the ask), `deferred-provisional-ephemeral-authorization-02.png` (the alert iOS shows).
+- **Settings:** fresh install; Notifications not asked.
 
 #### `deferred-authorization-change-pending`
 - **Prepare:** three pending reminders.
@@ -490,11 +496,18 @@ All reminder cases need Notifications allowed for Oh And, unless the case says o
 - **Evidence:** `deferred-authorization-change-pending-01.png`, `deferred-authorization-change-pending-02.png`.
 - **Settings:** Notifications toggled.
 
-#### `deferred-pending-slots`
-- **Prepare:** a daily prompt on and reminders pending.
-- **Steps:** Let three notifications be delivered and leave them in Notification Center; add reminders until Status reports a hold; check whether the delivered ones count against 64.
-- **Expect:** (P09 amendment 4) delivered notifications do not use pending slots, and the daily prompt (a repeating trigger) is counted: Status reports the counts honestly ("<n> daily prompt(s) wait(s) for room …" only when true).
-- **Evidence:** `deferred-pending-slots-01.png`. Notes: counts only.
+#### `deferred-pending-slots-delivered`
+- **Prepare:** the daily prompt on (Settings → Daily prompt), and three reminders a few minutes ahead.
+- **Steps:** Let the three reminders be delivered and leave them in Notification Center. Then add reminders as in `reminder-6` until Status reports a hold; write down how many reminders were scheduled before the first was held back.
+- **Expect:** (P09 amendment 4) delivered notifications do not use pending slots: the hold begins at the same count as with an empty Notification Center (64 pending requests in all, the three delivered ones not counted, the daily prompt's pending occurrences counted); Status reports the counts honestly ("<n> daily prompt(s) wait(s) for room …" only when true).
+- **Evidence:** `deferred-pending-slots-delivered-01.png` (Status at the hold). Notes: counts only (delivered, scheduled, held back, prompt occurrences).
+- **Settings:** none.
+
+#### `deferred-pending-slots-repeating`
+The shipped app schedules no repeating trigger, so whether one consumes a pending slot cannot be observed on the candidate. The daily prompt is planned as up to `PROMPT_HORIZON_DAYS` (3) separate dated occurrences (`core/src/suggestions/schedule/plan.rs`), and `SystemNotificationCenter.makeRequest` (`ios/Services/Notifications/SystemNotificationCenter.swift`) builds every request with `UNCalendarNotificationTrigger(..., repeats: false)`; each pending occurrence is one ordinary one-shot request, which `deferred-pending-slots-delivered` counts.
+- **Steps:** none on the device, unless the candidate differs from `main` and schedules a repeating trigger: then run the steps of `deferred-pending-slots-delivered` with it pending and record whether it takes one slot.
+- **Expect:** (P09 amendment 4) the outcome is `blocked`, reason `candidate schedules no repeating trigger; every request is one-shot`. Do not record the dated prompt occurrences as a repeating trigger.
+- **Evidence:** none for `blocked` (the reason is the record).
 - **Settings:** none.
 
 #### `deferred-reinstall-os-upgrade`
