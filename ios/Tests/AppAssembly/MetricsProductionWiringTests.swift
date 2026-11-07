@@ -141,6 +141,7 @@ final class MetricsProductionWiringTests: XCTestCase {
         center.authorizationStatus = .denied
         let services = try makeServices()
         authenticate(services)
+        services.start(isActive: true)
         services.captureEntry.textModel.updateText("remind me 2099-01-01 09:00:00 to call mom")
         services.captureEntry.saveText()
 
