@@ -113,6 +113,9 @@ final class MetricsProductionWiringTests: XCTestCase {
         XCTAssertTrue(runnerSink === service, "the job runner records to the root's one metrics service")
         let entrySink = try XCTUnwrap(sink(of: services.captureEntry), "the capture entry model was given a metrics sink")
         XCTAssertTrue(entrySink === service, "the capture entry model records to the root's one metrics service")
+        XCTAssertTrue(
+            services.root.reminderMetricsSink as AnyObject === service,
+            "the reminder reconciler was built with the root's one metrics service")
     }
 
     func testATriggerToReadyRecordMadeThroughTheCaptureEntryModelAppearsInTheExport() throws {

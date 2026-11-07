@@ -1150,6 +1150,9 @@ public final class ServiceCompositionRoot {
     /// to; its report leaves only through `metricsReport`.
     let metricsService: MetricsService
     public var metrics: MetricsRecording { metricsService }
+    /// The sink the assembly handed to the reminder reconciler, kept so a test can assert it is the one `metricsService`
+    /// (the reconciler holds its sink only inside a native-effects closure).
+    let reminderMetricsSink: MetricsRecording
     /// Exports the content-free metrics report for the share sheet and pauses or clears recording; every operation
     /// needs an authenticated read session.
     public let metricsReport: MetricsReportControl
@@ -1308,6 +1311,7 @@ public final class ServiceCompositionRoot {
         exportClient = assembly.exportClient
         metricsClient = assembly.metricsClient
         metricsService = assembly.metrics
+        reminderMetricsSink = assembly.reminderMetricsSink
         metricsReport = assembly.metricsReport
         exportService = assembly.exportService
         resetClient = assembly.resetClient
@@ -1974,6 +1978,7 @@ public final class ServiceCompositionRoot {
         let exportClient: CoreExportClient
         let metricsClient: CoreMetricsClient
         let metrics: MetricsService
+        let reminderMetricsSink: MetricsRecording
         let metricsReport: MetricsReportControl
         let exportService: ExportService
         let resetClient: CoreResetClient
@@ -2083,8 +2088,9 @@ public final class ServiceCompositionRoot {
             router.register { metricsClient.handle($0) }
             undo.append { metricsClient.shutDown() }
             let metrics = MetricsService(core: metricsClient, session: adapters.readSession)
+            let reminderMetricsSink: MetricsRecording = metrics
             let reminderCore = try CoreReminderReconciler(
-                core: core, bridge: bridge, center: adapters.notificationCenter, metrics: metrics)
+                core: core, bridge: bridge, center: adapters.notificationCenter, metrics: reminderMetricsSink)
             undo.append { reminderCore.invalidate() }
             router.register { reminderCore.handle($0) }
 
@@ -2264,7 +2270,8 @@ public final class ServiceCompositionRoot {
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
-                exportClient: exportClient, metricsClient: metricsClient, metrics: metrics, metricsReport: metricsReport,
+                exportClient: exportClient, metricsClient: metricsClient, metrics: metrics, reminderMetricsSink: reminderMetricsSink,
+                metricsReport: metricsReport,
                 exportService: exportService, resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
                 permissionReconciler: permissionReconciler, foreground: foreground, itemChanges: itemChanges)
         } catch {
