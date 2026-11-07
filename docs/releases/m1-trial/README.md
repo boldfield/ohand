@@ -60,3 +60,9 @@ those. The wrapper compares the text with every sensitive value the signing run 
 if one appears. `profile_expires_at` is the date to plan the next candidate by: the build stops launching on the phone after it.
 
 The archive itself is not committed.
+
+## Candidates used for verification and distribution
+
+Candidate `docs/releases/m1-trial/candidate-398-44904c1f.json` (build 398, revision 44904c1f) is the signed trial build that T05, U10b, and T06 use: T05 uses it as the device-level evidence of upgrade correctness, U10b records the device upgrade with this candidate, and T06 distributes it.
+
+When a candidate binary is rebuilt (for example, for a platform compatibility fix or policy change), the affected device checks in U10b must be repeated with a new candidate before that candidate is distributed by T06.
