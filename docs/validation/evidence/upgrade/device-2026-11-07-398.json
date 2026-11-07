@@ -1,0 +1,26 @@
+{
+  "schema": "ohand.upgrade-device-evidence.v1",
+  "collected_at": "2026-11-07T20:50:00Z",
+  "candidate_record": "docs/releases/m1-trial/candidate-398-44904c1f.json",
+  "device": "iPhone 16 Pro (label trial-phone)",
+  "installed_build_number_before": "397",
+  "installed_build_number_after": "398",
+  "counts_before": {
+    "captures": 15,
+    "corrections": 1,
+    "deleted": null,
+    "reminders": 4
+  },
+  "counts_after": {
+    "captures": 15,
+    "corrections": 1,
+    "deleted": null,
+    "reminders": 4
+  },
+  "provider_profile_still_configured": true,
+  "credential_still_present": true,
+  "reminder_time_unchanged": true,
+  "reminder_notification_seen": true,
+  "outcome": "passed",
+  "notes": "Method: the counts come from the app's own export (Settings → Export, all areas) taken on build 397 at 2026-11-07T20:43:50Z, before the install, and on build 398 at 2026-11-07T20:46:17Z, after the install and unlock; the coordinator compared the two files on the Mac. Both exports hold the same 15 item ids (7 active, 8 completed) and every field of every item is equal: 1 item with a correction (original and correction both present), 4 items with a reminder, 3 of them past and closed, 1 resolved and scheduled for 2026-11-07T22:00:00Z (America/Los_Angeles). Before and after, the note shows stored time 2026-11-07 14:00 PST, Settings → Status reports 1 reminder scheduled with the system, Settings → Processing shows the same hosted provider (Anthropic) and Check saved secret reports it present. reminder_notification_seen is recorded on the procedure's pending alternative (still pending in Settings → Status at collection); the notification was due at 22:00Z, after collection. deleted: the maintainer kept no count of notes deleted before the upgrade; exports exclude deleted items, so the identical item sets show that nothing deleted resurfaced in the export, and the Home recents showed the same cards before and after. Build numbers before and after were read on the Mac with devicectl (install-ohand.sh --candidate, 'build on phone: 397 -> 398'); the candidate was installed over the existing app with devicectl device install app, never uninstalled, and launched into the running process list. An earlier upgrade the same day, candidate 397 (69ff12eb) over candidate 396 (bdabc949), was checked the same way with identical 14-item exports before (20:32:35Z) and after (20:36:53Z) but had no pending reminder, so it is not the cited upgrade. Private evidence: ~/.ohand-private-evidence/upgrade/ (the four export files, which hold note text and are never committed) and the screenshot of the reminder's note; the exports' SHA-256 are recorded there, not here."
+}
