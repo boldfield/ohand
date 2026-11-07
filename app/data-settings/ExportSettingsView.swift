@@ -225,6 +225,8 @@ struct MetricsExportSection: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(DSSpacing.sm)
                         .accessibilityIdentifier(Self.holdsIdentifier)
+                        .reportDataSettingsRendered(
+                            Self.holdsIdentifier, text: ExportSettingsText.metricsHolds + " " + ExportSettingsText.metricsHoldsNot)
                     button(ExportSettingsText.metricsExportTitle, Self.exportIdentifier, enabled: model.canExport) {
                         await model.startExport()
                     }

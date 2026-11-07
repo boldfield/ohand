@@ -86,38 +86,6 @@ final class MetricsExportFileTests: XCTestCase {
         XCTAssertEqual(core.exportBuilds.first ?? nil, CoreMetricsBuild.current())
     }
 
-    func testTheFileHoldsNoCaptureTextAndNoIdentifierBeyondTheBuildAndMachineLabels() async throws {
-        world.authenticate()
-        let (_, control) = makeControl(core: FixedReportCore(report: Self.fixtureReport), build: Self.build)
-        let prepared = try await control.prepareExport()
-        defer { control.cancelExport(exportID: prepared.id) }
-
-        let data = try Data(contentsOf: prepared.file)
-        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
-        for capture in ["remind me to call mom", "water the plants"] {
-            XCTAssertFalse(text.contains(capture), "capture text must not appear")
-        }
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(
-            Set(object.keys),
-            ["schema", "generated_at", "recording_enabled", "sample_limit_per_series", "build", "timings", "failures"])
-        let build = try XCTUnwrap(object["build"] as? [String: Any])
-        XCTAssertEqual(Set(build.keys), ["version", "build_number", "revision", "dirty"])
-        let timingLabels = (object["timings"] as? [[String: Any]] ?? []).flatMap { entry in
-            [entry["series"], entry["dimension"]].compactMap { $0 as? String }
-        }
-        let failureLabels = (object["failures"] as? [[String: Any]] ?? []).flatMap { entry in
-            [entry["series"], entry["dimension"]].compactMap { $0 as? String }
-        }
-        let machineLabels: Set<String> = [
-            "trigger_to_ready", "end_of_input_to_save", "cold", "warm", "locked_handoff", "voice", "text",
-            "processing_failure", "scheduling_failure", "timeout", "unavailable", "rate_limited", "unauthorized",
-            "invalid_output", "capability_unavailable", "unsupported_language", "interrupted", "retries_exhausted",
-            "other", "permission_denied", "capacity_exceeded", "unschedulable", "native_failure",
-        ]
-        XCTAssertTrue(Set(timingLabels + failureLabels).isSubset(of: machineLabels))
-    }
-
     func testACaptureOnlySessionGetsNoFileAndNothingIsRequested() async throws {
         let (_, control) = makeControl(core: FixedReportCore(report: Self.fixtureReport), build: Self.build)
 

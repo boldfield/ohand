@@ -153,4 +153,61 @@ final class MetricsProductionWiringTests: XCTestCase {
             return export.report.failures.contains { $0.series == "scheduling_failure" && $0.dimension == "permission_denied" }
         }
     }
+
+    /// The exported file of a real session holds no capture text and no identifier: the capture is saved through the
+    /// production assembly, every sink records, and the file is read back from the share-sheet export.
+    func testTheExportedFileOfARealSessionHoldsNoCaptureTextAndNoIdentifier() throws {
+        center.authorizationStatus = .denied
+        let services = try makeServices()
+        authenticate(services)
+        services.start(isActive: true)
+        services.captureEntry.present(
+            CaptureEntryPresentation(
+                entryID: "entry-privacy-1", source: .controlIntent, mode: .silent, launchKind: .cold,
+                access: CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true),
+                triggeredAtUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds))
+        services.captureEntry.surfaceDidBecomeReady()
+        let captureText = "remind me 2099-01-01 09:00:00 to water the zebra-orchid quietly"
+        services.captureEntry.textModel.updateText(captureText)
+        services.captureEntry.saveText()
+
+        let service = services.root.metricsService
+        let root = services.root
+        eventually("the trigger-to-ready figure and the scheduling failure are both recorded") {
+            _ = try? await root.reconcileReminders()
+            guard let export = try? await service.exportReport() else { return false }
+            return export.report.timings.contains { $0.series == "trigger_to_ready" }
+                && export.report.failures.contains { $0.series == "scheduling_failure" }
+        }
+
+        let control = services.root.metricsReport
+        let exported = try XCTUnwrap(run { try? await control.prepareExport() } ?? nil, "the export was prepared")
+        defer { control.cancelExport(exportID: exported.id) }
+        let data = try Data(contentsOf: exported.file)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        for fragment in ["zebra-orchid", "water the", "remind me", "2099", "entry-privacy-1", "entry-", "item-", "job-"] {
+            XCTAssertFalse(text.contains(fragment), "the file must not hold \(fragment)")
+        }
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(
+            Set(object.keys),
+            ["schema", "generated_at", "recording_enabled", "sample_limit_per_series", "build", "timings", "failures"])
+        let build = try XCTUnwrap(object["build"] as? [String: Any])
+        XCTAssertEqual(Set(build.keys), ["version", "build_number", "revision", "dirty"])
+        XCTAssertEqual(build["version"] as? String, CoreMetricsBuild.current()?.version)
+        let machineLabels: Set<String> = [
+            "trigger_to_ready", "end_of_input_to_save", "cold", "warm", "locked_handoff", "voice", "text",
+            "processing_failure", "scheduling_failure", "timeout", "unavailable", "rate_limited", "unauthorized",
+            "invalid_output", "capability_unavailable", "unsupported_language", "interrupted", "retries_exhausted",
+            "other", "permission_denied", "capacity_exceeded", "unschedulable", "native_failure",
+        ]
+        for key in ["timings", "failures"] {
+            for entry in object[key] as? [[String: Any]] ?? [] {
+                let labels = [entry["series"], entry["dimension"]].compactMap { $0 as? String }
+                XCTAssertEqual(labels.count, 2)
+                XCTAssertTrue(Set(labels).isSubset(of: machineLabels), "\(labels) are machine labels")
+            }
+        }
+    }
 }
