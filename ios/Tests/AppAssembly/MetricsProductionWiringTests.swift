@@ -167,17 +167,20 @@ final class MetricsProductionWiringTests: XCTestCase {
                 access: CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true),
                 triggeredAtUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds))
         services.captureEntry.surfaceDidBecomeReady()
-        let captureText = "remind me 2099-01-01 09:00:00 to water the zebra-orchid quietly"
-        services.captureEntry.textModel.updateText(captureText)
-        services.captureEntry.saveText()
 
         let service = services.root.metricsService
         let root = services.root
-        eventually("the trigger-to-ready figure and the scheduling failure are both recorded") {
-            _ = try? await root.reconcileReminders()
+        eventually("the trigger-to-ready figure is recorded") {
             guard let export = try? await service.exportReport() else { return false }
             return export.report.timings.contains { $0.series == "trigger_to_ready" }
-                && export.report.failures.contains { $0.series == "scheduling_failure" }
+        }
+        let captureText = "remind me 2099-01-01 09:00:00 to water the zebra-orchid quietly"
+        services.captureEntry.textModel.updateText(captureText)
+        services.captureEntry.saveText()
+        eventually("the withheld schedule is counted as a scheduling failure") {
+            _ = try? await root.reconcileReminders()
+            guard let export = try? await service.exportReport() else { return false }
+            return export.report.failures.contains { $0.series == "scheduling_failure" }
         }
 
         let control = services.root.metricsReport
