@@ -5,7 +5,6 @@ import XCTest
 
 /// The production assembly over a fresh store: the capture entry model, the job runner and the reminder reconciler
 /// record to one metrics service, and what they record reaches the export. Only the platform adapters are replaced.
-@MainActor
 final class MetricsProductionWiringTests: XCTestCase {
     private final class UnreachableProviderSender: ProviderRequestSender, @unchecked Sendable {
         func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
@@ -73,12 +72,37 @@ final class MetricsProductionWiringTests: XCTestCase {
         return nil
     }
 
-    private func eventually(_ condition: String, _ holds: () async -> Bool) async {
-        let deadline = Date().addingTimeInterval(30)
-        while await !holds() {
-            if Date() >= deadline { return XCTFail("timed out waiting for: \(condition)") }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+    private final class AnswerBox<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Value?
+        var value: Value? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
         }
+        func set(_ newValue: Value) {
+            lock.lock()
+            stored = newValue
+            lock.unlock()
+        }
+    }
+
+    /// Runs an async operation from a synchronous test, turning the run loop until it answers: the root's own work
+    /// needs the main run loop, so the test must not block it.
+    private func run<Value>(_ operation: @escaping @Sendable () async -> Value) -> Value? {
+        let box = AnswerBox<Value>()
+        Task { box.set(await operation()) }
+        waitUntilPumping("the call completed", timeout: 30) { box.value != nil }
+        return box.value
+    }
+
+    private func eventually(_ condition: String, _ holds: @escaping @Sendable () async -> Bool) {
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            if run(holds) == true { return }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        XCTFail("timed out waiting for: \(condition)")
     }
 
     func testTheRootOffersOneSinkAndTheJobRunnerKeepsIt() throws {
@@ -91,7 +115,7 @@ final class MetricsProductionWiringTests: XCTestCase {
         XCTAssertTrue(entrySink === service, "the capture entry model records to the root's one metrics service")
     }
 
-    func testATriggerToReadyRecordMadeThroughTheCaptureEntryModelAppearsInTheExport() async throws {
+    func testATriggerToReadyRecordMadeThroughTheCaptureEntryModelAppearsInTheExport() throws {
         let services = try makeServices()
         authenticate(services)
         services.captureEntry.present(
@@ -102,17 +126,18 @@ final class MetricsProductionWiringTests: XCTestCase {
         services.captureEntry.surfaceDidBecomeReady()
 
         let service = services.root.metricsService
-        await eventually("the trigger-to-ready figure is in the export") {
+        eventually("the trigger-to-ready figure is in the export") {
             guard let export = try? await service.exportReport() else { return false }
             return export.report.timings.contains { $0.series == "trigger_to_ready" && $0.dimension == "cold" }
         }
-        let exported = try await services.root.metricsReport.prepareExport()
-        defer { services.root.metricsReport.cancelExport(exportID: exported.id) }
+        let control = services.root.metricsReport
+        let exported = try XCTUnwrap(run { try? await control.prepareExport() }, "the export was prepared")
+        defer { control.cancelExport(exportID: exported.id) }
         let text = try String(contentsOf: exported.file, encoding: .utf8)
         XCTAssertTrue(text.contains("trigger_to_ready"))
     }
 
-    func testASchedulingFailureOfTheReminderReconcilerAppearsInTheSameExport() async throws {
+    func testASchedulingFailureOfTheReminderReconcilerAppearsInTheSameExport() throws {
         center.authorizationStatus = .denied
         let services = try makeServices()
         authenticate(services)
@@ -120,8 +145,9 @@ final class MetricsProductionWiringTests: XCTestCase {
         services.captureEntry.saveText()
 
         let service = services.root.metricsService
-        await eventually("a reminder pass counts the withheld schedule") {
-            _ = try? await services.root.reconcileReminders()
+        let root = services.root
+        eventually("a reminder pass counts the withheld schedule") {
+            _ = try? await root.reconcileReminders()
             guard let export = try? await service.exportReport() else { return false }
             return export.report.failures.contains { $0.series == "scheduling_failure" && $0.dimension == "permission_denied" }
         }

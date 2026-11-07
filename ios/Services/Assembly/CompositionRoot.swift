@@ -2277,13 +2277,13 @@ public final class ServiceCompositionRoot {
 }
 
 /// A metrics report written to a protected temporary file, ready for the share sheet.
-public struct PreparedMetricsExport: Equatable {
+public struct PreparedMetricsExport: Equatable, Sendable {
     public let id: String
     /// `MetricsExport.json`: the report's bytes exactly as the metrics service produced them.
     public let file: URL
 }
 
-public enum MetricsReportFailure: Error, Equatable {
+public enum MetricsReportFailure: Error, Equatable, Sendable {
     /// The session is capture-only; nothing was requested from the core.
     case notAuthenticated
     /// The session relocked while the report was being prepared; its file was removed.
