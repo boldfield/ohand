@@ -1,15 +1,15 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test provider-probe-test apple-build-test release-test ios-check ios-credential-probe bindings-check bindings-test hygiene-check hygiene-test
+.PHONY: check test contract-check contract-test provider-probe-test apple-build-test release-test ios-check ios-credential-probe bindings-check bindings-test hygiene-check hygiene-test device-matrix-check device-matrix-test
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
 # F05 adds native targets and documentation.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy bindings-check ios-check
+check: contract-check cargo-check cargo-fmt-check cargo-clippy bindings-check ios-check device-matrix-check
 
 # test: Run contract validation tests and cargo test suite.
-test: contract-test hygiene-test provider-probe-test apple-build-test release-test cargo-test bindings-test
+test: contract-test hygiene-test provider-probe-test apple-build-test release-test cargo-test bindings-test device-matrix-test
 
 .PHONY: cargo-check cargo-test cargo-build cargo-fmt-check cargo-clippy
 
@@ -51,6 +51,14 @@ apple-build-test:
 # release-test: T10a. Build identity, the signing wrapper's behaviour with stubbed Apple tools, and the upgrade check's tooling.
 release-test:
 	$(PYTHON) -m unittest discover --start-directory tools/release --pattern 'test_*.py' --verbose
+
+# device-matrix-check / device-matrix-test: T05a. The checker for ohand.device-matrix.v1 records runs over every record in
+# docs/validation/evidence/device-matrix/ (and passes when there is none); its tests use synthetic records only.
+device-matrix-check:
+	$(PYTHON) tools/validation/device_matrix/check_device_matrix.py --all-in docs/validation/evidence/device-matrix
+
+device-matrix-test:
+	$(PYTHON) -m unittest discover --start-directory tools/validation/device_matrix --pattern 'test_*.py' --verbose
 
 # ios-check: Validate iOS project configuration (any host with PyYAML).
 # Runs static checks on project.yml structure, bundle identifiers, signing config, and plists.
