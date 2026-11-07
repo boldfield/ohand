@@ -174,8 +174,7 @@ final class MetricsExportSectionViewTests: XCTestCase {
             await settle()
             let sheet = await presentedShareSheet()
             XCTAssertNotNil(sheet, "the share sheet is presented for the metrics file")
-            XCTAssertEqual(
-                (sheet?.activityItems.first as? URL)?.lastPathComponent, "MetricsExport.json")
+            XCTAssertEqual(model.metrics?.pendingShare?.file.lastPathComponent, "MetricsExport.json")
 
             sheet?.completionWithItemsHandler?(nil, true, nil, nil)
             await waitUntil("the sheet's ending reached the metrics model") { controls.finished.count == 1 }
