@@ -3608,6 +3608,30 @@ Acceptance:
 
 Contributes to original U10 criteria: 1 (device pass), 2, 3.
 
+Amendment 1 (coordinator, 2026-11-07, at the maintainer's direction): the maintainer has no hardware keyboard for the trial iPhone (recorded at P09 amendment 1 on 2026-10-09, unchanged). The Full Keyboard Access run of the procedure in `docs/validation/accessibility.md` section 3 moves out of U10b into U10c. U10b's criterion 1 is read as the VoiceOver and largest-text runs for every screen in the procedure; each screen's `keyboard` section in the record carries `"reachable": "not run"`, `"activation": "not run"` and the note `no hardware keyboard available; U10c`. The checks themselves are not lowered: the keyboard run is still owed, by U10c, before any distribution beyond the maintainer's phone. T05b, T06 and T08 do not wait for U10c.
+
+### U10c
+
+Record the keyboard accessibility run
+
+Fold the maintainer's Full Keyboard Access run on the trial iPhone into `docs/validation/accessibility.md` as cited evidence, completing the device pass U10b recorded without a keyboard.
+
+Owned paths: `docs/validation/accessibility.md` (the keyboard rows of the device-results section) and `docs/validation/evidence/accessibility/` (the keyboard-run record).
+
+Dependencies: U10b.
+
+Context: this task starts blocked. The maintainer, once a Bluetooth keyboard is available, runs the procedure in `docs/validation/accessibility.md` section 3 with Full Keyboard Access on, for every screen, on a signed candidate; writes a record in the section 4 format whose `keyboard` sections are filled and whose `voiceover` and `large_text` sections may reference the U10b record instead of repeating it; commits it under `docs/validation/evidence/accessibility/`; and unblocks this task naming that file. A worker claimed without such a file must re-block naming it and must not substitute simulator results (keyboard navigation is not asserted in the simulator).
+
+Acceptance:
+
+1. `docs/validation/accessibility.md` cites the named record for the keyboard checks of every screen in the procedure, with the build revision, collection time, device model and keyboard model.
+2. A control that Tab cannot reach or Space or Return cannot activate is listed with its severity; one that blocks a flow (capture, retrieve, act on an item, change settings, unlock) makes the check fail until a fix lands and the affected steps are re-recorded. Lesser issues are listed with a follow-up task or an explicit acceptance.
+3. Raw recordings and personal content stay with the maintainer; the repository holds the sanitized record and an auditable reference.
+
+Not a dependency of T05b, T06 or T08. Owed before any distribution beyond the maintainer's phone.
+
+Execution: Haiku, escalate=true, independent Opus and gpt-5.6-sol review, separate automatic merger.
+
 ### F42
 
 Sort voice notes: give voice captures contract-conforming IDs and accept the legacy form

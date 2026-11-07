@@ -220,7 +220,8 @@
       "reason": "Automated audits and their fixes are simulator-checkable; a VoiceOver, Dynamic Type and keyboard pass on the trial iPhone is a maintainer input. Separate them so the fixes land and the device pass confirms them.",
       "children": [
         "U10a",
-        "U10b"
+        "U10b",
+        "U10c"
       ],
       "old_task_id": "f5423770-230e-46e0-9451-80a56f6a7b3a",
       "old_pr": null
@@ -4650,6 +4651,30 @@
         "ios/Capture/Entry/CaptureEntryModel.swift",
         "ios/AppAssembly/AppServices.swift"
       ]
+    },
+    {
+      "key": "U10c",
+      "parent": "U10",
+      "title": "Record the keyboard accessibility run",
+      "file_scope": [
+        "docs/validation/accessibility.md",
+        "docs/validation/evidence/accessibility/"
+      ],
+      "intent": "Fold the maintainer's Full Keyboard Access run on the trial iPhone into the accessibility document, completing the device pass U10b recorded without a keyboard.",
+      "acceptance": [
+        "See the U10c section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [
+        1,
+        2,
+        3
+      ],
+      "depends_on": [
+        "U10b"
+      ],
+      "source_pointers": [
+        "docs/validation/accessibility.md"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5507,7 +5532,10 @@
       "T12b",
       "U10b"
     ],
-    "F67": []
+    "F67": [],
+    "U10c": [
+      "U10b"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5821,6 +5849,10 @@
     {
       "date": "2026-11-06",
       "change": "Split T05 into T05a (device-matrix procedure on the shipped UI, ohand.device-matrix.v1 record, Linux checker under tools/validation/device_matrix/) and T05b (maintainer's record from the trial iPhone), before T05 was claimed; original task 10d059a0 retired unclaimed. T06 depends on T05b. F67 added: the shipped app constructs no MetricsService, so T01's latency and failure metrics are never recorded or exportable; F67 wires the sink at the composition root and adds the export to Settings \u2192 Export. T05a does not wait for F67."
+    },
+    {
+      "date": "2026-11-07",
+      "change": "U10b amendment 1: the maintainer has no hardware keyboard, so the Full Keyboard Access run moves to U10c (blocked, maintainer input, not a dependency of T05b, T06 or T08). U10b's criterion 1 is read as the VoiceOver and largest-text runs; keyboard sections of the record say 'not run'. The keyboard checks are still owed before any distribution beyond the maintainer's phone."
     }
   ]
 }
