@@ -161,19 +161,9 @@ final class MetricsProductionWiringTests: XCTestCase {
         let services = try makeServices()
         authenticate(services)
         services.start(isActive: true)
-        services.captureEntry.present(
-            CaptureEntryPresentation(
-                entryID: "entry-privacy-1", source: .controlIntent, mode: .silent, launchKind: .cold,
-                access: CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true),
-                triggeredAtUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds))
-        services.captureEntry.surfaceDidBecomeReady()
 
         let service = services.root.metricsService
         let root = services.root
-        eventually("the trigger-to-ready figure is recorded") {
-            guard let export = try? await service.exportReport() else { return false }
-            return export.report.timings.contains { $0.series == "trigger_to_ready" }
-        }
         let captureText = "remind me 2099-01-01 09:00:00 to water the zebra-orchid quietly"
         services.captureEntry.textModel.updateText(captureText)
         services.captureEntry.saveText()
@@ -181,6 +171,16 @@ final class MetricsProductionWiringTests: XCTestCase {
             _ = try? await root.reconcileReminders()
             guard let export = try? await service.exportReport() else { return false }
             return export.report.failures.contains { $0.series == "scheduling_failure" }
+        }
+        services.captureEntry.present(
+            CaptureEntryPresentation(
+                entryID: "entry-privacy-1", source: .controlIntent, mode: .silent, launchKind: .cold,
+                access: CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: true),
+                triggeredAtUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds))
+        services.captureEntry.surfaceDidBecomeReady()
+        eventually("the trigger-to-ready figure is recorded") {
+            guard let export = try? await service.exportReport() else { return false }
+            return export.report.timings.contains { $0.series == "trigger_to_ready" }
         }
 
         let control = services.root.metricsReport
