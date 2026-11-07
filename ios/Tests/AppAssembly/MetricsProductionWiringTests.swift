@@ -131,7 +131,7 @@ final class MetricsProductionWiringTests: XCTestCase {
             return export.report.timings.contains { $0.series == "trigger_to_ready" && $0.dimension == "cold" }
         }
         let control = services.root.metricsReport
-        let exported = try XCTUnwrap(run { try? await control.prepareExport() }, "the export was prepared")
+        let exported = try XCTUnwrap(run { try? await control.prepareExport() } ?? nil, "the export was prepared")
         defer { control.cancelExport(exportID: exported.id) }
         let text = try String(contentsOf: exported.file, encoding: .utf8)
         XCTAssertTrue(text.contains("trigger_to_ready"))
