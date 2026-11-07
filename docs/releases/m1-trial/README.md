@@ -63,6 +63,6 @@ The archive itself is not committed.
 
 ## Candidates used for verification and distribution
 
-Candidate `docs/releases/m1-trial/candidate-398-44904c1f.json` (build 398, revision 44904c1f) is the signed trial build that T05, U10b, and T06 use: T05 uses it as the device-level evidence of upgrade correctness, U10b records the device upgrade with this candidate, and T06 distributes it.
+Candidate `docs/releases/m1-trial/candidate-398-44904c1f.json` (build 398, revision 44904c1f) is the signed trial build for M1 device verification: T10b records the 397-to-398 upgrade with this candidate; U10b uses it for the accessibility pass (VoiceOver and largest-text settings); T05b uses it for the functional device matrix; and T06 distributes it.
 
-When a candidate binary is rebuilt (for example, for a platform compatibility fix or policy change), the affected device checks in U10b must be repeated with a new candidate before that candidate is distributed by T06.
+When a candidate binary is rebuilt (for example, for a platform compatibility fix or policy change), the T10b upgrade procedure and every affected U10b and T05b device pass must be repeated with a new candidate before that candidate is distributed by T06.
