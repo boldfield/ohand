@@ -21,6 +21,31 @@ def simctl(**runtimes):
 
 
 class SelectSimulatorTests(unittest.TestCase):
+    def xcode_27_image(self):
+        return simctl(**{
+            "27_0": [device("iPhone 19", "PHONE"), device("iPad Pro 13-inch", "PAD")],
+            "27_1": [device("iPhone Duo", "DUO")],
+        })
+
+    def test_iphone_family_excludes_duo_and_lands_on_ordinary_phone(self):
+        selected = selector.select_simulator(self.xcode_27_image(), "27.2")
+        self.assertEqual(selected["udid"], "PHONE")
+        self.assertEqual(selected["runtime"], "27.0")
+
+    def test_ipad_falls_back_to_newest_runtime_with_an_ipad(self):
+        selected = selector.select_simulator(self.xcode_27_image(), "27.2", "iPad")
+        self.assertEqual(selected["udid"], "PAD")
+        self.assertEqual(selected["runtime"], "27.0")
+
+    def test_duo_selected_only_when_requested(self):
+        selected = selector.select_simulator(self.xcode_27_image(), "27.2", "iPhoneDuo")
+        self.assertEqual(selected["udid"], "DUO")
+        self.assertEqual(selected["runtime"], "27.1")
+
+    def test_iphone_family_with_only_a_duo_is_an_error(self):
+        with self.assertRaises(selector.SelectionError):
+            selector.select_simulator(simctl(**{"27_1": [device("iPhone Duo", "DUO")]}), "27.2")
+
     def test_wildcard_free_lookup_picks_concrete_runtime_key(self):
         data = simctl(**{"18_5": [device("iPhone 16", "AAAA")]})
         selected = selector.select_simulator(data)

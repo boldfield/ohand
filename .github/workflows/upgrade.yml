@@ -28,7 +28,7 @@ concurrency:
 jobs:
   upgrade:
     name: Upgrade from an earlier build keeps the data
-    runs-on: macos-26
+    runs-on: xcode-27
     # Two app builds (each with the Rust core), the UI tests and one cold boot, then two seeded UI runs.
     timeout-minutes: 120
     env:
@@ -49,7 +49,7 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
         shell: bash
@@ -142,7 +142,7 @@ jobs:
   # The debug-only upgrade report must not exist in a Release build: build one and look for it.
   release-excludes-report:
     name: Release build carries no upgrade report
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -153,7 +153,7 @@ jobs:
       - name: Select pinned Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
         shell: bash

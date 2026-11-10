@@ -155,18 +155,18 @@ class ProjectConfigChecks(unittest.TestCase):
         project["targets"]["AudioProbe"]["settings"]["PRODUCT_BUNDLE_IDENTIFIER"] = "com.boldfield.ohand.probes.bridge"
         self.assertTrue(any("not unique" in e for e in checks.check_project(project)))
 
-    def write_workflow(self, directory, pins):
+    def write_workflow(self, directory, pins, runs_on="xcode-27"):
         steps = "".join(
             f"      - uses: maxim-lobanov/setup-xcode@v1\n        with:\n          xcode-version: '{pin}'\n" for pin in pins
         ) or "      - run: echo no xcode step\n"
         path = Path(directory) / "ios.yml"
-        path.write_text(f"name: x\njobs:\n  build:\n    runs-on: macos-26\n    steps:\n{steps}")
+        path.write_text(f"name: x\njobs:\n  build:\n    runs-on: {runs_on}\n    steps:\n{steps}")
         return path
 
     def test_committed_workflow_pin_matches_project(self):
         project = checks.load_project()
         self.assertEqual(checks.check_workflow_xcode_pin(project), [])
-        self.assertEqual(str(project["options"]["xcodeVersion"]), "26.6")
+        self.assertEqual(str(project["options"]["xcodeVersion"]), "27.2")
 
     def write_upload_workflow(self, directory, continue_on_error):
         step = {"name": "Upload evidence", "uses": "actions/upload-artifact@v4", "with": {"name": "x", "path": "y"}}
@@ -280,20 +280,33 @@ class ProjectConfigChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_workflow(directory, ["16.4"])
             errors = checks.check_workflow_xcode_pin(project, path)
-        self.assertTrue(any("'16.4'" in e and "'26.6'" in e for e in errors), errors)
+        self.assertTrue(any("'16.4'" in e and "'27.2'" in e for e in errors), errors)
 
     def test_project_pin_change_without_workflow_change_is_reported(self):
         project = copy.deepcopy(checks.load_project())
-        project["options"]["xcodeVersion"] = "27.0"
+        project["options"]["xcodeVersion"] = "27.0.1"
         errors = checks.check_workflow_xcode_pin(project)
-        self.assertEqual(len([e for e in errors if "'27.0'" in e]), 4, errors)
+        self.assertEqual(len([e for e in errors if "'27.0.1'" in e]), 4, errors)
+
+    def test_pin_27_2_on_macos_26_runner_is_reported(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_workflow(directory, ["27.2"], runs_on="macos-26")
+            errors = checks.check_workflow_xcode_pin(project, path)
+        self.assertTrue(any("'macos-26'" in e and "'xcode-27'" in e for e in errors), errors)
+
+    def test_pin_27_2_on_xcode_27_runner_passes(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_workflow(directory, ["27.2"])
+            self.assertEqual(checks.check_workflow_xcode_pin(project, path), [])
 
     def test_job_without_exactly_one_xcode_step_is_reported(self):
         project = checks.load_project()
         with tempfile.TemporaryDirectory() as directory:
             missing = self.write_workflow(directory, [])
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, missing)))
-            doubled = self.write_workflow(directory, ["26.6", "26.6"])
+            doubled = self.write_workflow(directory, ["27.2", "27.2"])
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, doubled)))
 
     def copy_plists(self, directory):
