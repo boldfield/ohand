@@ -10,6 +10,8 @@ Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity,
 
 Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
 
+Addendum 2026-11-10: F68 moves the native toolchain to Xcode 27.2 on GitHub's `xcode-27` image. The trial phone is now an iPhone Duo, and a build against the iOS 26 SDK runs letterboxed on its inner display; Apple's path is to recompile with Xcode 27.1 or later, which hosted CI can do since the `xcode-27` image went GA on 2026-10-15. U10b, T05b and T06 gain F68 as an effective dependency: the maintainer's device evidence is collected on the first candidate built after it lands, and T10b's upgrade procedure is repeated on the new phone between two such candidates (the old phone was erased on 2026-11-09). See the F68 section.
+
 Addendum 2026-11-06: T05 is split the same way as V08, P08, U10 and T10, before it is claimed, into T05a (the device-matrix procedure on the production app, the record format and its Linux checker) and T05b (the maintainer's record from the trial iPhone). The original task `10d059a0` is retired unclaimed: its substance is device evidence only the maintainer can produce, and every earlier task of that shape cost rejected rounds before it was split. T06 now depends on T05b. See the T05a and T05b sections.
 
 Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
@@ -4904,3 +4906,30 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. T05a does not depend on F67; T05b and T08 record its export when the candidate contains it.
+
+### F68
+
+Move the native toolchain to Xcode 27.2 on GitHub's `xcode-27` runner image
+
+Found by the coordinator on 2026-11-10 when the trial phone changed. The maintainer's phone is now an iPhone Duo (`iPhone19,4`, iOS 27.2.1). Candidate 400 (`d4237708`), built with the pinned Xcode 26.6 and the iOS 26 SDK, runs on it only in a compatibility box on the inner display: iOS presents every app built against an SDK older than iOS 27 letterboxed there, and Apple's guidance is to recompile with Xcode 27.1 or later, which adds development support for the device. There is no Info.plist opt-in. A two-week trial in a compatibility box on the phone's main display is not the trial M1 is meant to run, and the Duo layout work in the design system (M2) cannot begin on an SDK that does not know the device.
+
+The pin could not move before now because the hosted `macos-26` image carries Xcode 26.6 at most. GitHub now ships one image per Xcode major: the `xcode-27` label (generally available since 2026-10-15; `xcode-27-xlarge` is the paid tier and is not used) runs macOS 27.0.1 on arm64 with Xcode 27.2, 27.1 (default) and 27.0 installed, the iOS 27.0 simulator runtime with the ordinary iPhone and iPad device types, and the iOS 27.1 runtime with the iPhone Duo only. `select_simulator.py` picks the newest runtime that has a device of the requested family, so on that image the iPhone jobs would select the Duo on iOS 27.1, which is not a compact-width phone, while the iPad job would correctly fall back to iOS 27.0.
+
+Scope:
+1. `ios/project.yml`: `options.xcodeVersion: "27.2"`. `.github/workflows/ios.yml`: every job `runs-on: xcode-27`, every `xcode-version: '27.2'`; the comments that describe the runner (arm64, 3 cores, 7 GB, Xcode 26.6, `macos-26` measured against `macos-26-intel`) are rewritten for the new image, with any re-measured boot timing noted. `ios/scripts/check_project_config.py` keeps enforcing that the four `xcode-version` pins equal `options.xcodeVersion`, and also fails when a job of `ios.yml` runs on a label other than `xcode-27` (the label is derived from the pinned major: `xcode-<major>`), with unit tests for both.
+2. `ios/scripts/select_simulator.py`: the `iPhone` family means a compact-width phone; device names containing `Duo` are excluded unless `--family iPhoneDuo` (or an equivalent explicit option) asks for one, so the compact walkthrough and the simulator job keep running on an ordinary iPhone from the iOS 27.0 runtime. Unit tests cover: Duo excluded from `iPhone`, the iPad job falling back to the newest runtime that has an iPad, and the explicit Duo selection.
+3. Whatever the iOS 27 SDK and the Xcode 27.2 toolchain require to compile and pass on the existing targets: deprecations that are errors under the project's warning settings, the iOS 27 scene-lifecycle requirement at launch (the SwiftUI `App` entry point is expected to satisfy it; verify, do not assume), the Rust `OhAndCoreBridge` framework link under the Xcode 27 linker, and the walkthrough and accessibility-audit baselines where the SDK changes layout. Behaviour changes are limited to what the SDK forces; each is named in the PR.
+4. `AGENTS.md` "Required checks for macOS workers": the runner, Xcode and SDK sentences describe the `xcode-27` image and Xcode 27.2; the artifact budget and every other rule are unchanged. `docs/features/ci-artifact-budget.md` is updated only if a number changes.
+
+Not owned: the Duo two-pane layout and any other use of the inner display (M2, per the design system); `core/`; app behaviour beyond what compiling on the new SDK forces; the candidate build itself (the coordinator rebuilds the candidate after this lands, and T10b's upgrade procedure is repeated on the new phone as its own section says).
+
+Acceptance:
+1. `make check` passes on Linux, including `ios-check` with the updated checker and selector tests.
+2. An `ios.yml` run on the `xcode-27` image at the exact submitted head concludes `success`: `toolchain.txt` names Xcode 27.2 and an iOS 27 SDK; `simulator.txt` for the simulator job and the compact walkthrough names an iPhone that is not the Duo; the regular walkthrough names an iPad; `OhAndTests.log` contains `** TEST EXECUTE SUCCEEDED **`; `smoke.log` ends with `Smoke test passed`; the run stays within the artifact budget.
+3. `check_project_config.py` fails a workflow that pins Xcode 27.2 but runs on `macos-26`, and one whose pins disagree, and both failures are unit-tested.
+4. The PR names every source change the SDK forced and why; no acceptance criterion of any landed task is weakened by it.
+5. The maintainer's local build follows: `xcode-select` on Xcode 27.2 (installed as `/Applications/Xcode-27.2.app`, on macOS 26.6 or later), `install-ohand.sh --candidate` produces the next candidate, and the candidate launches full-screen on the Duo's inner display. That check is the coordinator's and is not claimed by the worker.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run on `xcode-27`.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: nothing on the device side of M1 (T10b's repeat on the new phone, U10b, T05b, T06) can use a candidate built before this lands. U10b, T05b and T06 gain F68 as an effective dependency; the maintainer's evidence for them is collected on the first candidate built after it.

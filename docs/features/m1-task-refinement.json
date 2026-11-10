@@ -4675,6 +4675,32 @@
       "source_pointers": [
         "docs/validation/accessibility.md"
       ]
+    },
+    {
+      "key": "F68",
+      "parent": null,
+      "title": "Move the native toolchain to Xcode 27.2 on GitHub's xcode-27 runner image",
+      "file_scope": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/select_simulator.py",
+        "ios/scripts/tests/",
+        "ios/ (only what the iOS 27 SDK forces)",
+        "AGENTS.md (macOS workers section)"
+      ],
+      "intent": "Pin Xcode 27.2, run ios.yml on the xcode-27 image, keep the compact simulator jobs off the iPhone Duo runtime, and fix what the iOS 27 SDK forces, so the trial candidate runs natively on the maintainer's iPhone Duo.",
+      "acceptance": [
+        "See the F68 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/select_simulator.py"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5214,7 +5240,8 @@
       "T12a"
     ],
     "T06": [
-      "T05b"
+      "T05b",
+      "F68"
     ],
     "T07": [
       "T06"
@@ -5451,7 +5478,8 @@
       "F61"
     ],
     "U10b": [
-      "U10a"
+      "U10a",
+      "F68"
     ],
     "F42": [],
     "F43": [],
@@ -5530,7 +5558,8 @@
       "T09",
       "T10b",
       "T12b",
-      "U10b"
+      "U10b",
+      "F68"
     ],
     "F67": [],
     "U10c": [
@@ -5853,6 +5882,10 @@
     {
       "date": "2026-11-07",
       "change": "U10b amendment 1: the maintainer has no hardware keyboard, so the Full Keyboard Access run moves to U10c (blocked, maintainer input, not a dependency of T05b, T06 or T08). U10b's criterion 1 is read as the VoiceOver and largest-text runs; keyboard sections of the record say 'not run'. The keyboard checks are still owed before any distribution beyond the maintainer's phone."
+    },
+    {
+      "date": "2026-11-10",
+      "change": "F68 added: the trial phone is now an iPhone Duo and SDK-26 builds run letterboxed on its inner display; the native toolchain moves to Xcode 27.2 on GitHub's xcode-27 image (GA 2026-10-15). U10b, T05b and T06 gain F68 as an effective dependency; the maintainer's device evidence is collected on the first candidate built after it lands, and T10b's upgrade procedure is repeated on the new phone between two such candidates."
     }
   ]
 }
