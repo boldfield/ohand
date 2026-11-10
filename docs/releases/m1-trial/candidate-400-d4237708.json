@@ -1,0 +1,11 @@
+{
+  "archive_file": "OhAnd-0.1.0-400-d4237708.ipa",
+  "archive_sha256": "f2a06e09e19e640085b91884862fe0c4cbb68a91a357259cb3fcc671a67466f6",
+  "build_number": "400",
+  "created_at": "2026-11-10T05:33:09Z",
+  "profile_expires_at": "2027-11-10T05:30:33Z",
+  "revision": "d42377084a5b6920ac8a626482c4fcf771a72c9b",
+  "schema": "ohand.trial-candidate.v1",
+  "signing_route": "development",
+  "version": "0.1.0"
+}
