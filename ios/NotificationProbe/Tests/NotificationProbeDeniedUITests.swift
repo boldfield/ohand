@@ -15,7 +15,11 @@ final class NotificationProbeDeniedUITests: NotificationProbeUITestCase {
         XCTAssertEqual(denied["badgeSetting"], "disabled")
 
         let scheduling = run("schedulingProbe")
-        XCTAssertEqual(scheduling["addError"], "none", "add reports no error while denied")
+        // The iOS 27 runtime reports UNErrorDomain 2003 (notificationsNotAllowed) from add while denied; earlier runtimes reported none.
+        XCTAssertTrue(
+            ["none", "UNErrorDomain#2003"].contains(scheduling["addError"] ?? ""),
+            "add reports no error, or notificationsNotAllowed, while denied: \(scheduling["addError"] ?? "nil")"
+        )
         XCTAssertEqual(scheduling["pendingCountAfterAdd"], "0", "a request added while denied is not retained")
         XCTAssertEqual(scheduling["pendingContainsRequest"], "false")
     }
