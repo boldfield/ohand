@@ -202,4 +202,75 @@ final class GlassContrastLedgerTests: XCTestCase {
         let search = element("Search", identifier: "home.search", CGRect(x: 200, y: 60, width: 44, height: 44))
         XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [glyph, search], screen: screen), [search])
     }
+
+    // MARK: A pass in which the audit moved the content
+
+    private func card(_ frame: CGRect) -> ScreenElement {
+        element("Synthetic typed idea", card: "home.recents.card.1", frame)
+    }
+
+    func testMovedAndClearAndMeasuredAtTheMinimumOrAboveSettles() {
+        var ledger = GlassContrastLedger()
+        let clear = card(CGRect(x: 48, y: 631, width: 200, height: 20))
+        XCTAssertEqual(
+            ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "end", clearBand: clearBand, screen: screen,
+                          others: [], movedBy: 81, measure: { 4.5 }),
+            .measured(4.5))
+        XCTAssertEqual(ledger.settled[clear.key], "end")
+        XCTAssertTrue(ledger.unsettled.isEmpty)
+    }
+
+    func testMovedAndClearAndMeasuredBelowTheMinimumFails() {
+        var ledger = GlassContrastLedger()
+        let clear = card(CGRect(x: 48, y: 631, width: 200, height: 20))
+        let decision = ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "end", clearBand: clearBand,
+                                     screen: screen, others: [], movedBy: 81, measure: { 4.49 })
+        guard case .issue = decision else { return XCTFail("a measured 4.49:1 must fail, got \(decision)") }
+        XCTAssertNil(ledger.settled[clear.key])
+        let unmeasured = ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "end", clearBand: clearBand,
+                                       screen: screen, others: [], movedBy: 81, measure: { nil })
+        guard case .issue = unmeasured else { return XCTFail("an unmeasurable element must fail, got \(unmeasured)") }
+    }
+
+    func testMovedAndNotClearIsOwedAndNeverMeasured() {
+        var ledger = GlassContrastLedger()
+        let underComposer = card(CGRect(x: 48, y: 728, width: 200, height: 20))
+        XCTAssertEqual(
+            ledger.decide(contrastIssueOn: underComposer, placement: .scrollsUnderGlass, screenName: "end", clearBand: clearBand,
+                          screen: screen, others: [], movedBy: 81, measure: { XCTFail("not clear, so not measured"); return 21 }),
+            .owed)
+        XCTAssertEqual(ledger.unsettled.map(\.key), [underComposer.key])
+    }
+
+    func testNotMovedAndClearStillFailsWithoutAMeasurement() {
+        var ledger = GlassContrastLedger()
+        let clear = card(CGRect(x: 48, y: 631, width: 200, height: 20))
+        let decision = ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "end", clearBand: clearBand,
+                                     screen: screen, others: [], measure: { XCTFail("not measured when the audit did not move"); return 21 })
+        guard case .issue = decision else { return XCTFail("an issue on a clear element must fail, got \(decision)") }
+    }
+
+    /// The audit finding nothing in a pass that moved the content does not settle an element; its own measurement does.
+    func testAMovedPassSettlesByMeasurementAndNotBySilence() {
+        var ledger = GlassContrastLedger()
+        let clear = card(CGRect(x: 48, y: 631, width: 200, height: 20))
+        ledger.recordStop("end", listed: [(clear, .scrollsUnderGlass)], flaggedKeys: [], clearBand: clearBand, screen: screen, others: [],
+                          movedBy: 81, measure: { _ in 4.4 })
+        XCTAssertNil(ledger.settled[clear.key])
+        ledger.recordStop("end", listed: [(clear, .scrollsUnderGlass)], flaggedKeys: [], clearBand: clearBand, screen: screen, others: [],
+                          movedBy: 81, measure: { _ in 7 })
+        XCTAssertEqual(ledger.settled[clear.key], "end")
+        let other = element("Type", CGRect(x: 16, y: 200, width: 31, height: 16))
+        ledger.recordStop("still", listed: [(other, .scrollsUnderGlass)], flaggedKeys: [], clearBand: clearBand, screen: screen, others: [])
+        XCTAssertEqual(ledger.settled[other.key], "still", "a pass that moved nothing settles by the audit as before")
+    }
+
+    // MARK: The wordmark pill
+
+    func testTheGlyphIsSeparatedFromThePillOnlyWhenItsFrameIsStrictlyInside() {
+        let pill = CGRect(x: 147, y: 70, width: 108, height: 44)
+        XCTAssertTrue(GlassContrastLedger.glyphIsSeparated(glyph: CGRect(x: 163, y: 78, width: 12, height: 29), from: pill))
+        XCTAssertFalse(GlassContrastLedger.glyphIsSeparated(glyph: pill, from: pill), "with Done shown the glyph has the pill's frame")
+        XCTAssertFalse(GlassContrastLedger.glyphIsSeparated(glyph: CGRect(x: 163, y: 78, width: 12, height: 80), from: pill))
+    }
 }

@@ -152,13 +152,20 @@ snapshot of the screen taken just before the audit:
   each other. The wordmark is settled only by measurement, at a stop where nothing else overlaps the pill, whether or not
   the audit flagged it there (`MEASURED`): the `&` glyph's own frame (the indigo mark, the weaker of the two) and the
   pill's frame with the glyph's frame excluded (the ink of the words) must both reach 4.5:1. An audit with no issue does
-  not settle it; a wordmark below 4.5:1 on either measurement is a real finding.
+  not settle it; a wordmark below 4.5:1 on either measurement is a real finding. With the keyboard's `Done` shown the
+  snapshot gives the `&` node the pill's own frame, so the pill minus the glyph has no pixels: that stop measures the
+  pill whole (4.5:1 or above), and the glyph's own measurement must come from a stop of the same run where the snapshot
+  separates the two (Home): this test's, another test's (`wordmark-glyph-<size>.txt`, `GLYPH-CARRIED`), or one the test
+  makes at its end with the keyboard dismissed (`GLYPH`). A run with no separated glyph measurement fails (`UNVERIFIED`).
+- **`home.done`.** The keyboard's `Done` is text on the header glass: it is on the glass list by identifier, drawn on glass,
+  and settled by measurement like `Discard`.
 - **`Discard` and the status line.** `home.composer.discard` and `capture-entry.message` (the outcome line drawn over the
   list above the composer) are on the glass list by identifier, drawn on glass, and settled the same way: a stop where
   nothing overlaps, measured from the screenshot at 4.5:1 or above. A measurement below that is a defect in a design token
   and is reported, not worked around.
 
-The clear band runs from 12 points below the header's glass buttons (or the back button) to the top of the composer's
+The clear band runs from 12 points below the lowest of the header's glass elements (its buttons, the back button and the
+wordmark pill, which is taller than the buttons at the largest size) to the top of the composer's
 glass, which is 20 points above its field, placeholder or "Recording" line (the test allows 24); a status line or the
 Saved pill above the composer lowers it to 8 points above that line. A settle stop can owe something new, such as a card
 it scrolls under the header; the test keeps settling until each excuse has had its own stop (at most 12).
@@ -192,6 +199,20 @@ to `settled-default.txt`). Contrast is a property of the element's colours, whic
 largest size only lowers the bar for large text. A Home card is named by its text without the age in its caption, so
 the same card matches across launches and sizes. Only what neither size settles is scrolled to and audited.
 
+**A pass in which the audit moved the content.** On iOS 27 the audit's scroll is still in flight while it evaluates (on the
+hosted runner it moved the list 55 of 81 points in the first pass and the rest in the second), so a contrast verdict
+from a pass with `MOVED` is not evidence about that content, whichever frame it reports. For an element scrolled under
+glass, such a pass decides from the snapshot and the screenshot taken before it: wholly inside the clear band there, its
+own contrast is measured from that screenshot and 4.5:1 or above settles it (`MEASURED`, logged with the stop, the frame,
+the distance moved and the ratio) while below fails; not wholly inside, it is owed. Since the audit cannot say which of
+several same-named elements it meant, each is decided. At such a stop the audit finding nothing does not settle an
+element either; its measurement does. When the audit did not move the content the rule above holds unchanged. Nothing
+outside the glass list is decided this way and no audit type is dropped.
+
+**The keyboard's introduction.** iOS 27.2 shows the keyboard's slide-to-type introduction at `capture-text-entry` and the
+simulator's `defaults write` does not suppress it. The test dismisses it with `Continue` and asserts it is gone before the
+audit (`KEYBOARD-INTRO`).
+
 **An audit that times out.** `performAccessibilityAudit` can throw "Audit failed to complete in time" (code -56). An audit
 that throws still fails, but a stop whose combined audit throws -56 is audited again one audit type at a time (each type
 of the run's audit types in its own `performAccessibilityAudit(for:)` call, `RETRY-BY-TYPE` in the log). The stop counts
@@ -205,7 +226,8 @@ compressed, within the failure budget), so where the last card stands is readabl
 
 `GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a screen-sized node that is a
 container while a labelled child of it and a node one point smaller than the screen still obstruct, the wordmark pill and
-its glyph that do not obstruct each other, a low-contrast element under
+its glyph that do not obstruct each other, the pass that moved the content (moved and clear and 4.5:1 or above settles,
+below fails, not clear is owed, not moved and clear fails), the glyph separated from the pill only when strictly inside it, a low-contrast element under
 the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
 measured, a measured 3.1:1 that fails, a dark glyph from another element that would read 21:1 if it were not excluded,
 and two cards with the same caption that are settled separately.
@@ -215,6 +237,7 @@ and two cards with the same caption that are settled separately.
 | "What's on your mind?" (composer placeholder) | drawn on the composer glass | Home, capture, locked |
 | the header wordmark: the pill "Oh And" and its "&" glyph (one ledger key), only in the header above the clear band | drawn on the header glass | Home, capture |
 | "Discard" (`home.composer.discard`) and the outcome line (`capture-entry.message`) | drawn on the composer glass, or over the list above it | capture |
+| "Done" (`home.done`) | drawn on the header glass | capture |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
 
