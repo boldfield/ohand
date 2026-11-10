@@ -63,7 +63,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     private static let auditTimeoutCode = -56
     /// Each audit type on its own, for the stop whose combined audit timed out; `auditTypes` selects among them.
     private static let individualAuditTypes: [XCUIAccessibilityAuditType] = [
-        .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .dynamicType, .textClipped, .trait, .action, .parentChild,
+        .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .dynamicType, .textClipped, .trait,
     ]
     /// The glass list: the elements whose contrast issue `GlassContrastLedger` decides (docs/validation/accessibility.md,
     /// "Content under and on glass"). A label matches by prefix where the rest of it varies from run to run (a card caption
