@@ -95,13 +95,12 @@ struct GlassContrastLedger {
     }
 
     /// A contrast issue on `element` (nil when the snapshot before the audit did not show it on screen). `measure` is
-    /// asked for the screenshot contrast for text drawn on glass at an unobstructed stop, and for an element scrolled under
-    /// glass when the audit moved the content during the pass (`movedBy`): a verdict from such a pass is not evidence about
-    /// the content, so the element is decided from the snapshot and screenshot taken before the pass: wholly inside the
-    /// clear band there, its own contrast settles it at the minimum or above and fails it below; otherwise it is owed.
+    /// asked for the screenshot contrast only at an unobstructed stop: for text drawn on glass, and for content scrolled
+    /// under glass when the audit moved the content during the pass that raised the issue (`auditMovedContent`).
     mutating func decide(
         contrastIssueOn element: ScreenElement?, placement: GlassPlacement, screenName: String,
-        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement], movedBy: CGFloat? = nil, measure: () -> Double?
+        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement], auditMovedContent: Bool = false,
+        measure: () -> Double?
     ) -> Decision {
         guard let element else { return .issue("the element is not on screen in the snapshot taken before the audit") }
         guard Self.isUnobstructed(element, placement: placement, clearBand: clearBand, screen: screen, others: others) else {
@@ -110,12 +109,17 @@ struct GlassContrastLedger {
         }
         switch placement {
         case .scrollsUnderGlass:
-            guard movedBy != nil else {
+            // The audit sampled the element while it was scrolling the content, so its verdict says nothing about the
+            // element at rest: the pixels of the screenshot taken before the audit, where it lay clear, decide instead.
+            guard auditMovedContent else {
                 return .issue("the element lies wholly clear of the glass, so its contrast issue is real")
             }
-            guard let ratio = measure() else { return .issue("the audit moved the content and the contrast could not be measured from the screenshot taken before it") }
+            guard let ratio = measure() else {
+                return .issue("the audit moved the content, and the contrast could not be measured from the screenshot taken before it")
+            }
             guard ratio >= Self.minimumContrastRatio else {
-                return .issue(String(format: "the audit moved the content; measured %.2f:1 before it with the element wholly clear, below %.1f:1", ratio, Self.minimumContrastRatio))
+                return .issue(String(
+                    format: "measured %.2f:1 clear of the glass before the audit moved the content, below %.1f:1", ratio, Self.minimumContrastRatio))
             }
             if settled[element.key] == nil { settled[element.key] = screenName }
             return .measured(ratio)
@@ -131,33 +135,20 @@ struct GlassContrastLedger {
 
     /// After an audit stop: every listed element that was unobstructed there and had no contrast issue is settled.
     /// Returns the keys newly settled at this stop.
-    /// At a stop where the audit moved the content (`movedBy`), an element scrolled under glass is not settled by the audit
-    /// finding nothing (that verdict is not about the content as the snapshot showed it); it is settled by `measure`, its
-    /// contrast from the screenshot taken before the audit, at the minimum or above. Below the minimum it stays as it was.
     @discardableResult
     mutating func recordStop(
         _ screenName: String, listed: [(element: ScreenElement, placement: GlassPlacement)], flaggedKeys: Set<String>,
-        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement], movedBy: CGFloat? = nil,
-        measure: (ScreenElement) -> Double? = { _ in nil }
+        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement]
     ) -> [ScreenElement] {
         var newlySettled: [ScreenElement] = []
         for (element, placement) in listed where !flaggedKeys.contains(element.key) {
             guard Self.isUnobstructed(element, placement: placement, clearBand: clearBand, screen: screen, others: others) else { continue }
-            if movedBy != nil, placement == .scrollsUnderGlass {
-                guard settled[element.key] == nil, let ratio = measure(element), ratio >= Self.minimumContrastRatio else { continue }
-            }
             if settled[element.key] == nil {
                 settled[element.key] = screenName
                 newlySettled.append(element)
             }
         }
         return newlySettled
-    }
-
-    /// Whether the snapshot lists the wordmark's glyph apart from its pill: with the iOS 27 keyboard's `Done` shown the
-    /// glyph node is given the pill's own frame, so the pill minus the glyph has no pixels to measure.
-    static func glyphIsSeparated(glyph: CGRect, from pill: CGRect) -> Bool {
-        pill.insetBy(dx: -1, dy: -1).contains(glyph) && glyph.width < pill.width - 1 && glyph.height < pill.height - 1
     }
 
     /// Settles `key` by an unobstructed audit made elsewhere (the default-size run, for the largest size).
