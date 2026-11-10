@@ -38,7 +38,6 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
           xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
@@ -447,7 +446,6 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
           xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
@@ -575,7 +573,6 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
           xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
@@ -638,12 +635,13 @@ jobs:
         run: cat ios/.evidence/host-pressure.txt || true
 
       # The large-text screenshots go up as quality-60 JPEGs, about a fifth of the PNG size (CI artifact budget). The
-      # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40.
+      # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40. The default-size
+      # screenshots are compressed the same way but upload only with the failure diagnostics (below).
       - name: Compress large-text screenshots
         if: always()
         shell: bash
         run: |
-          for png in ios/.evidence/accessibility/xxxl-*.png; do
+          for png in ios/.evidence/accessibility/xxxl-*.png ios/.evidence/accessibility/default-*.png; do
             [ -e "${png}" ] || continue
             case "${png}" in
               *-audited-*) sips --resampleWidth 603 -s format jpeg -s formatOptions 40 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true ;;
@@ -691,6 +689,7 @@ jobs:
           name: ios-accessibility-failure
           path: |
             ios/.evidence/failure-diagnostics
+            ios/.evidence/accessibility/default-*.jpg
             !ios/.evidence/**/*.xcresult
             !ios/.evidence/**/*.xcresult/**
           include-hidden-files: true
@@ -712,7 +711,6 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
           xcode-version: '27.2'
 
       - name: Record toolchain versions

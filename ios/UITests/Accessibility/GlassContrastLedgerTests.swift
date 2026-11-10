@@ -171,6 +171,35 @@ final class GlassContrastLedgerTests: XCTestCase {
         let back = element("Back", CGRect(x: 8, y: 50, width: 44, height: 44))
         let sameControl = element("Save words", identifier: "item-controls.text.save", CGRect(x: 16, y: 54, width: 139, height: 44))
         let cardBehind = element("Synthetic spoken note", card: "home.recents.card.2", CGRect(x: 16, y: 0, width: 370, height: 300))
-        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [back, container, sameControl, cardBehind]), [back, cardBehind])
+        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [back, container, sameControl, cardBehind], screen: screen), [back, cardBehind])
+    }
+
+    /// iOS 27 reports a labelled `Toolbar` node with the frame of the whole screen. It is a container, not an obstruction;
+    /// its labelled children that overlap still obstruct, and a node one point smaller than the screen does too.
+    func testAScreenSizedNodeIsAContainerAndNotAnObstruction() {
+        let placeholder = element("What's on your mind?", CGRect(x: 36, y: 739, width: 221, height: 36))
+        let toolbar = element("Toolbar", CGRect(x: 0, y: 0, width: 402, height: 874))
+        XCTAssertTrue(GlassContrastLedger.overlapping(placeholder, in: [toolbar], screen: screen).isEmpty)
+        XCTAssertTrue(GlassContrastLedger.isUnobstructed(placeholder, placement: .drawnOnGlass, clearBand: clearBand, screen: screen, others: [toolbar]))
+
+        let child = element("Idea \u{00B7} 13 sec. ago", CGRect(x: 48, y: 727, width: 109, height: 16), ancestors: [toolbar])
+        XCTAssertEqual(GlassContrastLedger.overlapping(placeholder, in: [toolbar, child], screen: screen), [child])
+
+        let almost = element("Toolbar", CGRect(x: 0, y: 0, width: 402, height: 873))
+        XCTAssertEqual(GlassContrastLedger.overlapping(placeholder, in: [almost], screen: screen), [almost])
+    }
+
+    /// The header wordmark is one control: the pill labelled "Oh And" and the "&" glyph the snapshot lists beside it share a
+    /// ledger key (the test gives them one), so neither obstructs the other, while anything else over the pill does.
+    func testTheWordmarkPillAndItsGlyphDoNotObstructEachOther() {
+        let wordmarkKey = ScreenElement.key(card: "", identifier: "", label: "Oh And")
+        var pill = element("Oh And", CGRect(x: 147, y: 70, width: 108, height: 44))
+        var glyph = element("&", CGRect(x: 163, y: 78, width: 12, height: 29))
+        pill.key = wordmarkKey
+        glyph.key = wordmarkKey
+        XCTAssertTrue(GlassContrastLedger.overlapping(pill, in: [glyph], screen: screen).isEmpty)
+        XCTAssertTrue(GlassContrastLedger.overlapping(glyph, in: [pill], screen: screen).isEmpty)
+        let search = element("Search", identifier: "home.search", CGRect(x: 200, y: 60, width: 44, height: 44))
+        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [glyph, search], screen: screen), [search])
     }
 }

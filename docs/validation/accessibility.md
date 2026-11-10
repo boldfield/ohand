@@ -141,7 +141,22 @@ snapshot of the screen taken just before the audit:
   pixel is the element's own glyph. 4.5:1 or above settles it (`MEASURED`); below fails. With something overlapping,
   it is owed as above, and the test scrolls to the top of the screen (for the header) or its end (for the composer),
   where nothing is behind the glass, to audit or measure it there. A scroll indicator ("Horizontal scroll bar") is not
-  content and overlaps nothing.
+  content and overlaps nothing. **A container is not an obstruction:** a node whose frame contains the whole screen frame
+  (iOS 27 lists a labelled `Toolbar` of the screen's size, `CONTAINER` in the log with its element type and identifier,
+  once per run) obstructs nothing, whatever its label or type, and `GlassContrastLedger.overlapping` decides it from the
+  screen frame and not from the label. Every smaller node, including that container's labelled descendants, still
+  obstructs. This cannot hide a failure: text drawn on glass is settled only by an audit with no issue at an unobstructed
+  stop or by measuring the screenshot's pixels.
+- **The header wordmark.** `HomeHeader` exposes the pill as one element labelled `Oh And`; iOS 27 reports contrast on it
+  while the snapshot still lists the `&` glyph beside it. The two are one control with one ledger key and do not obstruct
+  each other. The wordmark is settled only by measurement, at a stop where nothing else overlaps the pill, whether or not
+  the audit flagged it there (`MEASURED`): the `&` glyph's own frame (the indigo mark, the weaker of the two) and the
+  pill's frame with the glyph's frame excluded (the ink of the words) must both reach 4.5:1. An audit with no issue does
+  not settle it; a wordmark below 4.5:1 on either measurement is a real finding.
+- **`Discard` and the status line.** `home.composer.discard` and `capture-entry.message` (the outcome line drawn over the
+  list above the composer) are on the glass list by identifier, drawn on glass, and settled the same way: a stop where
+  nothing overlaps, measured from the screenshot at 4.5:1 or above. A measurement below that is a defect in a design token
+  and is reported, not worked around.
 
 The clear band runs from 12 points below the header's glass buttons (or the back button) to the top of the composer's
 glass, which is 20 points above its field, placeholder or "Recording" line (the test allows 24); a status line or the
@@ -177,7 +192,20 @@ to `settled-default.txt`). Contrast is a property of the element's colours, whic
 largest size only lowers the bar for large text. A Home card is named by its text without the age in its caption, so
 the same card matches across launches and sizes. Only what neither size settles is scrolled to and audited.
 
-`GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a low-contrast element under
+**An audit that times out.** `performAccessibilityAudit` can throw "Audit failed to complete in time" (code -56). An audit
+that throws still fails, but a stop whose combined audit throws -56 is audited again one audit type at a time (each type
+of the run's audit types in its own `performAccessibilityAudit(for:)` call, `RETRY-BY-TYPE` in the log). The stop counts
+as audited only if every type completes, and its issues are the union; no type is omitted, and a type that still throws
+fails the stop. When a first pass found something and is repeated, its issues are logged (`RETRY-ISSUE`) before the
+repeat.
+
+**The end of the Home list.** The test swipes the list up until its last card stops moving and logs where that card ends
+against the clear band (`SCROLL-END`). On a failed job the default-size screenshots upload too (`ios-accessibility-failure`,
+compressed, within the failure budget), so where the last card stands is readable from the artifact.
+
+`GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a screen-sized node that is a
+container while a labelled child of it and a node one point smaller than the screen still obstruct, the wordmark pill and
+its glyph that do not obstruct each other, a low-contrast element under
 the back button that later fails clear of it, an excuse never settled, a placeholder with a card behind it that is not
 measured, a measured 3.1:1 that fails, a dark glyph from another element that would read 21:1 if it were not excluded,
 and two cards with the same caption that are settled separately.
@@ -185,7 +213,8 @@ and two cards with the same caption that are settled separately.
 | Element (identifier, label) | Placement | Screens |
 | --- | --- | --- |
 | "What's on your mind?" (composer placeholder) | drawn on the composer glass | Home, capture, locked |
-| "&" (the mark), only in the header above the clear band | drawn on the header glass | capture text entry |
+| the header wordmark: the pill "Oh And" and its "&" glyph (one ledger key), only in the header above the clear band | drawn on the header glass | Home, capture |
+| "Discard" (`home.composer.discard`) and the outcome line (`capture-entry.message`) | drawn on the composer glass, or over the list above it | capture |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
 

@@ -8,7 +8,7 @@ struct ScreenElement: Equatable {
     var ancestorIDs: Set<Int> = []
     /// Identifies the same element across scroll stops: the enclosing Home card (when there is one), the identifier and
     /// the label, with a card caption's age dropped ("Idea · 13 sec. ago" is "Idea" in its card).
-    let key: String
+    var key: String
     let identifier: String
     let label: String
     let frame: CGRect
@@ -75,16 +75,19 @@ struct GlassContrastLedger {
             return !frame.isEmpty && screen.contains(frame)
                 && frame.minY >= clearBand.lowerBound && frame.maxY <= clearBand.upperBound
         case .drawnOnGlass:
-            return overlapping(element, in: others).isEmpty && screen.contains(element.frame)
+            return overlapping(element, in: others, screen: screen).isEmpty && screen.contains(element.frame)
         }
     }
 
     /// The elements whose frames overlap `element`, other than its ancestors and descendants in the hierarchy (the pill
     /// around the mark, the field around its placeholder) and an element with the same label (the same control). A card
     /// behind the composer overlaps the placeholder even when its frame contains it, because it is not its ancestor.
-    static func overlapping(_ element: ScreenElement, in others: [ScreenElement]) -> [ScreenElement] {
+    /// A node whose frame contains the whole `screen` is a container (iOS 27 reports a labelled `Toolbar` of the screen's
+    /// size) and obstructs nothing, whatever its label or type; every smaller node, a container's labelled descendants
+    /// included, still does.
+    static func overlapping(_ element: ScreenElement, in others: [ScreenElement], screen: CGRect) -> [ScreenElement] {
         others.filter { other in
-            guard other.key != element.key, other.label != element.label, !other.frame.isEmpty,
+            guard other.key != element.key, other.label != element.label, !other.frame.isEmpty, !other.frame.contains(screen),
                   !element.ancestorIDs.contains(other.nodeID), !other.ancestorIDs.contains(element.nodeID) else { return false }
             let shared = other.frame.intersection(element.frame)
             return !shared.isNull && shared.width > 1 && shared.height > 1
@@ -149,7 +152,7 @@ enum ScreenshotContrast {
     /// `pixels` is RGBA, 8 bits per channel, `width` × `height`. The most common colour (in 5-bit buckets) is the
     /// background; the pixel furthest from it in luminance is the text. Pixels inside `excluded` (pixel coordinates) are
     /// skipped. Callers measure only a crop that nothing else overlaps (`GlassContrastLedger.overlapping`), so the furthest
-    /// pixel is the element's own glyph.
+    /// pixel is the element's own glyph (or, with the glyph excluded, the rest of the element's own ink).
     static func ratio(pixels: [UInt8], width: Int, height: Int, excluded: [CGRect] = []) -> Double? {
         guard width > 0, height > 0, pixels.count >= width * height * 4 else { return nil }
         var offsets: [Int] = []
