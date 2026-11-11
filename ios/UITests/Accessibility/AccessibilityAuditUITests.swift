@@ -518,6 +518,13 @@ final class AccessibilityAuditUITests: XCTestCase {
             var notes: [String] = []
             var found: [String] = []
             var flaggedKeys: Set<String> = []
+            // On a simulator that has just been erased the audit raises the contrast issue of the wordmark's words with no
+            // element (it names "Oh And" on a simulator that has shown a keyboard before; removing the words removes the
+            // issue). One such issue per pass is the words', and only in a pass that names the "&" mark and not the words.
+            let contrastLabels = raised.filter { $0.auditType == .contrast }.compactMap { issue in
+                issue.element.flatMap { $0.identifier.isEmpty ? $0.label : nil }
+            }
+            var unnamedContrastIssues = 0
             for issue in raised {
                 let element = issue.element
                 let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(band)"
@@ -556,6 +563,28 @@ final class AccessibilityAuditUITests: XCTestCase {
                         }
                     }
                     continue
+                }
+                if issue.auditType == .contrast, element == nil {
+                    unnamedContrastIssues += 1
+                    if GlassContrastLedger.unnamedIssueIsTheWordmarkWords(
+                        unnamedIssuesSoFar: unnamedContrastIssues, markIsNamed: contrastLabels.contains("&"),
+                        wordsAreNamed: contrastLabels.contains("Oh And")),
+                       let words = elements.first(where: { isWordmark($0) && $0.label == "Oh And" }) {
+                        flaggedKeys.insert(words.key)
+                        let decision = trialLedger.decide(
+                            contrastIssueOn: words, placement: .drawnOnGlass, screenName: screen, clearBand: band, screen: screenFrame,
+                            others: elements, measure: { measuredWordmarkContrast(in: elements, image: beforeImage) })
+                        switch decision {
+                        case .owed:
+                            trialOwed[words.key] = .drawnOnGlass
+                            notes.append("OWED \(screen): 'Oh And' (drawnOnGlass, the audit named no element) shown at \(words.frame.debugDescription), obstructed\(obstruction(of: words, placement: .drawnOnGlass, in: elements)); the test must audit it unobstructed")
+                        case .measured(let ratio):
+                            notes.append("MEASURED \(screen): 'Oh And' shown at \(words.frame.debugDescription) with nothing overlapping (the audit named no element for this issue; it named the '&' mark and not the words), contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                        case .issue(let reason):
+                            found.append("\(description) | taken as the wordmark's words at \(words.frame.debugDescription): \(reason)")
+                        }
+                        continue
+                    }
                 }
                 if isExempt(issue) {
                     notes.append("EXEMPT \(description)")

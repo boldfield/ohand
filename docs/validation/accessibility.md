@@ -174,6 +174,11 @@ snapshot of the screen taken just before the audit:
   size, as `settled-default.txt` does). With no separated glyph measurement the wordmark cannot be measured and fails.
 - **The keyboard's introduction.** A new simulator shows the slide-to-type introduction over the keyboard; the text-entry
   test dismisses it and fails if it is still on screen at the audit.
+- **A contrast issue with no element.** On a simulator that has just been erased, the audit raises the contrast issue of
+  the wordmark's words with no element at the text-entry stop; on a simulator that has shown a keyboard before it names
+  `Oh And` there, and removing the words from the app removes the issue. In one pass, the first contrast issue with no
+  element is taken as the words' when the same pass names the "&" mark and does not name `Oh And`, and it is decided by
+  the wordmark's measurement. The log line says the audit named no element. Any other issue with no element fails.
 
 The clear band runs from 12 points below the lowest of the header's glass elements (its buttons and the wordmark pill, which is taller than the buttons at the largest text size; or the back button) to the top of the composer's
 glass, which is 20 points above its field, placeholder or "Recording" line (the test allows 24); a status line or the

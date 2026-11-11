@@ -133,6 +133,14 @@ struct GlassContrastLedger {
         }
     }
 
+    /// Whether a contrast issue the audit raised with no element is the header wordmark's words. On a simulator that has
+    /// just been erased the audit names the "&" mark and raises the words' issue with no element. Only the first such
+    /// issue of a pass is the words', and only when the same pass names the mark and does not name the words; any other
+    /// contrast issue without an element is a real finding.
+    static func unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: Int, markIsNamed: Bool, wordsAreNamed: Bool) -> Bool {
+        unnamedIssuesSoFar == 1 && markIsNamed && !wordsAreNamed
+    }
+
     /// After an audit stop: every listed element that was unobstructed there and had no contrast issue is settled.
     /// Returns the keys newly settled at this stop.
     @discardableResult

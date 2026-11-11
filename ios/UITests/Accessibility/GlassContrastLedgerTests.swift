@@ -60,6 +60,18 @@ final class GlassContrastLedgerTests: XCTestCase {
         guard case .issue = decision else { return XCTFail("a flagged element clear of the glass at rest must fail, got \(decision)") }
     }
 
+    /// A contrast issue with no element is the wordmark's words only once per pass, and only in a pass that names the
+    /// mark and not the words.
+    func testAnIssueWithNoElementIsTheWordmarkWordsOnlyBesideTheNamedMark() {
+        XCTAssertTrue(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: true, wordsAreNamed: false))
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 2, markIsNamed: true, wordsAreNamed: false),
+                       "a second issue with no element is a real finding")
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: true, wordsAreNamed: true),
+                       "when the audit names the words, an issue with no element is something else")
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: false, wordsAreNamed: false),
+                       "without the mark's issue beside it, an issue with no element is a real finding")
+    }
+
     /// A low-contrast button under the back button is excused there, but the test owes a clear audit of it; when that clear
     /// audit flags it too, the issue is real.
     func testALowContrastElementUnderTheBackButtonFailsOnceAuditedClear() {
