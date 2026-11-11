@@ -8,7 +8,7 @@ struct ScreenElement: Equatable {
     var ancestorIDs: Set<Int> = []
     /// Identifies the same element across scroll stops: the enclosing Home card (when there is one), the identifier and
     /// the label, with a card caption's age dropped ("Idea · 13 sec. ago" is "Idea" in its card).
-    let key: String
+    var key: String
     let identifier: String
     let label: String
     let frame: CGRect
@@ -75,16 +75,19 @@ struct GlassContrastLedger {
             return !frame.isEmpty && screen.contains(frame)
                 && frame.minY >= clearBand.lowerBound && frame.maxY <= clearBand.upperBound
         case .drawnOnGlass:
-            return overlapping(element, in: others).isEmpty && screen.contains(element.frame)
+            return overlapping(element, in: others, screen: screen).isEmpty && screen.contains(element.frame)
         }
     }
 
     /// The elements whose frames overlap `element`, other than its ancestors and descendants in the hierarchy (the pill
     /// around the mark, the field around its placeholder) and an element with the same label (the same control). A card
     /// behind the composer overlaps the placeholder even when its frame contains it, because it is not its ancestor.
-    static func overlapping(_ element: ScreenElement, in others: [ScreenElement]) -> [ScreenElement] {
+    /// A node whose frame contains the whole `screen` is a container (iOS 27 reports a labelled `Toolbar` of the screen's
+    /// size) and obstructs nothing, whatever its label or type; every smaller node, a container's labelled descendants
+    /// included, still does.
+    static func overlapping(_ element: ScreenElement, in others: [ScreenElement], screen: CGRect) -> [ScreenElement] {
         others.filter { other in
-            guard other.key != element.key, other.label != element.label, !other.frame.isEmpty,
+            guard other.key != element.key, other.label != element.label, !other.frame.isEmpty, !other.frame.contains(screen),
                   !element.ancestorIDs.contains(other.nodeID), !other.ancestorIDs.contains(element.nodeID) else { return false }
             let shared = other.frame.intersection(element.frame)
             return !shared.isNull && shared.width > 1 && shared.height > 1
@@ -92,10 +95,12 @@ struct GlassContrastLedger {
     }
 
     /// A contrast issue on `element` (nil when the snapshot before the audit did not show it on screen). `measure` is
-    /// asked for the screenshot contrast only for text drawn on glass at an unobstructed stop.
+    /// asked for the screenshot contrast only at an unobstructed stop: for text drawn on glass, and for content scrolled
+    /// under glass when the audit moved the content during the pass that raised the issue (`auditMovedContent`).
     mutating func decide(
         contrastIssueOn element: ScreenElement?, placement: GlassPlacement, screenName: String,
-        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement], measure: () -> Double?
+        clearBand: ClosedRange<CGFloat>, screen: CGRect, others: [ScreenElement], auditMovedContent: Bool = false,
+        measure: () -> Double?
     ) -> Decision {
         guard let element else { return .issue("the element is not on screen in the snapshot taken before the audit") }
         guard Self.isUnobstructed(element, placement: placement, clearBand: clearBand, screen: screen, others: others) else {
@@ -104,7 +109,20 @@ struct GlassContrastLedger {
         }
         switch placement {
         case .scrollsUnderGlass:
-            return .issue("the element lies wholly clear of the glass, so its contrast issue is real")
+            // The audit sampled the element while it was scrolling the content, so its verdict says nothing about the
+            // element at rest: the pixels of the screenshot taken before the audit, where it lay clear, decide instead.
+            guard auditMovedContent else {
+                return .issue("the element lies wholly clear of the glass, so its contrast issue is real")
+            }
+            guard let ratio = measure() else {
+                return .issue("the audit moved the content, and the contrast could not be measured from the screenshot taken before it")
+            }
+            guard ratio >= Self.minimumContrastRatio else {
+                return .issue(String(
+                    format: "measured %.2f:1 clear of the glass before the audit moved the content, below %.1f:1", ratio, Self.minimumContrastRatio))
+            }
+            if settled[element.key] == nil { settled[element.key] = screenName }
+            return .measured(ratio)
         case .drawnOnGlass:
             guard let ratio = measure() else { return .issue("the contrast could not be measured from the screenshot") }
             guard ratio >= Self.minimumContrastRatio else {
@@ -113,6 +131,14 @@ struct GlassContrastLedger {
             if settled[element.key] == nil { settled[element.key] = screenName }
             return .measured(ratio)
         }
+    }
+
+    /// Whether a contrast issue the audit raised with no element is the header wordmark's words. On a simulator that has
+    /// just been erased the audit names the "&" mark and raises the words' issue with no element. Only the first such
+    /// issue of a pass is the words', and only when the same pass names the mark and does not name the words; any other
+    /// contrast issue without an element is a real finding.
+    static func unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: Int, markIsNamed: Bool, wordsAreNamed: Bool) -> Bool {
+        unnamedIssuesSoFar == 1 && markIsNamed && !wordsAreNamed
     }
 
     /// After an audit stop: every listed element that was unobstructed there and had no contrast issue is settled.
@@ -149,7 +175,7 @@ enum ScreenshotContrast {
     /// `pixels` is RGBA, 8 bits per channel, `width` × `height`. The most common colour (in 5-bit buckets) is the
     /// background; the pixel furthest from it in luminance is the text. Pixels inside `excluded` (pixel coordinates) are
     /// skipped. Callers measure only a crop that nothing else overlaps (`GlassContrastLedger.overlapping`), so the furthest
-    /// pixel is the element's own glyph.
+    /// pixel is the element's own glyph (or, with the glyph excluded, the rest of the element's own ink).
     static func ratio(pixels: [UInt8], width: Int, height: Int, excluded: [CGRect] = []) -> Double? {
         guard width > 0, height > 0, pixels.count >= width * height * 4 else { return nil }
         var offsets: [Int] = []

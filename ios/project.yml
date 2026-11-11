@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.boldfield.ohand
   deploymentTarget:
     iOS: "16.0"
-  xcodeVersion: "26.6"
+  xcodeVersion: "27.2"
 
 settings:
   PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app

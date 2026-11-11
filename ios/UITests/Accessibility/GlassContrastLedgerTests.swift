@@ -19,6 +19,59 @@ final class GlassContrastLedgerTests: XCTestCase {
 
     // MARK: Scrolled under glass
 
+    /// The iOS 27 audit scrolls the content while it evaluates. A contrast issue from such a pass is decided from the
+    /// screenshot taken before it: an element that lay wholly clear there is settled at 4.5:1 or above and fails below.
+    func testAnIssueFromAPassThatMovedTheContentIsDecidedByMeasurement() {
+        var ledger = GlassContrastLedger()
+        let clear = element("Synthetic typed note", card: "Note", CGRect(x: 32, y: 300, width: 320, height: 20))
+        XCTAssertEqual(
+            ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "home-end", clearBand: clearBand,
+                          screen: screen, others: [], auditMovedContent: true, measure: { 12.5 }),
+            .measured(12.5))
+        XCTAssertTrue(ledger.unsettled.isEmpty)
+
+        var failing = GlassContrastLedger()
+        let low = failing.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "home-end", clearBand: clearBand,
+                                 screen: screen, others: [], auditMovedContent: true, measure: { 3.9 })
+        guard case .issue = low else { return XCTFail("a measurement below the minimum must fail, got \(low)") }
+        let unmeasured = failing.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "home-end", clearBand: clearBand,
+                                        screen: screen, others: [], auditMovedContent: true, measure: { nil })
+        guard case .issue = unmeasured else { return XCTFail("an element that cannot be measured must fail, got \(unmeasured)") }
+    }
+
+    /// Under the glass the element is owed whether or not the audit moved the content, and nothing is measured there.
+    func testAnElementUnderGlassIsOwedEvenWhenTheAuditMovedTheContent() {
+        var ledger = GlassContrastLedger()
+        let underComposer = element("Synthetic typed note", card: "Note", CGRect(x: 32, y: 700, width: 320, height: 20))
+        XCTAssertEqual(
+            ledger.decide(contrastIssueOn: underComposer, placement: .scrollsUnderGlass, screenName: "home", clearBand: clearBand,
+                          screen: screen, others: [], auditMovedContent: true, measure: { XCTFail("no measurement under glass"); return nil }),
+            .owed)
+        XCTAssertEqual(ledger.unsettled.map(\.key), [underComposer.key])
+    }
+
+    /// When the audit did not move the content, its issue on an element clear of the glass is real, whatever a
+    /// measurement would say.
+    func testAnIssueFromAPassAtRestIsRealWithoutMeasurement() {
+        var ledger = GlassContrastLedger()
+        let clear = element("Synthetic typed note", card: "Note", CGRect(x: 32, y: 300, width: 320, height: 20))
+        let decision = ledger.decide(contrastIssueOn: clear, placement: .scrollsUnderGlass, screenName: "home", clearBand: clearBand,
+                                     screen: screen, others: [], auditMovedContent: false, measure: { XCTFail("not measured at rest"); return 21 })
+        guard case .issue = decision else { return XCTFail("a flagged element clear of the glass at rest must fail, got \(decision)") }
+    }
+
+    /// A contrast issue with no element is the wordmark's words only once per pass, and only in a pass that names the
+    /// mark and not the words.
+    func testAnIssueWithNoElementIsTheWordmarkWordsOnlyBesideTheNamedMark() {
+        XCTAssertTrue(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: true, wordsAreNamed: false))
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 2, markIsNamed: true, wordsAreNamed: false),
+                       "a second issue with no element is a real finding")
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: true, wordsAreNamed: true),
+                       "when the audit names the words, an issue with no element is something else")
+        XCTAssertFalse(GlassContrastLedger.unnamedIssueIsTheWordmarkWords(unnamedIssuesSoFar: 1, markIsNamed: false, wordsAreNamed: false),
+                       "without the mark's issue beside it, an issue with no element is a real finding")
+    }
+
     /// A low-contrast button under the back button is excused there, but the test owes a clear audit of it; when that clear
     /// audit flags it too, the issue is real.
     func testALowContrastElementUnderTheBackButtonFailsOnceAuditedClear() {
@@ -171,6 +224,35 @@ final class GlassContrastLedgerTests: XCTestCase {
         let back = element("Back", CGRect(x: 8, y: 50, width: 44, height: 44))
         let sameControl = element("Save words", identifier: "item-controls.text.save", CGRect(x: 16, y: 54, width: 139, height: 44))
         let cardBehind = element("Synthetic spoken note", card: "home.recents.card.2", CGRect(x: 16, y: 0, width: 370, height: 300))
-        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [back, container, sameControl, cardBehind]), [back, cardBehind])
+        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [back, container, sameControl, cardBehind], screen: screen), [back, cardBehind])
+    }
+
+    /// iOS 27 reports a labelled `Toolbar` node with the frame of the whole screen. It is a container, not an obstruction;
+    /// its labelled children that overlap still obstruct, and a node one point smaller than the screen does too.
+    func testAScreenSizedNodeIsAContainerAndNotAnObstruction() {
+        let placeholder = element("What's on your mind?", CGRect(x: 36, y: 739, width: 221, height: 36))
+        let toolbar = element("Toolbar", CGRect(x: 0, y: 0, width: 402, height: 874))
+        XCTAssertTrue(GlassContrastLedger.overlapping(placeholder, in: [toolbar], screen: screen).isEmpty)
+        XCTAssertTrue(GlassContrastLedger.isUnobstructed(placeholder, placement: .drawnOnGlass, clearBand: clearBand, screen: screen, others: [toolbar]))
+
+        let child = element("Idea \u{00B7} 13 sec. ago", CGRect(x: 48, y: 727, width: 109, height: 16), ancestors: [toolbar])
+        XCTAssertEqual(GlassContrastLedger.overlapping(placeholder, in: [toolbar, child], screen: screen), [child])
+
+        let almost = element("Toolbar", CGRect(x: 0, y: 0, width: 402, height: 873))
+        XCTAssertEqual(GlassContrastLedger.overlapping(placeholder, in: [almost], screen: screen), [almost])
+    }
+
+    /// The header wordmark is one control: the pill labelled "Oh And" and the "&" glyph the snapshot lists beside it share a
+    /// ledger key (the test gives them one), so neither obstructs the other, while anything else over the pill does.
+    func testTheWordmarkPillAndItsGlyphDoNotObstructEachOther() {
+        let wordmarkKey = ScreenElement.key(card: "", identifier: "", label: "Oh And")
+        var pill = element("Oh And", CGRect(x: 147, y: 70, width: 108, height: 44))
+        var glyph = element("&", CGRect(x: 163, y: 78, width: 12, height: 29))
+        pill.key = wordmarkKey
+        glyph.key = wordmarkKey
+        XCTAssertTrue(GlassContrastLedger.overlapping(pill, in: [glyph], screen: screen).isEmpty)
+        XCTAssertTrue(GlassContrastLedger.overlapping(glyph, in: [pill], screen: screen).isEmpty)
+        let search = element("Search", identifier: "home.search", CGRect(x: 200, y: 60, width: 44, height: 44))
+        XCTAssertEqual(GlassContrastLedger.overlapping(pill, in: [glyph, search], screen: screen), [search])
     }
 }

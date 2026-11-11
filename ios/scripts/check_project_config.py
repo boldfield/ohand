@@ -147,7 +147,13 @@ def check_workflow_xcode_pin(project, workflow_path=IOS_WORKFLOW):
     if not project_pin:
         errors.append("project.yml must set options.xcodeVersion")
     workflow = yaml.safe_load(workflow_path.read_text())
+    major = project_pin.split(".")[0]
+    expected_label = f"xcode-{major}"
     for job_name, job in workflow.get("jobs", {}).items():
+        if project_pin and str(job.get("runs-on", "")) != expected_label:
+            errors.append(
+                f"ios.yml job {job_name} runs on {str(job.get('runs-on', ''))!r} but Xcode {project_pin!r} needs the {expected_label!r} runner image"
+            )
         pins = [
             str(step.get("with", {}).get("xcode-version", ""))
             for step in job.get("steps", [])

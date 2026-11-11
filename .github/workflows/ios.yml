@@ -15,12 +15,12 @@ concurrency:
 jobs:
   simulator:
     name: Simulator build, unit tests and launch smoke test
-    # Measured per runner at the same head (F47 amendment 4). macos-26-intel (14 GB, bridge image: Xcode 27 needs macOS 27)
-    # failed this job's readiness settle with no test failing (run 40272866202 attempt 2: cold boot 317 s, peak load 617),
-    # and its cold boots took 376-535 s. macos-26 (arm64, 7 GB) passed both walkthrough jobs in every run since the fix to
-    # their tests (cold boots 177-336 s, peak load 387-540). The build service is stopped before the first boot so the
-    # memory the build held is returned.
-    runs-on: macos-26
+    # F68: runs on GitHub's xcode-27 image (arm64, macOS 27.0.1, Xcode 27.2 / 27.1 / 27.0), because the iPhone Duo only runs
+    # an app full-screen when it is built with Xcode 27.1 or later. Earlier measurements on macos-26 (arm64, 7 GB: cold boots
+    # 177-336 s, peak load 387-540) and macos-26-intel (cold boots 376-535 s, failed settle) are history; boot timing on this
+    # image is re-measured in host-pressure.txt. The build service is stopped before the first boot so the memory the build
+    # held is returned.
+    runs-on: xcode-27
     # Run 40201105544 (head 6d7d6d7) was cancelled at 60 minutes with no test failing: the host reached load average 637
     # (cold boot 322 s, free memory 92 MB), the settle step took 14 minutes and OhAndTests 22 minutes, where an earlier
     # run of the same layout finished in 38 minutes. 90 leaves room for that slowdown; a hung step still ends the job.
@@ -38,8 +38,7 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
         shell: bash
@@ -418,13 +417,13 @@ jobs:
           retention-days: 1
 
   # One job per width: an iPhone and an iPad are different device types, so each pays its own first boot, and two jobs
-  # cost one more concurrent macOS job. Both run on macos-26 (arm64, 7 GB) with the build service stopped before the first boot.
+  # cost one more concurrent macOS job. Both run on xcode-27 (arm64) with the build service stopped before the first boot.
   walkthrough:
     name: Screenshot walkthrough (${{ matrix.width }} width)
-    # Measured against macos-26-intel at head cde5ac8 (run 40233254176): cold boots took 323-563 s at peak load 750-917 with
-    # swapouts 0, and the readiness settle failed. arm64 has faster cores and a GPU; the build service is stopped before the
-    # first boot so the memory the build held is returned (this job only runs UI tests, which need less than the simulator job).
-    runs-on: macos-26
+    # macos-26-intel (head cde5ac8, run 40233254176) took 323-563 s to cold boot and failed the readiness settle; arm64 has
+    # faster cores and a GPU. The build service is stopped before the first boot so the memory the build held is returned
+    # (this job only runs UI tests, which need less than the simulator job). Timing on xcode-27 is in host-pressure.txt.
+    runs-on: xcode-27
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -447,8 +446,7 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
         shell: bash
@@ -559,7 +557,7 @@ jobs:
   # issue fails the job; the artifact holds the audit log, the summary and the large-text screenshots.
   accessibility:
     name: Accessibility audits (default and largest text)
-    runs-on: macos-26
+    runs-on: xcode-27
     # Generating the project alone took 8 minutes on one hosted runner (run 41720210504), and the two audit runs about 45.
     timeout-minutes: 75
     env:
@@ -575,8 +573,7 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Install XcodeGen launcher
         shell: bash
@@ -638,12 +635,13 @@ jobs:
         run: cat ios/.evidence/host-pressure.txt || true
 
       # The large-text screenshots go up as quality-60 JPEGs, about a fifth of the PNG size (CI artifact budget). The
-      # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40.
+      # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40. The default-size
+      # screenshots are compressed the same way but upload only with the failure diagnostics (below).
       - name: Compress large-text screenshots
         if: always()
         shell: bash
         run: |
-          for png in ios/.evidence/accessibility/xxxl-*.png; do
+          for png in ios/.evidence/accessibility/xxxl-*.png ios/.evidence/accessibility/default-*.png; do
             [ -e "${png}" ] || continue
             case "${png}" in
               *-audited-*) sips --resampleWidth 603 -s format jpeg -s formatOptions 40 "${png}" --out "${png%.png}.jpg" >/dev/null && rm "${png}" || true ;;
@@ -691,6 +689,7 @@ jobs:
           name: ios-accessibility-failure
           path: |
             ios/.evidence/failure-diagnostics
+            ios/.evidence/accessibility/default-*.jpg
             !ios/.evidence/**/*.xcresult
             !ios/.evidence/**/*.xcresult/**
           include-hidden-files: true
@@ -699,7 +698,7 @@ jobs:
 
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     defaults:
       run:
@@ -712,8 +711,7 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
-          # Next bump: Xcode 27 once the hosted image carries it.
-          xcode-version: '26.6'
+          xcode-version: '27.2'
 
       - name: Record toolchain versions
         run: |

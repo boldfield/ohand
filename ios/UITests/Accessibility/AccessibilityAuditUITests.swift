@@ -48,21 +48,39 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// The contrast excuses under and on glass this test has taken, and the unobstructed audits that settle them.
     private var ledger = GlassContrastLedger()
     private var owedPlacements: [String: GlassPlacement] = [:]
+    private var separatedGlyphRatioInThisTest: Double?
     private let screenTimeout: TimeInterval = 90
+    /// Whether the full-screen container node has been logged in this run (`screenElements`).
+    private var containerLogged = false
 
     private static let largestContentSize = "UICTContentSizeCategoryAccessibilityXXXL"
     /// The launch argument the app's debug announcement log reads (`AccessibilityAnnouncer.logLaunchArgument`).
     private static let announcementLogArgument = "-OhAndAnnouncementLog"
     private static let announcementLogIdentifier = "accessibility.announcement-log"
     private static let fixtureStatusIdentifier = "ui-fixture.status"
+    /// The labels of the header wordmark's two nodes.
+    private static let wordmarkLabels: Set<String> = ["Oh And", "&"]
+    /// `performAccessibilityAudit` reports "Audit failed to complete in time" with this code.
+    private static let auditTimeoutCode = -56
+    /// Each audit type on its own, for the stop whose combined audit timed out; `auditTypes` selects among them.
+    private static let individualAuditTypes: [XCUIAccessibilityAuditType] = [
+        .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .dynamicType, .textClipped, .trait,
+    ]
     /// The glass list: the elements whose contrast issue `GlassContrastLedger` decides (docs/validation/accessibility.md,
     /// "Content under and on glass"). A label matches by prefix where the rest of it varies from run to run (a card caption
     /// ends in how long ago the note was captured). Every other contrast issue fails the test.
     private static let glassList: [(identifier: String, label: String, placement: GlassPlacement)] = [
         // Drawn on the composer glass.
         (identifier: "", label: "What's on your mind?", placement: .drawnOnGlass),
-        // The mark, drawn on the header glass; only in the header (`glassPlacement`).
+        // The header wordmark, drawn on the header glass: the pill labelled "Oh And" and the "&" glyph the snapshot lists
+        // beside it are one control and one ledger key (`screenElements`); only in the header (`glassPlacement`).
+        (identifier: "", label: "Oh And", placement: .drawnOnGlass),
         (identifier: "", label: "&", placement: .drawnOnGlass),
+        // Drawn on the composer glass, or over the list just above it; an empty label matches any label.
+        (identifier: "home.composer.discard", label: "", placement: .drawnOnGlass),
+        (identifier: "capture-entry.message", label: "", placement: .drawnOnGlass),
+        // Drawn on the header glass while the keyboard is up.
+        (identifier: "home.done", label: "", placement: .drawnOnGlass),
         // Home cards and the list heading, scrolled under the header and the composer.
         (identifier: "", label: "Synthetic typed note", placement: .scrollsUnderGlass),
         (identifier: "", label: "Synthetic typed action", placement: .scrollsUnderGlass),
@@ -163,14 +181,34 @@ final class AccessibilityAuditUITests: XCTestCase {
         audit("home-populated")
         // The cards under the composer are audited again once the list is scrolled to its end; any card still excused is
         // scrolled clear of the glass and audited there (`settleOwedElements`, from tearDown).
-        for _ in 0..<4 { app.swipeUp() }
-        Thread.sleep(forTimeInterval: 1)
+        scrollHomeToItsEnd("home-populated-end")
         audit("home-populated-end")
         // The audit has moved the list (`MOVED`); the frames it left still match what is drawn.
         assertTapOpensTheCardItsFramesPlaceMidScreen("home-populated-end, after its audit")
         // Back on Home the composer takes the focus again; the settle stops audit without the keyboard, as above.
         guard goBack() else { return }
         dismissKeyboardIfShown()
+    }
+
+    /// Swipes the Home list up until the last card stops moving (at most 8 swipes), and logs where the last card ends against
+    /// the clear band (`SCROLL-END`): a list at its end that still leaves the last card under the composer's glass is the
+    /// app's scroll inset, not the test's scroll.
+    private func scrollHomeToItsEnd(_ stop: String) {
+        func lastCardFrame() -> CGRect? {
+            screenElements().filter { $0.identifier.hasPrefix("home.recents.card.") }.max { $0.frame.maxY < $1.frame.maxY }?.frame
+        }
+        var swipes = 0
+        var previous = lastCardFrame()
+        while swipes < 8 {
+            app.swipeUp()
+            swipes += 1
+            Thread.sleep(forTimeInterval: 1)
+            let current = lastCardFrame()
+            if current == previous { break }
+            previous = current
+        }
+        let band = currentClearBand()
+        auditLines.append("SCROLL-END \(stop): after \(swipes) swipe(s) the last card is at \(previous?.debugDescription ?? "not shown"), the clear band is \(band)")
     }
 
     /// VoiceOver's focus ring and touch exploration use the accessibility frames the audit and the snapshot read. With
@@ -181,8 +219,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         XCTAssertTrue(app.homeCard(containing: "Synthetic").waitForExistence(timeout: screenTimeout))
         dismissKeyboardIfShown()
         currentScreen = "home-scrolled"
-        for _ in 0..<4 { app.swipeUp() }
-        Thread.sleep(forTimeInterval: 1)
+        scrollHomeToItsEnd("home-scrolled")
         assertTapOpensTheCardItsFramesPlaceMidScreen("home-scrolled to its end")
     }
 
@@ -223,7 +260,9 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     func testCaptureSilentTextEntry() {
         guard launch(.emptyFirstRun) else { return }
+        measureSeparatedWordmark("capture-text-entry-before-keyboard")
         guard typeCapture("Synthetic note for the accessibility audit") else { return }
+        dismissKeyboardIntroduction()
         audit("capture-text-entry")
     }
 
@@ -440,10 +479,15 @@ final class AccessibilityAuditUITests: XCTestCase {
             var raised: [RaisedIssue] = []
             var auditError: Error?
             do {
-                // Issues are copied here and decided once the audit has returned.
-                try app.performAccessibilityAudit(for: auditTypes) { issue in
-                    raised.append(RaisedIssue(issue))
-                    return true
+                raised = try performAudit(auditTypes)
+            } catch let timeout as NSError where timeout.code == Self.auditTimeoutCode {
+                // The combined audit ran out of time: each type is audited on its own, and the stop counts as audited only
+                // if every type completes. The issues are the union; a type that still throws fails the stop.
+                auditLines.append("RETRY-BY-TYPE \(screen): the audit did not complete in time (\(timeout.code)); auditing one type at a time")
+                do {
+                    raised = try auditOneTypeAtATime(screen)
+                } catch {
+                    auditError = error
                 }
             } catch {
                 auditError = error
@@ -474,27 +518,73 @@ final class AccessibilityAuditUITests: XCTestCase {
             var notes: [String] = []
             var found: [String] = []
             var flaggedKeys: Set<String> = []
+            // On a simulator that has just been erased the audit raises the contrast issue of the wordmark's words with no
+            // element (it names "Oh And" on a simulator that has shown a keyboard before; removing the words removes the
+            // issue). One such issue per pass is the words', and only in a pass that names the "&" mark and not the words.
+            let contrastLabels = raised.filter { $0.auditType == .contrast }.compactMap { issue in
+                issue.element.flatMap { $0.identifier.isEmpty ? $0.label : nil }
+            }
+            var unnamedContrastIssues = 0
             for issue in raised {
                 let element = issue.element
                 let description = "\(screen): \(issue.auditType) \(issue.compactDescription) | \(issue.detailedDescription) | element: \(element?.identifier ?? "?") '\(element?.label ?? "?")' frame: \(element?.frame.debugDescription ?? "?") clear band: \(band)"
                 if issue.auditType == .contrast, let element,
                    let placement = glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band) {
-                    let shown = displayed(identifier: element.identifier, label: element.label, near: element.frame, in: elements)
-                    if let shown { flaggedKeys.insert(shown.key) }
-                    let decision = trialLedger.decide(
-                        contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
-                        others: elements, measure: { shown.flatMap { measuredContrast(of: $0.frame, in: beforeImage) } })
-                    let shownFrame = shown?.frame.debugDescription ?? "not shown"
-                    switch decision {
-                    case .owed:
-                        if let shown { trialOwed[shown.key] = placement }
-                        notes.append("OWED \(screen): '\(element.label)' (\(placement)) shown at \(shownFrame), obstructed\(obstruction(of: shown, placement: placement, in: elements)); the test must audit it unobstructed")
-                    case .measured(let ratio):
-                        notes.append("MEASURED \(screen): '\(element.label)' shown at \(shownFrame) with nothing overlapping, contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
-                    case .issue(let reason):
-                        found.append("\(description) | shown at \(shownFrame): \(reason)")
+                    let nearest = displayed(identifier: element.identifier, label: element.label, near: element.frame, in: elements)
+                    // When the audit moved the content during this pass, the frame it reports is from mid-scroll and does not
+                    // say which of several elements with this label it sampled (three cards are captioned "Note"), so the
+                    // issue is decided for each of them from the snapshot and the screenshot taken before the pass.
+                    let auditMovedContent = movedBy != nil && placement == .scrollsUnderGlass
+                    var candidates: [ScreenElement?] = [nearest]
+                    if auditMovedContent {
+                        let stable = ScreenElement.stableLabel(element.label)
+                        let sameLabel = elements.filter { $0.identifier == element.identifier && ScreenElement.stableLabel($0.label) == stable }
+                        if !sameLabel.isEmpty { candidates = sameLabel }
+                    }
+                    for shown in candidates {
+                        if let shown { flaggedKeys.insert(shown.key) }
+                        let decision = trialLedger.decide(
+                            contrastIssueOn: shown, placement: placement, screenName: screen, clearBand: band, screen: screenFrame,
+                            others: elements, auditMovedContent: auditMovedContent, measure: {
+                                shown.flatMap { isWordmark($0) ? measuredWordmarkContrast(in: elements, image: beforeImage) : measuredContrast(of: $0.frame, in: beforeImage) }
+                            })
+                        let shownFrame = shown?.frame.debugDescription ?? "not shown"
+                        switch decision {
+                        case .owed:
+                            if let shown { trialOwed[shown.key] = placement }
+                            notes.append("OWED \(screen): '\(shown?.label ?? element.label)' (\(placement)) shown at \(shownFrame), obstructed\(obstruction(of: shown, placement: placement, in: elements)); the test must audit it unobstructed")
+                        case .measured(let ratio):
+                            let circumstance = auditMovedContent
+                                ? "wholly in the clear band before the audit moved the content by \(Int((movedBy ?? 0).rounded())) pt"
+                                : "with nothing overlapping"
+                            notes.append("MEASURED \(screen): '\(shown?.label ?? element.label)' shown at \(shownFrame) \(circumstance), contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                        case .issue(let reason):
+                            found.append("\(description) | shown at \(shownFrame): \(reason)")
+                        }
                     }
                     continue
+                }
+                if issue.auditType == .contrast, element == nil {
+                    unnamedContrastIssues += 1
+                    if GlassContrastLedger.unnamedIssueIsTheWordmarkWords(
+                        unnamedIssuesSoFar: unnamedContrastIssues, markIsNamed: contrastLabels.contains("&"),
+                        wordsAreNamed: contrastLabels.contains("Oh And")),
+                       let words = elements.first(where: { isWordmark($0) && $0.label == "Oh And" }) {
+                        flaggedKeys.insert(words.key)
+                        let decision = trialLedger.decide(
+                            contrastIssueOn: words, placement: .drawnOnGlass, screenName: screen, clearBand: band, screen: screenFrame,
+                            others: elements, measure: { measuredWordmarkContrast(in: elements, image: beforeImage) })
+                        switch decision {
+                        case .owed:
+                            trialOwed[words.key] = .drawnOnGlass
+                            notes.append("OWED \(screen): 'Oh And' (drawnOnGlass, the audit named no element) shown at \(words.frame.debugDescription), obstructed\(obstruction(of: words, placement: .drawnOnGlass, in: elements)); the test must audit it unobstructed")
+                        case .measured(let ratio):
+                            notes.append("MEASURED \(screen): 'Oh And' shown at \(words.frame.debugDescription) with nothing overlapping (the audit named no element for this issue; it named the '&' mark and not the words), contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                        case .issue(let reason):
+                            found.append("\(description) | taken as the wordmark's words at \(words.frame.debugDescription): \(reason)")
+                        }
+                        continue
+                    }
                 }
                 if isExempt(issue) {
                     notes.append("EXEMPT \(description)")
@@ -502,15 +592,34 @@ final class AccessibilityAuditUITests: XCTestCase {
                 }
                 found.append(description)
             }
+            // The wordmark is settled only by measurement: both the "&" glyph and the words must reach the minimum at a stop
+            // where nothing else overlaps the pill, whether or not the audit flagged it there.
+            if let wordmark = elements.first(where: { isWordmark($0) && glassPlacement(identifier: $0.identifier, label: $0.label, frame: $0.frame, band: band) != nil }),
+               !flaggedKeys.contains(wordmark.key),
+               GlassContrastLedger.isUnobstructed(wordmark, placement: .drawnOnGlass, clearBand: band, screen: screenFrame, others: elements) {
+                let decision = trialLedger.decide(
+                    contrastIssueOn: wordmark, placement: .drawnOnGlass, screenName: screen, clearBand: band, screen: screenFrame,
+                    others: elements, measure: { measuredWordmarkContrast(in: elements, image: beforeImage) })
+                switch decision {
+                case .measured(let ratio):
+                    notes.append("MEASURED \(screen): the header wordmark (glyph and words, the lower of the two) with nothing overlapping, contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+                case .issue(let reason):
+                    found.append("\(screen): the header wordmark at \(wordmark.frame.debugDescription): \(reason)")
+                case .owed:
+                    break
+                }
+            }
             if !found.isEmpty, attempt == 1 {
                 auditLines.append("RETRY \(screen): \(found.count) issue(s) on the first pass, auditing again after the screen settles")
+                for description in found { auditLines.append("RETRY-ISSUE \(description)") }
                 Thread.sleep(forTimeInterval: 3)
                 continue
             }
             ledger = trialLedger
             owedPlacements.merge(trialOwed) { first, _ in first }
             auditLines += notes
-            let listed = elements.compactMap { element in
+            // The wordmark is left out: an audit with no issue does not settle it (see above).
+            let listed = elements.filter { !isWordmark($0) }.compactMap { element in
                 glassPlacement(identifier: element.identifier, label: element.label, frame: element.frame, band: band).map { (element, $0) }
             }
             let settled = ledger.recordStop(screen, listed: listed, flaggedKeys: flaggedKeys, clearBand: band, screen: screenFrame, others: elements)
@@ -578,17 +687,116 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// What keeps text drawn on glass from being measured: the elements overlapping it, for the log.
     private func obstruction(of element: ScreenElement?, placement: GlassPlacement, in elements: [ScreenElement]) -> String {
         guard let element, placement == .drawnOnGlass else { return "" }
-        let others = GlassContrastLedger.overlapping(element, in: elements).prefix(3).map { "'\($0.label.prefix(40))' \($0.frame.debugDescription)" }
+        let others = GlassContrastLedger.overlapping(element, in: elements, screen: app.frame).prefix(3).map { "'\($0.label.prefix(40))' \($0.frame.debugDescription)" }
         return others.isEmpty ? "" : " by \(others.joined(separator: ", "))"
     }
 
-    /// The glass list entry for an element, when it has one. The mark counts only in the header, above the clear band.
+    /// The glass list entry for an element, when it has one. The wordmark counts only in the header, above the clear band.
     private func glassPlacement(identifier: String, label: String, frame: CGRect, band: ClosedRange<CGFloat>) -> GlassPlacement? {
-        guard let entry = Self.glassList.first(where: { $0.identifier == identifier && Self.matches(label: label, entry: $0.label) }) else {
+        guard let entry = Self.glassList.first(where: {
+            $0.identifier == identifier && ($0.label.isEmpty || Self.matches(label: label, entry: $0.label))
+        }) else {
             return nil
         }
-        if entry.label == "&", frame.maxY > band.lowerBound { return nil }
+        if Self.wordmarkLabels.contains(entry.label), frame.minY >= band.lowerBound { return nil }
         return entry.placement
+    }
+
+    private func isWordmark(_ element: ScreenElement) -> Bool {
+        element.identifier.isEmpty && Self.wordmarkLabels.contains(element.label)
+    }
+
+    /// The wordmark's contrast, the lower of two measurements that must both reach the minimum: the "&" glyph's own frame (the
+    /// indigo mark, the weaker of the two) and the pill's frame with the glyph's frame excluded (the ink of the words). Nil
+    /// when the snapshot does not list both nodes or either cannot be measured.
+    private func measuredWordmarkContrast(in elements: [ScreenElement], image: CGImage?) -> Double? {
+        guard let pill = elements.first(where: { isWordmark($0) && $0.label == "Oh And" }),
+              let glyph = elements.first(where: { isWordmark($0) && $0.label == "&" }) else { return nil }
+        // While Done is shown, and at the largest text size, the snapshot gives the "&" node the pill's own frame. The pill
+        // is then measured whole, and the glyph's measurement comes from a stop where the snapshot separates the two: this
+        // test's, or else one recorded earlier in the run (the default-size run's, for the largest size).
+        let isSeparated = pill.frame.insetBy(dx: -1, dy: -1).contains(glyph.frame) && glyph.frame.width < pill.frame.width - 1
+        if isSeparated {
+            guard let glyphRatio = measuredContrast(of: glyph.frame, in: image),
+                  let wordsRatio = measuredContrast(of: pill.frame, in: image, excluding: [glyph.frame]) else { return nil }
+            recordSeparatedGlyphRatio(glyphRatio)
+            return min(glyphRatio, wordsRatio)
+        }
+        guard let glyphRatio = separatedGlyphRatio(), let pillRatio = measuredContrast(of: pill.frame, in: image) else { return nil }
+        return min(glyphRatio, pillRatio)
+    }
+
+    private func glyphEvidenceFile(_ size: String) -> URL {
+        outputDirectory.appendingPathComponent("wordmark-glyph-\(size).txt")
+    }
+
+    private func recordSeparatedGlyphRatio(_ ratio: Double) {
+        guard separatedGlyphRatioInThisTest == nil else { return }
+        separatedGlyphRatioInThisTest = ratio
+        let line = String(format: "%.2f", ratio) + "\t" + currentScreen + "\n"
+        try? line.write(to: glyphEvidenceFile(sizeName), atomically: true, encoding: .utf8)
+    }
+
+    /// The "&" glyph's own measured contrast at a stop where the snapshot gave it its own frame.
+    private func separatedGlyphRatio() -> Double? {
+        if let ratio = separatedGlyphRatioInThisTest { return ratio }
+        for size in [sizeName, "default"] {
+            guard let text = try? String(contentsOf: glyphEvidenceFile(size), encoding: .utf8),
+                  let first = text.split(separator: "\t").first, let ratio = Double(first) else { continue }
+            auditLines.append("NOTE \(currentScreen): the wordmark glyph's contrast \(first):1 is carried from \(glyphEvidenceFile(size).lastPathComponent)")
+            return ratio
+        }
+        return nil
+    }
+
+    /// Measures the wordmark where the snapshot separates the glyph from the pill, before a stop that does not (the
+    /// keyboard's Done replaces Settings and the "&" node takes the pill's frame).
+    private func measureSeparatedWordmark(_ stop: String) {
+        let elements = screenElements()
+        let image = app.screenshot().image.cgImage
+        let previousScreen = currentScreen
+        currentScreen = stop
+        defer { currentScreen = previousScreen }
+        guard let pill = elements.first(where: { isWordmark($0) && $0.label == "Oh And" }),
+              GlassContrastLedger.isUnobstructed(pill, placement: .drawnOnGlass, clearBand: clearBand(from: elements), screen: app.frame, others: elements),
+              let ratio = measuredWordmarkContrast(in: elements, image: image) else {
+            auditLines.append("NOTE \(stop): the wordmark could not be measured separately here")
+            return
+        }
+        auditLines.append("MEASURED \(stop): the header wordmark before the keyboard (glyph and words, the lower of the two), contrast \(String(format: "%.2f", ratio)):1 (minimum \(GlassContrastLedger.minimumContrastRatio):1)")
+    }
+
+    /// The keyboard's slide-to-type introduction covers the keys the first time a keyboard appears on a new simulator
+    /// (the `defaults write` in accessibility-simulator.sh does not suppress it on iOS 27). It is dismissed, and the test
+    /// fails if it is still there: a screen with the system's introduction over the keyboard is not the screen to audit.
+    private func dismissKeyboardIntroduction() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where button.waitForExistence(timeout: 2) {
+            button.tap()
+            auditLines.append("NOTE \(currentScreen): dismissed the keyboard's slide-to-type introduction")
+        }
+        let introduction = NSPredicate(format: "label CONTAINS[c] 'Speed up your typing'")
+        let stillShown = app.staticTexts.matching(introduction).firstMatch.exists || springboard.staticTexts.matching(introduction).firstMatch.exists
+        XCTAssertFalse(stillShown, "the keyboard's slide-to-type introduction is still on screen")
+    }
+
+    private func performAudit(_ types: XCUIAccessibilityAuditType) throws -> [RaisedIssue] {
+        var raised: [RaisedIssue] = []
+        // Issues are copied here and decided once the audit has returned.
+        try app.performAccessibilityAudit(for: types) { issue in
+            raised.append(RaisedIssue(issue))
+            return true
+        }
+        return raised
+    }
+
+    /// Every type of `auditTypes` in its own `performAccessibilityAudit(for:)` call. Throws the first error a type raises.
+    private func auditOneTypeAtATime(_ screen: String) throws -> [RaisedIssue] {
+        var raised: [RaisedIssue] = []
+        for type in Self.individualAuditTypes where auditTypes.contains(type) {
+            raised += try performAudit(type)
+        }
+        return raised
     }
 
     /// The element as the snapshot before the audit showed it: the same identifier and label (a caption's age aside),
@@ -621,6 +829,12 @@ final class AccessibilityAuditUITests: XCTestCase {
             // A scroll indicator (a field's "Horizontal scroll bar, 1 page") is not content and obstructs nothing.
             let isScrollIndicator = node.elementType == .scrollBar
                 || node.label.hasPrefix("Horizontal scroll bar") || node.label.hasPrefix("Vertical scroll bar")
+            // iOS 27 lists a labelled node with the frame of the whole screen; it is a container and obstructs nothing
+            // (`GlassContrastLedger.overlapping`). What it is goes in the log once per run.
+            if !ancestors.isEmpty, !node.label.isEmpty, !containerLogged, node.frame.contains(app.frame) {
+                containerLogged = true
+                auditLines.append("CONTAINER \(currentScreen): '\(node.label)' type \(node.elementType.rawValue) identifier '\(node.identifier)' frame \(node.frame.debugDescription) holds the whole screen and obstructs nothing")
+            }
             if !node.label.isEmpty, !isScrollIndicator {
                 nodes.append(ScreenElement(
                     nodeID: nodeID, ancestorIDs: ancestors, key: "", identifier: node.identifier, label: node.label, frame: node.frame))
@@ -629,7 +843,7 @@ final class AccessibilityAuditUITests: XCTestCase {
         }
         walk(root, ancestors: [])
         let cards = nodes.filter { $0.identifier.hasPrefix("home.recents.card.") }
-        return nodes.map { node in
+        let keyed: [ScreenElement] = nodes.map { node in
             let stable = ScreenElement.stableLabel(node.label)
             let card = cards
                 .filter { card in
@@ -642,6 +856,14 @@ final class AccessibilityAuditUITests: XCTestCase {
                 nodeID: node.nodeID, ancestorIDs: node.ancestorIDs,
                 key: ScreenElement.key(card: card.map { ScreenElement.cardName($0.label) } ?? "", identifier: node.identifier, label: node.label),
                 identifier: node.identifier, label: node.label, frame: node.frame)
+        }
+        // The wordmark pill ("Oh And") and its "&" glyph are one control: one key, so neither obstructs the other.
+        let band = clearBand(from: keyed)
+        return keyed.map { node in
+            guard isWordmark(node), node.frame.minY < band.lowerBound else { return node }
+            var wordmark = node
+            wordmark.key = ScreenElement.key(card: "", identifier: "", label: "Oh And")
+            return wordmark
         }
     }
 
@@ -735,7 +957,7 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// The contrast of the text in `frame` as a person sees it, from the pixels of `image`, the screenshot taken with the
     /// snapshot before the audit (`ScreenshotContrast`). Called only for text drawn on glass with nothing else overlapping
     /// its frame in that snapshot, so the darkest glyph in the crop is its own.
-    private func measuredContrast(of frame: CGRect, in image: CGImage?) -> Double? {
+    private func measuredContrast(of frame: CGRect, in image: CGImage?, excluding excludedFrames: [CGRect] = []) -> Double? {
         guard let image else { return nil }
         let screenWidth = app.frame.width
         guard screenWidth > 0 else { return nil }
@@ -754,7 +976,11 @@ final class AccessibilityAuditUITests: XCTestCase {
             data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return ScreenshotContrast.ratio(pixels: pixels, width: width, height: height)
+        // The excluded frames in the crop's own pixel coordinates.
+        let excluded = excludedFrames.map {
+            $0.applying(CGAffineTransform(scaleX: scale, y: scale)).offsetBy(dx: -pixelRect.minX, dy: -pixelRect.minY)
+        }
+        return ScreenshotContrast.ratio(pixels: pixels, width: width, height: height, excluded: excluded)
     }
 
     /// Every button, switch and field a person can act on has a label that names it.
@@ -784,8 +1010,12 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// (drawn over the list) lowers it to 8 points above that line.
     private func clearBand(from elements: [ScreenElement]) -> ClosedRange<CGFloat> {
         let headerIdentifiers: Set<String> = ["home.search", "home.settings", "home.done"]
-        let top = elements.filter { headerIdentifiers.contains($0.identifier) || ($0.label == "Back" && $0.frame.minY < 200) }
-            .map(\.frame.maxY).max().map { $0 + 12 } ?? 0
+        let headerButtons = elements.filter { headerIdentifiers.contains($0.identifier) || ($0.label == "Back" && $0.frame.minY < 200) }
+        // The wordmark pill is glass too, and at the largest text size it is taller than the buttons beside it.
+        let pills = elements.filter { element in
+            element.identifier.isEmpty && element.label == "Oh And" && headerButtons.contains { element.frame.minY < $0.frame.maxY }
+        }
+        let top = (headerButtons + pills).map(\.frame.maxY).max().map { $0 + 12 } ?? 0
         let composerIdentifiers: Set<String> = [
             "home.composer.field", "home.composer.record", "home.composer.save", "home.composer.stop", "home.composer.discard",
         ]
