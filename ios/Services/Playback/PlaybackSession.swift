@@ -90,7 +90,7 @@ public final class PlaybackSession: @unchecked Sendable {
     }
 
     /// Called once when an interruption begins while the session is open. The player has been paused by then.
-    func setInterruptionHandler(_ handler: @escaping () -> Void) {
+    public func setInterruptionHandler(_ handler: @escaping () -> Void) {
         lock.lock()
         interruptionHandler = handler
         lock.unlock()

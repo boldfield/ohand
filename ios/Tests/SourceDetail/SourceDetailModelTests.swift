@@ -30,6 +30,8 @@ private final class FakeAudioSession: SourceAudioSession {
 
     func pause() { pauses += 1 }
 
+    func setInterruptionHandler(_ handler: @escaping () -> Void) {}
+
     func close() {
         closes += 1
         if endReason == nil { endReason = .closed }
@@ -432,5 +434,26 @@ final class SourceDetailModelTests: XCTestCase {
         await model.play()
         XCTAssertEqual(model.audio, .playing)
         XCTAssertEqual(session.plays, 2)
+    }
+
+    func testARealSessionInterruptedByTheSystemLeavesThePausedStateInTheModel() async {
+        let notifications = NotificationCenter()
+        let player = SilentPlayer()
+        let session = PlaybackSession(
+            itemID: Self.itemID, player: player, notificationCenter: notifications, release: {})
+        let model = SourceDetailModel(
+            itemID: Self.itemID, reader: FakeDetailReader(.success(detail(audioReference: "audio:1"))),
+            opener: RealSessionOpener(session: session))
+        await model.load()
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
+
+        notifications.post(
+            name: .playbackAudioInterruption, object: nil, userInfo: ["AVAudioSessionInterruptionTypeKey": UInt(1)])
+        for _ in 0..<50 where model.audio == .playing { await Task.yield() }
+
+        XCTAssertEqual(model.audio, .paused)
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
     }
 }

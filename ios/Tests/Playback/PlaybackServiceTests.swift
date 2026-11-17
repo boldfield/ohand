@@ -97,6 +97,19 @@ private final class FinishingPlayer: FinishNotifyingPlayer, @unchecked Sendable 
 
 private struct UnplayableAudio: Error {}
 
+private final class CountingAudioSession: PlaybackAudioSessionControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var activations = 0
+    private var deactivations = 0
+
+    var activationCount: Int { lock.lock(); defer { lock.unlock() }; return activations }
+    var deactivationCount: Int { lock.lock(); defer { lock.unlock() }; return deactivations }
+
+    func setPlaybackCategory() throws {}
+    func activate() throws { lock.lock(); activations += 1; lock.unlock() }
+    func deactivate() { lock.lock(); deactivations += 1; lock.unlock() }
+}
+
 /// Lets a player factory reach the service that calls it.
 private final class ServiceHolder: @unchecked Sendable {
     var service: PlaybackService?
@@ -450,5 +463,83 @@ final class PlaybackServiceTests: XCTestCase {
         core.script(onRead: { service.shutDown() })
         await assertOpenFails(.shutDown, service)
         XCTAssertEqual(player.stopCalls, 0, "no player is built once admission refuses the open")
+    }
+
+    // MARK: Audio session and recording
+
+    private func makeServiceWithSession(_ audio: CountingAudioSession) -> PlaybackService {
+        PlaybackService(
+            core: core, session: session, layout: storage.layout, fence: fence, audioSession: audio,
+            playerFactory: { [unowned self] _ in player })
+    }
+
+    func testShutDownEndsAPlayingSessionAndDeactivatesTheAudioSessionExactlyOnce() async throws {
+        try retain(audio: "cap1.m4a")
+        let audio = CountingAudioSession()
+        let service = makeServiceWithSession(audio)
+        let opened = try await service.open(itemID: "item-1")
+        XCTAssertTrue(opened.play())
+
+        service.shutDown()
+        opened.close()
+
+        XCTAssertEqual(opened.endReason, .relocked)
+        XCTAssertEqual(audio.activationCount, 1)
+        XCTAssertEqual(audio.deactivationCount, 1)
+    }
+
+    func testARelockEndsAPlayingSessionAndDeactivatesTheAudioSessionExactlyOnce() async throws {
+        try retain(audio: "cap1.m4a")
+        let audio = CountingAudioSession()
+        let opened = try await makeServiceWithSession(audio).open(itemID: "item-1")
+        XCTAssertTrue(opened.play())
+
+        session.relock(.explicit)
+        opened.close()
+
+        XCTAssertEqual(opened.endReason, .relocked)
+        XCTAssertEqual(audio.deactivationCount, 1)
+    }
+
+    func testADeletionRequestEndsAPlayingSessionAndDeactivatesTheAudioSessionExactlyOnce() async throws {
+        try retain(audio: "cap1.m4a")
+        let audio = CountingAudioSession()
+        let service = makeServiceWithSession(audio)
+        let opened = try await service.open(itemID: "item-1")
+        XCTAssertTrue(opened.play())
+
+        service.endPlayback(itemID: "item-1")
+        opened.close()
+
+        XCTAssertEqual(opened.endReason, .deletionRequested)
+        XCTAssertEqual(audio.deactivationCount, 1)
+    }
+
+    func testOpeningIsRefusedWhileARecordingIsInProgress() async throws {
+        try retain(audio: "cap1.m4a")
+        let service = makeService()
+        service.setRecordingProbe { true }
+
+        await assertOpenFails(.recordingInProgress, service)
+        XCTAssertEqual(core.reads, 0, "refused before the core is read")
+
+        service.setRecordingProbe { false }
+        let opened = try await service.open(itemID: "item-1")
+        XCTAssertTrue(opened.isOpen)
+    }
+
+    func testStartingARecordingEndsAnOpenPlaybackAndDeactivatesTheAudioSession() async throws {
+        try retain(audio: "cap1.m4a")
+        let audio = CountingAudioSession()
+        let service = makeServiceWithSession(audio)
+        let opened = try await service.open(itemID: "item-1")
+        XCTAssertTrue(opened.play())
+
+        service.recordingWillStart()
+
+        XCTAssertFalse(opened.isOpen)
+        XCTAssertEqual(opened.endReason, .closed)
+        XCTAssertEqual(audio.deactivationCount, 1)
+        XCTAssertFalse(fence.isHeld(storage.audioURL("cap1.m4a")))
     }
 }

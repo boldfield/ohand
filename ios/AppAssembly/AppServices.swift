@@ -407,11 +407,15 @@ final class AppLauncher: ObservableObject {
     }
 }
 
-/// Reads the recorder's state from playback's probe. The recorder and playback are both driven from the main thread.
+/// Reads the recorder's state for playback's probe. The controller is confined to the main queue but the probe is also
+/// called from `PlaybackService.open`, which runs off it, so a read from another thread hops to main first.
 private final class RecordingStateReader: @unchecked Sendable {
     private let controller: VoiceRecordingController
 
     init(controller: VoiceRecordingController) { self.controller = controller }
 
-    var isActive: Bool { controller.state != .idle }
+    var isActive: Bool {
+        if Thread.isMainThread { return controller.state != .idle }
+        return DispatchQueue.main.sync { controller.state != .idle }
+    }
 }

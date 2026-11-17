@@ -23,10 +23,6 @@ protocol SourceAudioSession: AnyObject {
     func setInterruptionHandler(_ handler: @escaping () -> Void)
 }
 
-extension SourceAudioSession {
-    func setInterruptionHandler(_ handler: @escaping () -> Void) {}
-}
-
 extension PlaybackSession: SourceAudioSession {}
 
 /// Opens an item's retained audio. `PlaybackService` is the production implementation: it checks the read session,
