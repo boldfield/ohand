@@ -5091,6 +5091,15 @@ Validation: `make check`, `make test`.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800. No trial task depends on F71a, F71b or F71c: the trial candidate contains F69, so notes captured during the trial are complete, and these three tasks repair notes captured before it. Because F71a adds a schema step, a candidate cut after it lands upgrades the trial database by one more step, which T10b's procedure covers as it stands.
 
+#### F71a amendment 1 (2026-11-17, coordinator): the core does not learn of audio removal; the queue hook is allowed
+
+Two findings from review round 2 of PR #411, both caused by the specification, not by the worker.
+
+1. **"Audio recorded as removed" is not something the core knows.** The F71a text above excludes a candidate whose audio is "recorded as removed". That was the coordinator's error: retention and user removal are native file effects recorded in the native ledger (`ios/Services/AudioRetention/AudioRetentionLedger.swift`); the core never opens an audio file (`core/src/ffi/audio_retention.rs`, module comment) and `captures.audio_reference` stays set after the file is gone. The worker's `recorded_audio_removals` table and `record_audio_removal` have no production caller and cannot have one inside F71a's paths, and no table could know of removals made before step 15. Decision: the core does not record removals. F71a removes that table, the function, its re-export and its tests, and corrects the step-15 schema comment. The core's candidate rule reads: a live, `transcribed` item whose attachment has a lower generation, whose current text is that transcript and whose capture still has an audio reference. Whether the file exists is decided natively, by F71b (its amendment 1). Acceptance criterion 2's "audio recorded removed" case is dropped; "audio reference gone" stays. A replacement job whose audio file is missing ends through the handler's existing missing-audio outcome and settles as `kept` with a content-free reason, and a test covers that settlement.
+2. **`core/src/jobs/queue/mod.rs` is allowed, additively.** A replacement request must not be left looking in flight when the queue cancels its job outside the settle path, and the cancellation happens in that file. F71a may add the request-settling hook to the queue's existing cancellation paths (`claim_job_with_lease_in_tx`, both paths, and `cancel_job_in_tx`) and nothing else there. No open task owns that file.
+
+The red checks on head `55edf053` were hosted-runner faults, not findings about the change: the upgrade job's simulator boot failed with "The iOS 27.2 simulator runtime is not available. runtime path not found" (exit 145), and the largest-text accessibility audit failed `testHomePopulated` on a change that touches no Swift. The next head needs its own exact-head green run, as always; a job that fails for a runner fault is rerun, never waived. The PR description is updated to match the head.
+
 ### F71b
 
 Boundary and native handler: request and run transcript replacements
@@ -5118,6 +5127,18 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
+
+#### F71b amendment 1 (2026-11-17, coordinator): native code decides whether the recording still exists
+
+Follows F71a amendment 1. The core lists candidates by what it knows; only native code knows whether an audio file is still on the phone, including files removed before this feature existed. F71b therefore changes as follows; where this amendment and the text above disagree, the amendment governs.
+
+- `retranscription_status` answers, in an authenticated read session, the candidate items in the read scopes as `item_id` and `audio_reference` pairs (bounded by `MAX_RETRANSCRIPTION_BATCH`, with a flag when more exist) and the number of replacement jobs queued or running. Like the boundary's other answers, these identifiers go to the native service and are never logged or shown.
+- `RetentionControlService.retranscriptionStatus()` keeps only the candidates whose recording is present: the file exists at the layout's path for that reference and the retention ledger does not record it as removed, decided with the same file-system seam and ledger `AudioRetentionService` and playback availability use. It reports that count, and the count of candidates whose recording is gone separately.
+- `retranscribe` is always sent with explicit `item_ids`, the present ones; the "all candidates" form of the command is not offered to native callers and may be omitted from the boundary. A recording removed between the status and the job is the handler's existing missing-audio outcome, which the core settles as `kept`.
+- Added acceptance: a test in `ios/Tests/AudioRetention/` with one candidate whose file is present, one whose file is absent and one the ledger records as removed asserts that only the first is counted and requested; and a real-core test that a job whose file disappears before it runs ends with the old text in place.
+- Added owned path: `ios/Services/AudioRetention/AudioRetentionLedger.swift` is read, not changed.
+
+F71c shows the count of recordings that can be redone and, when some are gone, says how many notes cannot be redone because their recording was already removed; its wording rule is unchanged.
 
 ### F71c
 
