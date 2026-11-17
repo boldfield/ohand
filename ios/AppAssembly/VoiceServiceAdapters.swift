@@ -109,6 +109,8 @@ final class VoiceRecorderFanOut: VoiceRecordingControlling {
     var onStateChange: ((VoiceRecorderState) -> Void)?
     var onOutcome: ((VoiceCaptureOutcome) -> Void)?
     var microphonePermission: MicrophonePermissionStatus { controller.microphonePermission }
+    /// Runs before a recording starts, so an open playback ends before the recorder takes the audio session.
+    var beforeStart: (() -> Void)?
 
     init(controller: VoiceRecordingController, recoveryModel: VoiceRecoveryModel) {
         self.controller = controller
@@ -123,6 +125,7 @@ final class VoiceRecorderFanOut: VoiceRecordingControlling {
     }
 
     func start(completion: @escaping (Result<VoiceRecordingStarted, VoiceStartFailure>) -> Void) {
+        beforeStart?()
         controller.start(completion: completion)
     }
 

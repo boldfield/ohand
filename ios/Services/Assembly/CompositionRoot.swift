@@ -2143,7 +2143,7 @@ public final class ServiceCompositionRoot {
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
             let playback = PlaybackService(
                 core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
-                playerFactory: avPlaybackPlayerFactory)
+                audioSession: AVPlaybackAudioSession(), playerFactory: avPlaybackPlayerFactory)
             undo.append { playback.shutDown() }
             itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)

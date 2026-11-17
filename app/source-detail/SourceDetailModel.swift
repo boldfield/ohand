@@ -19,6 +19,12 @@ protocol SourceAudioSession: AnyObject {
     @discardableResult func play() -> Bool
     func pause()
     func close()
+    /// Called when the system interrupts playback (a call, an alarm). The player is already paused.
+    func setInterruptionHandler(_ handler: @escaping () -> Void)
+}
+
+extension SourceAudioSession {
+    func setInterruptionHandler(_ handler: @escaping () -> Void) {}
 }
 
 extension PlaybackSession: SourceAudioSession {}
@@ -283,7 +289,15 @@ final class SourceDetailModel: ObservableObject {
             return
         }
         session = opened
+        opened.setInterruptionHandler { [weak self] in
+            Task { @MainActor in self?.playbackInterrupted() }
+        }
         if opened.play() { audio = .playing } else { checkSession(playRefused: true) }
+    }
+
+    /// The system paused the player: show the paused control, so pressing Play resumes and reactivates the session.
+    @MainActor func playbackInterrupted() {
+        if audio == .playing { audio = .paused }
     }
 
     @MainActor func pause() {
@@ -383,7 +397,8 @@ final class SourceDetailModel: ObservableObject {
         switch playback {
         case .notAuthenticated, .shutDown: return .locked
         case .noAudio, .itemDeleted, .itemNotFound: return .removed
-        case .invalidRequest, .audioReferenceUnresolvable, .audioMissing, .audioUnreadable, .core: return .unplayable
+        case .invalidRequest, .audioReferenceUnresolvable, .audioMissing, .audioUnreadable, .recordingInProgress, .core:
+            return .unplayable
         }
     }
 
