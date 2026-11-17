@@ -428,3 +428,69 @@ final class SpeechFrameworkEngineAvailabilityTests: XCTestCase {
         print("OBSERVED host speech availability for en-US: \(snapshot) -> \(readiness)")
     }
 }
+
+/// Accumulation through the engine's seam: the reducer the real engine feeds every recognizer callback to.
+/// The values follow the results observed on iOS 27.2.1; none of this recognizes audio.
+final class RecognitionResultReducerTests: XCTestCase {
+    private func segment(
+        _ text: String, from start: TimeInterval, to end: TimeInterval, isFinal: Bool = false, confidence: Float = 0.5
+    ) -> RecognitionResultValue {
+        RecognitionResultValue(
+            text: text, segmentConfidences: [confidence], audioStart: start, audioEnd: end, isFinal: isFinal)
+    }
+
+    func testEverySegmentIsKeptAndOnlyTheFinalResultEndsTheRun() {
+        let reducer = RecognitionResultReducer()
+        XCTAssertNil(reducer.handle(result: segment("First sentence.", from: 0, to: 8.55, confidence: 0.25), error: nil))
+        let outcome = reducer.handle(
+            result: segment("Last sentence.", from: 11.61, to: 20.88, isFinal: true, confidence: 0.75), error: nil)
+        XCTAssertEqual(outcome, .transcript(text: "First sentence. Last sentence.", confidence: 0.5, resultCount: 2))
+    }
+
+    func testACumulativeRecognizerYieldsItsLastTextOnce() {
+        let reducer = RecognitionResultReducer()
+        XCTAssertNil(reducer.handle(result: segment("buy", from: 0, to: 0.5), error: nil))
+        let outcome = reducer.handle(result: segment("buy milk", from: 0, to: 1, isFinal: true), error: nil)
+        XCTAssertEqual(outcome, .transcript(text: "buy milk", confidence: 0.5, resultCount: 2))
+    }
+
+    func testAnErrorAfterASegmentIsAFailure() {
+        let reducer = RecognitionResultReducer()
+        XCTAssertNil(reducer.handle(result: segment("First sentence.", from: 0, to: 8.55), error: nil))
+        let outcome = reducer.handle(result: nil, error: NSError(domain: "kAFAssistantErrorDomain", code: 203))
+        guard case .failure(let reason)? = outcome else { return XCTFail("\(String(describing: outcome))") }
+        XCTAssertTrue(reason.contains("kAFAssistantErrorDomain 203"))
+    }
+
+    func testNoSpeechDetectedAfterASegmentReturnsTheTranscriptAndOtherwiseFails() {
+        let reducer = RecognitionResultReducer()
+        XCTAssertNil(reducer.handle(result: segment("First sentence.", from: 0, to: 8.55), error: nil))
+        let outcome = reducer.handle(result: nil, error: NSError(domain: "kAFAssistantErrorDomain", code: 1110))
+        XCTAssertEqual(outcome, .transcript(text: "First sentence.", confidence: 0.5, resultCount: 1))
+
+        let silent = RecognitionResultReducer().handle(
+            result: nil, error: NSError(domain: "kAFAssistantErrorDomain", code: 1110))
+        guard case .failure? = silent else { return XCTFail("\(String(describing: silent))") }
+    }
+
+    func testTheStatusLineReportsTheNumberOfResultsReceived() {
+        let status = TranscriptionStatus.transcribed(text: "a b", confidence: nil, durationSeconds: 1, resultCount: 2)
+        XCTAssertTrue(status.description.contains("2 results received"), status.description)
+        let single = TranscriptionStatus.transcribed(text: "a", confidence: nil, durationSeconds: 1)
+        XCTAssertTrue(single.description.contains("1 result received"), single.description)
+    }
+
+    func testTheCoordinatorShowsTheResultCountOfTheOutcome() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("reducer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audioURL = directory.appendingPathComponent("transcription-fixture.wav")
+        try Data([1, 2, 3]).write(to: audioURL)
+        let engine = FakeSpeechEngine()
+        let coordinator = TranscriptionCoordinator(engine: engine, localeIdentifier: "en-US", now: { 0 })
+        XCTAssertNil(coordinator.loadAudio(at: audioURL))
+        coordinator.startTranscription()
+        engine.completions[0](.transcript(text: "a b", confidence: nil, resultCount: 3))
+        XCTAssertEqual(coordinator.status, .transcribed(text: "a b", confidence: nil, durationSeconds: 0, resultCount: 3))
+    }
+}

@@ -257,6 +257,9 @@ targets:
         excludes:
           - Info.plist
           - "Tests/**"
+      # The accumulator is shared with the app's recognizer, not copied, so one set of tests covers both.
+      - path: Services/Transcription/RecognitionAccumulator.swift
+      - path: Services/Transcription/RecognitionResultValue+Speech.swift
     settings:
       PRODUCT_NAME: TranscriptionProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
@@ -270,6 +273,8 @@ targets:
         createIntermediateGroups: true
       - path: TranscriptionProbe/Shared
         createIntermediateGroups: true
+      - path: Services/Transcription/RecognitionAccumulator.swift
+      - path: Services/Transcription/RecognitionResultValue+Speech.swift
     settings:
       PRODUCT_NAME: TranscriptionProbeTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription.tests
