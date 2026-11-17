@@ -84,14 +84,14 @@ public final class PlaybackService: @unchecked Sendable {
 
     /// Tells playback whether a recording is in progress. While one is, an open is refused with
     /// `recordingInProgress` and a session's `play()` returns false: the recorder owns the audio session then.
-    func setRecordingProbe(_ probe: @escaping @Sendable () -> Bool) {
+    public func setRecordingProbe(_ probe: @escaping @Sendable () -> Bool) {
         lock.lock()
         recordingProbe = probe
         lock.unlock()
     }
 
     /// Ends every open playback because a recording is about to start; the recorder sets its own category.
-    func recordingWillStart() {
+    public func recordingWillStart() {
         fence.endAll(reason: .closed)
     }
 
