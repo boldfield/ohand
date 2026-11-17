@@ -22,6 +22,12 @@
 //!   outcome that can no longer be authoritative (the item was deleted, a user correction landed,
 //!   the audio is gone or is not the audio the transcript came from, another replacement landed)
 //!   is discarded and the job ends with a content-free reason.
+//! * A replacement job the queue cancels outside this settlement (a revision moved on, the item was
+//!   deleted, a lease expired on a stale revision) ends its request as `discarded` with the
+//!   cancellation reason, in the cancelling transaction, so no request row stays pending forever.
+//! * [`record_audio_removal`] records that native code removed an item's audio file; the capture
+//!   row keeps its reference, so candidates and settlement read this record to know the audio is
+//!   gone.
 //! * The retention clock does not restart: `transcribed_at` stays the first successful
 //!   transcription and the replacement's time is `replaced_at`.
 //!
@@ -125,6 +131,8 @@ const CANDIDATE_WHERE: &str = "i.lifecycle_state <> 'deleted'
     AND t.transcript_generation < ?1
     AND c.audio_reference IS NOT NULL
     AND t.audio_reference = c.audio_reference
+    AND NOT EXISTS (SELECT 1 FROM recorded_audio_removals r
+                     WHERE r.item_id = i.item_id AND r.audio_reference = c.audio_reference)
     AND NOT EXISTS (SELECT 1 FROM corrections k WHERE k.item_id = i.item_id AND k.kind = 'text')
     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.item_id = i.item_id AND j.job_type = ?2
                       AND j.status IN ('queued', 'running'))";
@@ -178,6 +186,36 @@ struct CandidateFacts {
     transcript_generation: Option<i32>,
     text_corrected: bool,
     job_in_flight: bool,
+    audio_removed: bool,
+}
+
+/// Record that native code removed the item's audio file, so it is no longer a candidate and an
+/// outcome made from that audio is discarded. Idempotent. The capture row is not modified.
+pub fn record_audio_removal(
+    transaction: &Transaction<'_>,
+    item_id: &str,
+    audio_reference: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO recorded_audio_removals (item_id, audio_reference, recorded_at)
+         VALUES (?, ?, ?)",
+        rusqlite::params![item_id, audio_reference, now.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn audio_recorded_removed(
+    connection: &Connection,
+    item_id: &str,
+    audio_reference: &str,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM recorded_audio_removals
+                         WHERE item_id = ? AND audio_reference = ?)",
+        rusqlite::params![item_id, audio_reference],
+        |row| row.get(0),
+    )
 }
 
 fn candidate_facts(
@@ -192,7 +230,9 @@ fn candidate_facts(
                              WHERE k.item_id = i.item_id AND k.kind = 'text'),
                     EXISTS (SELECT 1 FROM jobs j
                              WHERE j.item_id = i.item_id AND j.job_type = ?2
-                               AND j.status IN ('queued', 'running'))
+                               AND j.status IN ('queued', 'running')),
+                    EXISTS (SELECT 1 FROM recorded_audio_removals r
+                             WHERE r.item_id = i.item_id AND r.audio_reference = c.audio_reference)
                FROM items i
                JOIN captures c ON c.capture_id = i.capture_id
                LEFT JOIN transcript_attachments t ON t.item_id = i.item_id
@@ -209,6 +249,7 @@ fn candidate_facts(
                     transcript_generation: row.get(6)?,
                     text_corrected: row.get(7)?,
                     job_in_flight: row.get(8)?,
+                    audio_removed: row.get(9)?,
                 })
             },
         )
@@ -239,6 +280,9 @@ fn classify(facts: Option<&CandidateFacts>) -> Result<(i32, String), Retranscrip
     ) {
         (Some(captured), Some(transcribed)) if captured == transcribed => {}
         _ => return Err(AudioUnavailable),
+    }
+    if facts.audio_removed {
+        return Err(AudioUnavailable);
     }
     if generation >= CURRENT_TRANSCRIPT_GENERATION {
         return Err(GenerationCurrent);
@@ -703,6 +747,9 @@ fn discard_reason(
     let Some(captured) = item.audio_reference.as_deref() else {
         return Ok(Some(DiscardReason::AudioUnavailable));
     };
+    if audio_recorded_removed(transaction, &job.item_id, captured)? {
+        return Ok(Some(DiscardReason::AudioUnavailable));
+    }
     let wrong_audio = captured != outcome.audio_reference
         || captured != current.audio_reference
         || match &outcome.result {

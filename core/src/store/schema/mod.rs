@@ -1064,6 +1064,10 @@ fn add_abstention_reason_v14(tx: &Transaction<'_>) -> Result<()> {
 ///   settled, the outcome (`replaced`, `unchanged`, `kept` or `discarded`), its content-free
 ///   reason and a digest of the delivered outcome so a redelivery is recognised and a different
 ///   outcome for the same job is a conflict. It holds no text.
+/// * `recorded_audio_removals` has one row per item whose audio file was removed (retention or the
+///   user's request), written by the core when native code reports the removal. The capture row
+///   keeps its audio reference, so this is how candidate selection and settlement know the audio
+///   is gone. It holds an identifier and a time, no content.
 /// * `superseded_transcripts` keeps each transcript a replacement displaced: its text, record id,
 ///   attached revision and provenance. It holds readable text and an audio digest, so deletion
 ///   removes it with the current transcript.
@@ -1096,6 +1100,16 @@ fn add_transcript_replacement_v15(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "CREATE INDEX idx_transcript_replacement_requests_item
          ON transcript_replacement_requests(item_id)",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE recorded_audio_removals (
+            item_id TEXT NOT NULL,
+            audio_reference TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (item_id, audio_reference),
+            FOREIGN KEY (item_id) REFERENCES items(item_id) ON DELETE CASCADE
+        )",
         [],
     )?;
     tx.execute(

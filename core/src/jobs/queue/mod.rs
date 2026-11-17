@@ -365,6 +365,7 @@ pub fn claim_job_with_lease_in_tx(
                         JobStatus::Running.as_str()
                     ],
                 )?;
+                discard_replacement_request(tx, &job.job_id, retire_reason, now)?;
                 continue;
             }
         }
@@ -405,6 +406,7 @@ pub fn claim_job_with_lease_in_tx(
                 cancel_reason
             ));
         }
+        discard_replacement_request(tx, &job.job_id, cancel_reason, now)?;
     };
 
     let Some(job) = selected_job else {
@@ -637,6 +639,24 @@ pub fn fail_job_with_backoff_in_tx(
     Ok(())
 }
 
+/// A transcript replacement job (F71a) that the queue cancels outside the transcription settle
+/// path ends its request row as `discarded` with the content-free cancellation reason, so the row
+/// is never left looking like a request still in flight. A no-op for every other job.
+fn discard_replacement_request(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE transcript_replacement_requests
+            SET outcome = 'discarded', outcome_reason = ?, settled_at = ?
+          WHERE job_id = ? AND outcome IS NULL",
+        rusqlite::params![reason, now.to_rfc3339(), job_id],
+    )?;
+    Ok(())
+}
+
 /// Cancel a job durably. Cancellation is idempotent; already-cancelled or completed jobs remain unchanged.
 pub fn cancel_job(db: &mut Database, job_id: &str) -> Result<()> {
     let tx = db.immediate_transaction()?;
@@ -657,6 +677,9 @@ pub fn cancel_job_in_tx(tx: &Transaction<'_>, job_id: &str) -> Result<()> {
         ],
     )?;
 
+    if affected == 1 {
+        discard_replacement_request(tx, job_id, "cancelled", Utc::now())?;
+    }
     if affected == 0 {
         let job = get_job_internal(tx, job_id)?;
         if job.is_none() {

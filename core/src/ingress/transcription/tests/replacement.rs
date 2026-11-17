@@ -56,6 +56,19 @@ fn text_correction_of_transcript(store: &Store, new_value: &str) {
     save_event(&mut store.open(), &event, revision).unwrap();
 }
 
+/// Native code reported the removal of the item's audio file; the capture row keeps its reference.
+fn record_removal_of_audio(store: &Store) {
+    let mut database = store.open();
+    let audio_reference: String = database
+        .conn()
+        .query_row("SELECT audio_reference FROM captures", [], |row| row.get(0))
+        .unwrap();
+    let transaction = database.immediate_transaction().unwrap();
+    record_audio_removal(&transaction, &store.item_id, &audio_reference, later()).unwrap();
+    record_audio_removal(&transaction, &store.item_id, &audio_reference, later()).unwrap();
+    transaction.commit().unwrap();
+}
+
 fn request_all(store: &Store) -> RetranscriptionRequestResult {
     request_retranscription(
         &mut store.open(),
@@ -152,7 +165,7 @@ fn a_live_transcribed_note_with_an_older_generation_is_a_candidate() {
 #[test]
 fn every_exclusion_keeps_a_note_from_being_a_candidate() {
     type Setup = fn(&Store);
-    let cases: [(&str, Setup, RetranscriptionSkip); 6] = [
+    let cases: [(&str, Setup, RetranscriptionSkip); 7] = [
         (
             "deleted",
             |store| {
@@ -179,6 +192,11 @@ fn every_exclusion_keeps_a_note_from_being_a_candidate() {
                     .execute("UPDATE captures SET audio_reference = NULL, text = ''", [])
                     .unwrap();
             },
+            RetranscriptionSkip::AudioUnavailable,
+        ),
+        (
+            "audio recorded removed",
+            record_removal_of_audio,
             RetranscriptionSkip::AudioUnavailable,
         ),
         (
@@ -1090,4 +1108,83 @@ fn deletion_leaves_no_superseded_transcript_and_no_request_for_the_item() {
         )
         .unwrap();
     assert_eq!(leftover, 0);
+}
+
+#[test]
+fn audio_recorded_removed_after_the_request_discards_the_outcome() {
+    let store = store_with_transcript();
+    let job = requested_and_claimed(&store);
+    record_removal_of_audio(&store);
+    let acknowledgment = apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        settle_time(),
+    )
+    .unwrap();
+    assert_eq!(
+        acknowledgment.disposition,
+        TranscriptionDisposition::Discarded(DiscardReason::AudioUnavailable)
+    );
+    assert_eq!(provenance(&store).text, TRANSCRIPT);
+    assert_eq!(
+        request_row(&store, &job.job_id),
+        (
+            Some("discarded".to_string()),
+            Some("audio_unavailable".to_string())
+        )
+    );
+}
+
+#[test]
+fn a_queued_replacement_made_stale_by_a_non_text_revision_change_is_recorded_discarded() {
+    let store = store_with_transcript();
+    let queued = request_all(&store).queued;
+    store
+        .open()
+        .conn()
+        .execute("UPDATE items SET revision = revision + 1", [])
+        .unwrap();
+    assert_eq!(
+        request_row(&store, &queued[0].job_id),
+        (None, None),
+        "still in flight until the queue drops it"
+    );
+    let claimed =
+        claim_job_with_lease(&mut store.open(), Duration::seconds(300), request_time()).unwrap();
+    assert!(claimed.is_none());
+    assert_eq!(
+        store.job(&queued[0].job_id).failure_reason.as_deref(),
+        Some("stale_revision")
+    );
+    assert_eq!(
+        request_row(&store, &queued[0].job_id),
+        (
+            Some("discarded".to_string()),
+            Some("stale_revision".to_string())
+        )
+    );
+    // The note is a candidate again, so the user's intent can be requested anew.
+    assert_eq!(request_all(&store).queued.len(), 1);
+}
+
+#[test]
+fn a_running_replacement_with_an_expired_lease_made_stale_is_recorded_discarded() {
+    let store = store_with_transcript();
+    let job = requested_and_claimed(&store);
+    store
+        .open()
+        .conn()
+        .execute("UPDATE items SET revision = revision + 1", [])
+        .unwrap();
+    let much_later = request_time() + Duration::hours(1);
+    let claimed =
+        claim_job_with_lease(&mut store.open(), Duration::seconds(300), much_later).unwrap();
+    assert!(claimed.is_none());
+    assert_eq!(
+        request_row(&store, &job.job_id),
+        (
+            Some("discarded".to_string()),
+            Some("stale_revision".to_string())
+        )
+    );
 }

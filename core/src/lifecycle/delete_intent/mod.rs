@@ -677,6 +677,10 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         "DELETE FROM transcript_replacement_requests WHERE item_id = ?",
         rusqlite::params![item_id],
     )?;
+    tx.execute(
+        "DELETE FROM recorded_audio_removals WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
 
     // Delete proposal rows (suggestions, interpretation results)
     tx.execute(
