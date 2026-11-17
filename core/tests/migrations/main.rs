@@ -32,7 +32,7 @@ fn test_create_empty_database() -> Result<()> {
 
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 14);
+    assert_eq!(db.schema_version()?, 15);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -56,7 +56,7 @@ fn test_reopen_database() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
     }
 
     let _ = std::fs::remove_file(&path);
@@ -80,7 +80,7 @@ fn test_forward_incompatible_version_rejected() -> Result<()> {
         let db = make_test_db(&path, instant)?;
         db.conn().execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![15, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![16, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
 
@@ -118,7 +118,7 @@ fn test_forward_incompatible_database_not_modified() -> Result<()> {
         let conn = Connection::open(&path)?;
         conn.execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![15, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![16, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
     let bytes_before = std::fs::read(&path)?;
@@ -170,7 +170,7 @@ fn test_migration_from_version_zero() -> Result<()> {
     {
         let db = make_test_db(&path, instant)?;
         let version = db.schema_version()?;
-        assert_eq!(version, 14, "Schema version should be upgraded to 14");
+        assert_eq!(version, 15, "Schema version should be upgraded to 15");
 
         // Check that v1 tables now exist.
         let tables_exist: bool = db.conn().query_row(
@@ -262,11 +262,11 @@ fn test_synthetic_step_success_records_own_version() -> Result<()> {
     let steps = steps_with(create_synthetic_v2_table);
     {
         let db = open_with(&path, later, &steps)?;
-        assert_eq!(db.schema_version()?, 15);
+        assert_eq!(db.schema_version()?, 16);
         assert!(table_exists(db.conn(), "synthetic_v2")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
         let (created, version_two): (String, String) = db.conn().query_row(
-            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 15),
+            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 16),
                     (SELECT created_at FROM _schema_metadata WHERE version = 2)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -297,7 +297,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
 
     let steps = steps_with(create_synthetic_v2_table);
     let db = open_with(&path, instant, &steps)?;
-    assert_eq!(db.schema_version()?, 15);
+    assert_eq!(db.schema_version()?, 16);
     assert!(table_exists(db.conn(), "captures")?);
     assert!(table_exists(db.conn(), "synthetic_v2")?);
     let versions: i64 =
@@ -305,7 +305,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
             .query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-    assert_eq!(versions, 15);
+    assert_eq!(versions, 16);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -325,7 +325,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
     let result = open_with(&path, instant, &steps);
     let error = result.unwrap_err().to_string();
     assert!(
-        error.contains("Migration to version 15 failed"),
+        error.contains("Migration to version 16 failed"),
         "Got: {}",
         error
     );
@@ -336,7 +336,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
             conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-        assert_eq!(version, 14, "Version must stay at the last good version");
+        assert_eq!(version, 15, "Version must stay at the last good version");
         assert!(!table_exists(&conn, "synthetic_partial")?);
         let column_added: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('captures') WHERE name='synthetic_partial_col')",
@@ -349,7 +349,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
 
     // The original database still opens normally.
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 14);
+    assert_eq!(db.schema_version()?, 15);
     assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
 
     let _ = std::fs::remove_file(&path);
@@ -916,7 +916,7 @@ fn test_ledger_whitespace_differences_do_not_brick_database() -> Result<()> {
     let instant = instant_for_tests()?;
     drop(make_test_db(&path, instant)?);
     let reopened = make_test_db(&path, instant)?;
-    assert_eq!(reopened.schema_version()?, 14);
+    assert_eq!(reopened.schema_version()?, 15);
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
@@ -994,7 +994,7 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
     // Reopen the database with full migration list: should upgrade from v1 to v2
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
 
         // Verify source data is intact
         let capture_count: i64 = db.conn().query_row(
@@ -1061,7 +1061,7 @@ fn test_v2_to_v3_migration_preserves_reminder_rows() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         let (request_state, schedule_state, unschedulable_reason): (String, String, Option<String>) =
             db.conn().query_row(
                 "SELECT request_state, schedule_state, unschedulable_reason FROM reminders WHERE reminder_id = 'rem-1'",
@@ -1110,7 +1110,7 @@ fn test_v3_to_v4_migration_preserves_provider_profiles() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         let (credential_ref, revoked_at): (Option<String>, Option<String>) = db.conn().query_row(
             "SELECT credential_ref, revoked_at FROM provider_profiles WHERE profile_version = 'prof-1-v1'",
             [],
@@ -1155,7 +1155,7 @@ fn test_v4_to_v5_migration_adds_nullable_reminder_source_phrase() -> Result<()> 
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         let source_phrase: Option<String> = db.conn().query_row(
             "SELECT source_phrase FROM reminders WHERE reminder_id = 'rem-1'",
             [],
@@ -1191,7 +1191,7 @@ fn test_v5_to_v6_migration_adds_zeroed_transient_failure_count() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         let (attempts, transient): (i32, i32) = db.conn().query_row(
             "SELECT attempt_count, transient_failure_count FROM jobs WHERE job_id = 'job-1'",
             [],
@@ -1223,7 +1223,7 @@ fn test_v6_to_v7_migration_adds_transcript_attachments_without_touching_sources(
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "transcript_attachments")?);
         assert_eq!(capture_count(db.conn(), "cap-1")?, 1);
         let attachments: i64 =
@@ -1279,7 +1279,7 @@ fn test_v7_to_v8_migration_adds_reminder_history_events_without_touching_reminde
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "reminder_history_events")?);
         assert!(table_exists(db.conn(), "reminder_request_events")?);
         let (delivery, acknowledgment): (String, String) = db.conn().query_row(
@@ -1358,7 +1358,7 @@ fn test_v8_to_v9_migration_adds_reset_generations_without_touching_items() -> Re
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "reset_generations")?);
         assert_eq!(capture_count(db.conn(), "cap-1")?, 1);
         let (lifecycle, generations): (String, i64) = db.conn().query_row(
@@ -1454,7 +1454,7 @@ fn test_v9_to_v10_migration_adds_credential_claims_that_fence_profile_writes() -
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "reset_credential_claims")?);
         let (profiles, claims): (i64, i64) = db.conn().query_row(
             "SELECT (SELECT COUNT(*) FROM provider_profiles),
@@ -1551,7 +1551,7 @@ fn test_v10_to_v11_migration_adds_a_single_row_prompt_schedule_table() -> Result
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "prompt_schedule")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
         let rows: i64 = db
@@ -1617,7 +1617,7 @@ fn test_v11_to_v12_migration_adds_the_default_provider_profile_table() -> Result
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "default_provider_profiles")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
         let rows: i64 = db.conn().query_row(
@@ -1667,7 +1667,7 @@ fn test_v12_to_v13_migration_adds_the_single_row_retention_setting_table() -> Re
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         assert!(table_exists(db.conn(), "retention_settings")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
         let rows: i64 =
@@ -1741,7 +1741,7 @@ fn test_v13_to_v14_migration_adds_nullable_abstention_columns_without_backfill()
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 14);
+        assert_eq!(db.schema_version()?, 15);
         let old: (Option<String>, Option<String>, i64) = db.conn().query_row(
             "SELECT abstention_reason, abstention_detail, abstained FROM proposals WHERE proposal_id = 'old-abstention'",
             [],
@@ -1769,6 +1769,216 @@ fn test_v13_to_v14_migration_adds_nullable_abstention_columns_without_backfill()
             )
             .is_err());
     }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+/// A version-14 database holding two voice notes with attached transcripts.
+fn create_v14_database_with_transcripts(path: &str) -> Result<()> {
+    let db = open_with(path, instant_for_tests()?, &MIGRATIONS[..14])?;
+    assert_eq!(db.schema_version()?, 14);
+    for (index, capture) in ["cap-1", "cap-2"].iter().enumerate() {
+        insert_source_capture(db.conn(), capture)?;
+        db.conn().execute(
+            "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, 1, 'active', 'saved_local', 'not_configured', 'unprocessed', 'transcribed', '2026-01-15T10:30:00Z', '2026-01-15T10:30:00Z')",
+            rusqlite::params![format!("item-{}", index + 1), capture],
+        )?;
+        db.conn().execute(
+            "INSERT INTO transcript_attachments (item_id, source_job_id, transcript_record_id, text, attached_revision, audio_reference, audio_sha256, recognizer, detected_language, confidence, transcribed_at)
+             VALUES (?, ?, ?, ?, 1, 'clip.m4a', 'abc', 'recognizer/1', 'en-US', 0.9, '2026-01-15T10:31:00Z')",
+            rusqlite::params![
+                format!("item-{}", index + 1),
+                format!("job-{}", index + 1),
+                format!("record-{}", index + 1),
+                format!("synthetic transcript {}", index + 1)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// item, source job, text, attached revision, generation, replaced_at, transcribed_at.
+type TranscriptRow = (String, String, String, i64, i32, Option<String>, String);
+
+fn assert_v14_transcripts_survived_at_generation_one(db: &Database) -> Result<()> {
+    assert_eq!(db.schema_version()?, 15);
+    assert!(table_exists(db.conn(), "transcript_replacement_requests")?);
+    assert!(table_exists(db.conn(), "superseded_transcripts")?);
+    let rows: Vec<TranscriptRow> = db
+        .conn()
+        .prepare(
+            "SELECT item_id, source_job_id, text, attached_revision, transcript_generation,
+                    replaced_at, transcribed_at
+               FROM transcript_attachments ORDER BY item_id",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "item-1".to_string(),
+                "job-1".to_string(),
+                "synthetic transcript 1".to_string(),
+                1,
+                1,
+                None,
+                "2026-01-15T10:31:00Z".to_string()
+            ),
+            (
+                "item-2".to_string(),
+                "job-2".to_string(),
+                "synthetic transcript 2".to_string(),
+                1,
+                1,
+                None,
+                "2026-01-15T10:31:00Z".to_string()
+            ),
+        ],
+        "every existing row is generation 1 with its text and provenance unchanged"
+    );
+    let (record_id, recognizer, digest): (String, String, String) = db.conn().query_row(
+        "SELECT transcript_record_id, recognizer, audio_sha256 FROM transcript_attachments WHERE item_id = 'item-1'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(
+        (record_id.as_str(), recognizer.as_str(), digest.as_str()),
+        ("record-1", "recognizer/1", "abc")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_v14_to_v15_migration_marks_every_transcript_generation_one() -> Result<()> {
+    let path = temp_db_path("v14_to_v15_upgrade");
+    create_v14_database_with_transcripts(&path)?;
+
+    {
+        let db = make_test_db(&path, instant_for_tests()?)?;
+        assert_v14_transcripts_survived_at_generation_one(&db)?;
+        assert!(
+            db.conn()
+                .execute(
+                    "UPDATE transcript_attachments SET transcript_generation = 0",
+                    []
+                )
+                .is_err(),
+            "a generation is at least 1"
+        );
+        assert!(
+            db.conn()
+                .execute(
+                    "INSERT INTO transcript_replacement_requests (job_id, item_id, requested_at, replaces_record_id, outcome)
+                     VALUES ('job-r', 'item-1', '2026-01-16T10:00:00Z', 'record-1', 'bogus')",
+                    []
+                )
+                .is_err(),
+            "a request outcome is one of the known outcomes"
+        );
+        assert!(
+            db.conn()
+                .execute(
+                    "INSERT INTO transcript_replacement_requests (job_id, item_id, requested_at, replaces_record_id, outcome)
+                     VALUES ('job-r', 'item-1', '2026-01-16T10:00:00Z', 'record-1', 'kept')",
+                    []
+                )
+                .is_err(),
+            "a settled request records when it settled"
+        );
+        db.conn().execute(
+            "INSERT INTO transcript_replacement_requests (job_id, item_id, requested_at, replaces_record_id)
+             VALUES ('job-r', 'item-1', '2026-01-16T10:00:00Z', 'record-1')",
+            [],
+        )?;
+    }
+
+    // Reopening applies nothing again and changes nothing.
+    {
+        let db = make_test_db(&path, instant_for_tests()?)?;
+        assert_eq!(db.schema_version()?, 15);
+        let versions: i64 =
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(versions, 15);
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_restore_of_a_version_14_backup_upgrades_like_an_in_place_upgrade() -> Result<()> {
+    let original = temp_db_path("v14_backup_source");
+    let restored = temp_db_path("v14_backup_restored");
+    create_v14_database_with_transcripts(&original)?;
+    std::fs::copy(&original, &restored)?;
+
+    // The original keeps running and upgrades; the restored copy opens afterwards, as a restore
+    // onto a newer build does, and ends in the same state.
+    drop(make_test_db(&original, instant_for_tests()?)?);
+    let db = make_test_db(&restored, instant_for_tests()?)?;
+    assert_v14_transcripts_survived_at_generation_one(&db)?;
+
+    let _ = std::fs::remove_file(&original);
+    let _ = std::fs::remove_file(&restored);
+    Ok(())
+}
+
+fn fail_after_step_15(tx: &Transaction<'_>) -> Result<()> {
+    (MIGRATIONS[14].apply)(tx)?;
+    tx.execute("INSERT INTO synthetic_missing_table VALUES (1)", [])?;
+    Ok(())
+}
+
+#[test]
+fn test_an_interrupted_step_15_leaves_version_14_intact_and_the_retry_succeeds() -> Result<()> {
+    let path = temp_db_path("v14_to_v15_interrupted");
+    create_v14_database_with_transcripts(&path)?;
+
+    let mut steps = MIGRATIONS[..14].to_vec();
+    steps.push(MigrationStep {
+        target_version: 15,
+        apply: fail_after_step_15,
+    });
+    let error = open_with(&path, instant_for_tests()?, &steps)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Migration to version 15 failed"), "{error}");
+
+    {
+        let conn = Connection::open(&path)?;
+        let version: u32 =
+            conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(version, 14);
+        assert!(!table_exists(&conn, "transcript_replacement_requests")?);
+        assert!(!table_exists(&conn, "superseded_transcripts")?);
+        let column_added: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('transcript_attachments') WHERE name IN ('transcript_generation', 'replaced_at'))",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!column_added, "the half-applied step is rolled back");
+    }
+
+    let db = make_test_db(&path, instant_for_tests()?)?;
+    assert_v14_transcripts_survived_at_generation_one(&db)?;
 
     let _ = std::fs::remove_file(&path);
     Ok(())

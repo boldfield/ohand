@@ -165,6 +165,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 14,
         apply: add_abstention_reason_v14,
     },
+    MigrationStep {
+        target_version: 15,
+        apply: add_transcript_replacement_v15,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -1042,6 +1046,80 @@ fn add_abstention_reason_v14(tx: &Transaction<'_>) -> Result<()> {
     )?;
     tx.execute(
         "ALTER TABLE proposals ADD COLUMN abstention_detail TEXT",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 15 (F71a): replacing a voice note's machine transcript from its retained audio.
+///
+/// * `transcript_generation` records which recognizer behaviour produced a transcript, so the core
+///   knows which transcripts may be incomplete instead of guessing. Every existing row is
+///   generation 1; `ingress::transcription::CURRENT_TRANSCRIPT_GENERATION` is the one that keeps
+///   every recognized segment. `replaced_at` is when a replacement was settled; `transcribed_at`
+///   stays the first successful transcription, so a replacement never restarts the audio
+///   retention clock.
+/// * `transcript_replacement_requests` has one row per replacement job (the job id is its
+///   identity): the item, when it was requested, the transcript record it would replace and, once
+///   settled, the outcome (`replaced`, `unchanged`, `kept` or `discarded`), its content-free
+///   reason and a digest of the delivered outcome so a redelivery is recognised and a different
+///   outcome for the same job is a conflict. It holds no text.
+/// * `superseded_transcripts` keeps each transcript a replacement displaced: its text, record id,
+///   attached revision and provenance. It holds readable text and an audio digest, so deletion
+///   removes it with the current transcript.
+fn add_transcript_replacement_v15(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE transcript_attachments ADD COLUMN transcript_generation INTEGER NOT NULL \
+         DEFAULT 1 CHECK (transcript_generation >= 1)",
+        [],
+    )?;
+    tx.execute(
+        "ALTER TABLE transcript_attachments ADD COLUMN replaced_at TEXT",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE transcript_replacement_requests (
+            job_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            replaces_record_id TEXT NOT NULL,
+            outcome TEXT CHECK (outcome IS NULL OR
+                outcome IN ('replaced', 'unchanged', 'kept', 'discarded')),
+            outcome_reason TEXT,
+            outcome_digest TEXT,
+            settled_at TEXT,
+            CHECK ((outcome IS NULL) = (settled_at IS NULL)),
+            FOREIGN KEY (item_id) REFERENCES items(item_id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX idx_transcript_replacement_requests_item
+         ON transcript_replacement_requests(item_id)",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE superseded_transcripts (
+            transcript_record_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            source_job_id TEXT NOT NULL UNIQUE,
+            text TEXT NOT NULL,
+            attached_revision INTEGER NOT NULL,
+            audio_reference TEXT NOT NULL,
+            audio_sha256 TEXT NOT NULL,
+            recognizer TEXT NOT NULL,
+            detected_language TEXT,
+            confidence REAL,
+            transcribed_at TEXT NOT NULL,
+            transcript_generation INTEGER NOT NULL,
+            superseded_at TEXT NOT NULL,
+            superseded_by_record_id TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES items(item_id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX idx_superseded_transcripts_item ON superseded_transcripts(item_id)",
         [],
     )?;
     Ok(())
