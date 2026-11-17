@@ -4751,6 +4751,87 @@
         "ios/Capture/Voice/VoiceCaptureEngine.swift",
         "app/source-detail/SourceDetailModel.swift"
       ]
+    },
+    {
+      "key": "F71a",
+      "parent": null,
+      "title": "Core: replace a voice note's machine transcript from its retained audio",
+      "file_scope": [
+        "core/src/store/schema/",
+        "core/src/ingress/transcription/",
+        "core/src/lifecycle/retention/mod.rs (clock source only)",
+        "core/src/lifecycle/ and core/src/ffi/reset* (removal of the new rows only)",
+        "core/src/export/ (superseded transcripts only)",
+        "core/tests/",
+        "docs/architecture/m1-contracts.md"
+      ],
+      "intent": "Let the core replace an uncorrected machine transcript with a new on-device transcription of the same retained audio, on explicit request, keeping the superseded text as history and leaving retention unchanged.",
+      "acceptance": [
+        "See the F71a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ingress/transcription/queue.rs",
+        "core/src/store/schema/mod.rs",
+        "core/src/lifecycle/retention/mod.rs"
+      ]
+    },
+    {
+      "key": "F71b",
+      "parent": null,
+      "title": "Boundary and native handler: request and run transcript replacements",
+      "file_scope": [
+        "core/src/ffi/retention_controls.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "core/bindings/",
+        "ios/OhAndCoreBridge/",
+        "ios/Services/Transcription/",
+        "ios/Services/AudioRetention/RetentionControlService.swift",
+        "ios/Tests/Transcription/",
+        "ios/Tests/AudioRetention/"
+      ],
+      "intent": "Expose the replacement request and status over the retention boundary, carry the recognizer generation with each outcome, and have the native handler run replacement jobs.",
+      "acceptance": [
+        "See the F71b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F71a",
+        "F69"
+      ],
+      "source_pointers": [
+        "core/src/ffi/retention_controls.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "ios/Services/Transcription/TranscriptionJobHandler.swift",
+        "ios/Services/AudioRetention/RetentionControlService.swift"
+      ]
+    },
+    {
+      "key": "F71c",
+      "parent": null,
+      "title": "Settings: turn kept recordings into text again",
+      "file_scope": [
+        "app/data-settings/RetentionSettingsModel.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "app/data-settings/RetentionSettingsText.swift",
+        "ios/Tests/DataSettings/",
+        "ios/Tests/SourceDetail/ (refresh test only)"
+      ],
+      "intent": "Offer one explicit action on the retention screen that re-transcribes the kept recordings of notes transcribed before F69, with a plain account of what it does and does not touch.",
+      "acceptance": [
+        "See the F71c section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F71b"
+      ],
+      "source_pointers": [
+        "app/data-settings/RetentionSettingsModel.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "app/data-settings/RetentionSettingsText.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5618,7 +5699,15 @@
       "U10b"
     ],
     "F69": [],
-    "F70": []
+    "F70": [],
+    "F71a": [],
+    "F71b": [
+      "F71a",
+      "F69"
+    ],
+    "F71c": [
+      "F71b"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5948,6 +6037,10 @@
     {
       "date": "2026-11-17",
       "change": "Maintainer decision: the trial candidate waits for F69. T06 and T05b gain F69 as an effective dependency, so the functional device matrix and the signed trial build use a candidate whose voice transcripts hold everything that was said. F70 stays a dependency of nothing."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F71a, F71b and F71c added at the maintainer's request: re-transcribe voice notes stored before F69 from their retained audio. The core stores one transcript per item, so F71a adds an explicit, guarded replacement of an uncorrected machine transcript (schema step 15, superseded text kept as history, retention clock unchanged), F71b the boundary and native handler, F71c one explicit action on the retention screen. Chain F71a -> F71b (also after F69) -> F71c. No trial task depends on them. The repair reaches only notes whose audio is still retained."
     }
   ]
 }

@@ -5050,3 +5050,97 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 900: retained audio is the authoritative record when a transcript is wrong, and it cannot be heard. Independent of F69 (no shared files); no task depends on F70.
+
+### F71a
+
+Core: replace a voice note's machine transcript from its retained audio
+
+Requested by the maintainer on 2026-11-17. Before F69, the app kept only the last segment the on-device recognizer delivered, so every voice note with a pause of about 3 s or more than about a minute of speech is stored with a transcript that lacks its beginning. F69 fixes new notes. The stored ones cannot be repaired today: a transcript is stored once (`core/src/ingress/transcription/mod.rs`, module comment: "A different job cannot attach a second transcript because the item is already `transcribed`"), `transcript_attachments.item_id` is the primary key (`core/src/store/schema/mod.rs`, step 7), and `requeue_transcription` refuses a `transcribed` item (`core/src/ingress/transcription/queue.rs:232-237`). F71a adds the core path; F71b the boundary and native handler; F71c the control.
+
+The repair is bounded by audio retention: audio expires seven days after its transcription by default (`core/src/lifecycle/retention/mod.rs`), and a note whose audio is gone keeps its truncated transcript. This task does not change retention.
+
+Decisions:
+- **Only machine text is replaced.** A replacement is refused when the item's current text is not its attached transcript (a user text correction is in force, including one that cleared the text), when the item is deleted, when the capture's audio reference is gone or recorded as removed, or when the outcome was made from audio whose SHA-256 differs from the attachment's. A user correction made between the request and the outcome wins: the outcome is discarded and the job ends with a content-free reason.
+- **Which transcripts are candidates is recorded, not guessed.** `transcript_attachments` gains `transcript_generation` (INTEGER NOT NULL, 1 for every existing row). The core constant `CURRENT_TRANSCRIPT_GENERATION` is 2, documented as "every recognized segment kept (F69)". A candidate is a live, `transcribed` item whose attachment has a lower generation, whose current text is that transcript and whose audio is still recorded. Rows written between F69 and F71b carry generation 1 although they are complete; re-transcribing them is harmless (see "unchanged").
+- **A replacement is requested explicitly and runs as an ordinary on-device transcription job.** `request_retranscription(item_ids | all candidates, limit)` queues one `transcription_attachment` job per candidate at the item's current revision, in one transaction, at most `MAX_RETRANSCRIPTION_BATCH` (100) per call, skipping an item with a transcription job queued or running, and records each request in a new table keyed by job id (item, requested time, the transcript record it would replace, and later its outcome). The item's `transcription_state` stays `transcribed` throughout and its text stays readable and searchable while the job runs. The job is authorized exactly as a first transcription is: on device only, never pinned to a profile.
+- **Settling a replacement outcome** (`apply_transcription_outcome`, decided by the request row, in the same single transaction and with the same lease, redelivery and conflict rules as a first attachment):
+  - transcript whose trimmed text equals the stored one: `unchanged`; no event, no revision; the attachment's generation and recognizer are updated;
+  - transcript that differs: `replaced`; a `transcript` event at a new revision through `save_transcript_event_in_tx` (so history and the search index see it), the attachment row now holds the new text, record id, source job, recognizer, language, confidence and generation, and interpretation is queued at the new revision under the rules a first attachment uses;
+  - unsupported, failed or no speech: `kept`; the existing transcript stays, nothing is written to the item, and the request records the reason. A failed replacement never moves the item to `transcription_failed`.
+- **The superseded transcript is kept as history and removed by deletion.** Its text, record id, recognizer and attached revision stay readable by `transcript_provenance`-style read (a list of superseded transcripts for the item), and item deletion and reset remove them with the current one. The capture row is never modified.
+- **The retention clock does not restart.** Expiry keeps counting from the first successful transcription; the replacement's time is recorded separately. A replacement must not extend how long audio is kept.
+- **Earlier interpretation results.** The worker reads how a new text revision made by a user text correction treats proposals, suggestions and a scheduled reminder made from the earlier revision, states it in the PR with source pointers, and makes a replacement's new revision behave the same way, except that `text_corrected` stays false and the text basis stays `Transcript`. If that path would cancel a scheduled reminder or leave two live reminders for one item, the worker stops and blocks the task with the finding rather than choosing.
+
+Scope: schema step 15 (the generation column, the request table, the superseded-transcript storage) with its migration and restore tests; `core/src/ingress/transcription/` (request, candidate query, settlement); `core/src/lifecycle/retention/` only so its clock reads the first-success time; deletion and reset coverage of the new rows; the export if it lists transcripts (the superseded ones are exported as superseded or the PR says why not).
+
+Owned paths: `core/src/store/schema/`, `core/src/ingress/transcription/`, `core/src/lifecycle/retention/mod.rs` (the clock source only), `core/src/lifecycle/` deletion and `core/src/ffi/reset*` only where the new rows must be removed, `core/src/export/` (only for superseded transcripts), `core/tests/`, `docs/architecture/m1-contracts.md` (the transcript and retention paragraphs).
+
+Not owned: `core/src/ffi/` boundaries other than reset (F71b), `ios/`, `app/`, the retention period, interpretation and reminder rules themselves.
+
+Acceptance:
+1. Migration: a version-14 database with attached transcripts opens at 15 with every row at generation 1, text and provenance unchanged; restore of a backup taken at 14 behaves the same; the migration is idempotent under the existing interrupted-migration tests.
+2. Candidates: tests cover a candidate, and each exclusion (deleted, text correction in force, cleared correction, audio reference gone, audio recorded removed, generation current, typed item, job in flight).
+3. Request: one transaction, bounded by the batch limit, idempotent when repeated while jobs are in flight, and the item stays `transcribed` and searchable by its old text.
+4. Settlement: tests for `replaced`, `unchanged` and each `kept` reason; for a user correction landing between request and outcome (discarded, correction intact); for deletion between request and outcome; for a digest mismatch; for redelivery of the same outcome (same result, no second event) and of a different one (conflict); and for a crash at each fault point, as the first-attachment tests do.
+5. After `replaced`: the item's text and search results are the new transcript, `text_corrected` is false, the revision advanced by one, an interpretation job exists at the new revision when one is authorized, the superseded text is readable as history, and the retention assessment of the item is the same before and after.
+6. Deletion and reset leave no superseded transcript text and no request row for the item.
+7. The PR states the earlier-interpretation behaviour with source pointers, and a test pins it for an item that had a scheduled reminder.
+8. `make check` and `make test`.
+
+Validation: `make check`, `make test`.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800. No trial task depends on F71a, F71b or F71c: the trial candidate contains F69, so notes captured during the trial are complete, and these three tasks repair notes captured before it. Because F71a adds a schema step, a candidate cut after it lands upgrades the trial database by one more step, which T10b's procedure covers as it stands.
+
+### F71b
+
+Boundary and native handler: request and run transcript replacements
+
+Depends on F71a and F69. F71a lets the core replace a machine transcript; nothing native can ask for it, and the native handler does not say which recognizer generation produced an outcome.
+
+Scope:
+1. `core/src/ffi/retention_controls.rs`: the read command `retranscription_status` (in an authenticated read session: the number of candidates in the read scopes, and the number of replacement jobs queued or running) and the control command `retranscribe` (`item_ids`, or all candidates, bounded by `MAX_RETRANSCRIPTION_BATCH`; outcome `queued` with the count queued and the count skipped per content-free reason). Failures are normalized and echo no identifier or content, as the file's other commands do.
+2. `core/src/ffi/transcription_attachment.rs` and the bindings: the outcome carries `transcript_generation`; the acknowledgment distinguishes `replaced`, `unchanged` and `kept`. An outcome without a generation is refused, not defaulted.
+3. `ios/Services/Transcription/`: `OnDeviceRecognizing` gains `transcriptGeneration`, 2 for `SpeechFrameworkRecognizer` once it accumulates segments (F69); `TranscriptionJobHandler` sends it and treats the three replacement dispositions as settled work. The handler is read for any native guard that skips an item already `transcribed`; if one exists, it defers to the core's decision instead.
+4. `ios/Services/AudioRetention/RetentionControlService.swift` and the bridge: `retranscriptionStatus()` and `retranscribe(...)`, and a drain is requested after `retranscribe` so the jobs run without waiting for the next capture.
+5. Audio in use: a replacement job for audio that is open for playback or being removed waits and is retried, using the fences the first-transcription path and the retention service already use; the PR names them.
+
+Owned paths: `core/src/ffi/retention_controls.rs` and its tests, `core/src/ffi/transcription_attachment.rs` and its tests, `core/bindings/`, `ios/OhAndCoreBridge/` (the generated or hand-written surface for these commands), `ios/Services/Transcription/` (except the accumulator F69 added), `ios/Services/AudioRetention/RetentionControlService.swift`, `ios/Tests/Transcription/`, `ios/Tests/AudioRetention/`.
+
+Not owned: `core/src/ingress/` and the schema (F71a), `app/` (F71c), `ios/TranscriptionProbe/`.
+
+Acceptance:
+1. Rust boundary tests for both commands: scopes respected, an unauthenticated session refused, the batch bound, and no identifier or content in any failure.
+2. A real-core integration test in `ios/Tests/Transcription/` with a fake recognizer: a note stored with a short transcript at generation 1 is requested, the handler runs the job, and the item's text is the fake recognizer's longer transcript; the same test with an identical transcript ends `unchanged` with no new revision; with a failing recognizer the old text stays.
+3. A test that an outcome without a generation is refused, and that `SpeechFrameworkRecognizer.transcriptGeneration` is 2.
+4. A test for scope item 5 with the playback fence held.
+5. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
+
+### F71c
+
+Settings: turn kept recordings into text again
+
+Depends on F71b. The control that asks for the replacements, on the screen that already owns audio retention (`app/data-settings/RetentionSettings*.swift`).
+
+Scope: on Settings → the retention screen, in an authenticated read session and only while `retranscriptionStatus()` reports at least one candidate or one replacement in progress, a section that says in plain words what happened and what the action does, following `docs/features/m1-ui-design.md` and `RetentionSettingsText`: how many recordings were turned into text by an earlier version that could lose the beginning of a long note; that the action listens to each kept recording again on this phone and replaces the text if it differs; that notes whose text the user edited are left alone; and that a note whose recording has already been removed cannot be redone. One button starts it (`retranscribe` for all candidates); while replacements are queued or running the section shows the count remaining and no button; when none remain and there are no candidates the section is gone. Nothing runs without the button: no automatic replacement at launch or upgrade.
+
+The detail screen is not changed by this task; an item whose text is replaced while its detail screen is open refreshes through the screen's existing revision handling, and the worker confirms that with a test rather than adding a mechanism.
+
+Owned paths: `app/data-settings/RetentionSettingsModel.swift`, `RetentionSettingsView.swift`, `RetentionSettingsText.swift`, `ios/Tests/DataSettings/`, `ios/Tests/SourceDetail/` (the refresh test only), the walkthrough and accessibility baselines if the retention screen is in them.
+
+Not owned: `ios/Services/` (F71b), `core/`, a per-item "transcribe again" control (not asked for), any change to the retention period choices.
+
+Acceptance:
+1. Model tests: the section is absent with no candidates and nothing in progress; present with the count; the button calls `retranscribe` once and is replaced by progress; a capture-only (locked) session shows the screen's existing locked state and never the count; a failure shows the screen's existing failure presentation and leaves the button usable.
+2. A real-core test from the model down: one candidate, the button, a fake recognizer, and the section disappears with the item's text replaced.
+3. The copy is in `RetentionSettingsText`, names no version number or internal term, and the accessibility audit of the retention screen passes with the section shown.
+4. The detail-screen refresh test described above.
+5. Exact-head macOS CI evidence and the Linux checks.
+6. Device check, the coordinator's and not claimed by the worker: on the maintainer's phone, with at least one pre-F69 voice note whose recording is still kept, the section shows, the button runs, and that note's detail screen shows its opening words.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
