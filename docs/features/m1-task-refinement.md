@@ -5017,7 +5017,11 @@ Acceptance:
 
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
-Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: every voice note longer than a sentence or two is sorted from part of what was said, which misstates intent in the way DESIGN.md forbids, and trial evidence collected before this lands understates voice capture. No task depends on F69; whether the trial candidate waits for it is the maintainer's call.
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: every voice note longer than a sentence or two is sorted from part of what was said, which misstates intent in the way DESIGN.md forbids, and trial evidence collected before this lands understates voice capture. T06 and T05b depend on F69 (see the amendment below).
+
+#### F69 amendment 1 (2026-11-17): the trial candidate waits for F69
+
+Maintainer decision on 2026-11-17, after the tasks were created (the pinned specification of task `f29ad5a4` still carries the earlier sentence; nothing the worker does changes). T06 and T05b gain F69 as an effective dependency: the functional device matrix is recorded on, and the signed trial build is produced from, a candidate that contains F69, because a trial run on the earlier candidates would measure voice capture from truncated transcripts. U10b and T10b do not depend on it. F70 is not a dependency of any task.
 
 ### F70
 

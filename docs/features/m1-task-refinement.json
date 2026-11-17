@@ -5291,7 +5291,8 @@
     ],
     "T06": [
       "T05b",
-      "F68"
+      "F68",
+      "F69"
     ],
     "T07": [
       "T06"
@@ -5609,7 +5610,8 @@
       "T10b",
       "T12b",
       "U10b",
-      "F68"
+      "F68",
+      "F69"
     ],
     "F67": [],
     "U10c": [
@@ -5942,6 +5944,10 @@
     {
       "date": "2026-11-17",
       "change": "F69 and F70 added from the maintainer's phone reports. F69: the on-device recognizer delivers one result per segment (a segment ends at a pause of about 3 s or after about a minute of speech) and the app kept only the final one, so long voice notes were transcribed from their last part; reproduced with synthetic fixtures in an instrumented TranscriptionProbe on iOS 27.2.1. F70: playback never configures the audio session, so retained audio is silent after a recording (.record) or with the silent switch on (.soloAmbient); diagnosed from the code, device confirmation is its criterion 5. Neither is a dependency of another task."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "Maintainer decision: the trial candidate waits for F69. T06 and T05b gain F69 as an effective dependency, so the functional device matrix and the signed trial build use a candidate whose voice transcripts hold everything that was said. F70 stays a dependency of nothing."
     }
   ]
 }
