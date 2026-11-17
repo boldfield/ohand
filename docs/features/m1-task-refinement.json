@@ -4701,6 +4701,56 @@
         "ios/scripts/check_project_config.py",
         "ios/scripts/select_simulator.py"
       ]
+    },
+    {
+      "key": "F69",
+      "parent": null,
+      "title": "Keep every recognized segment of a voice note, not only the last one",
+      "file_scope": [
+        "ios/Services/Transcription/SpeechFrameworkRecognizer.swift",
+        "ios/Services/Transcription/ (new accumulator file)",
+        "ios/Tests/Transcription/",
+        "ios/TranscriptionProbe/Shared/",
+        "ios/TranscriptionProbe/Tests/",
+        "ios/TranscriptionProbe/Sources/AppDelegate.swift (status line only)",
+        "ios/project.yml (only if the accumulator source is shared)",
+        "docs/validation/transcription-probe.md"
+      ],
+      "intent": "Accumulate the per-segment results the on-device recognizer delivers, in audio order, so a voice note's transcript holds everything that was said instead of its last segment.",
+      "acceptance": [
+        "See the F69 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Transcription/SpeechFrameworkRecognizer.swift",
+        "ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift",
+        "ios/Tests/Transcription/SpeechFrameworkRecognizerTests.swift"
+      ]
+    },
+    {
+      "key": "F70",
+      "parent": null,
+      "title": "Play retained audio through the speaker: configure the audio session for playback",
+      "file_scope": [
+        "ios/Services/Playback/",
+        "ios/Tests/Playback/",
+        "ios/Services/Assembly/CompositionRoot.swift (additive)",
+        "app/source-detail/SourceDetailModel.swift (interruption state only)",
+        "ios/Tests/SourceDetail/"
+      ],
+      "intent": "Set and activate a playback audio session before playing retained audio and release it when playback ends, so Play is audible after a recording and with the silent switch on.",
+      "acceptance": [
+        "See the F70 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Playback/PlaybackSession.swift",
+        "ios/Services/Playback/PlaybackService.swift",
+        "ios/Capture/Voice/VoiceCaptureEngine.swift",
+        "app/source-detail/SourceDetailModel.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5564,7 +5614,9 @@
     "F67": [],
     "U10c": [
       "U10b"
-    ]
+    ],
+    "F69": [],
+    "F70": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5886,6 +5938,10 @@
     {
       "date": "2026-11-10",
       "change": "F68 added: the trial phone is now an iPhone Duo and SDK-26 builds run letterboxed on its inner display; the native toolchain moves to Xcode 27.2 on GitHub's xcode-27 image (GA 2026-10-15). U10b, T05b and T06 gain F68 as an effective dependency; the maintainer's device evidence is collected on the first candidate built after it lands, and T10b's upgrade procedure is repeated on the new phone between two such candidates."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F69 and F70 added from the maintainer's phone reports. F69: the on-device recognizer delivers one result per segment (a segment ends at a pause of about 3 s or after about a minute of speech) and the app kept only the final one, so long voice notes were transcribed from their last part; reproduced with synthetic fixtures in an instrumented TranscriptionProbe on iOS 27.2.1. F70: playback never configures the audio session, so retained audio is silent after a recording (.record) or with the silent switch on (.soloAmbient); diagnosed from the code, device confirmation is its criterion 5. Neither is a dependency of another task."
     }
   ]
 }

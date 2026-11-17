@@ -4978,3 +4978,71 @@ Rule: in one audit pass, the first contrast issue with no element is taken as th
 What this gives up: a different contrast issue that the audit raised with no element, at a stop where it also failed to name the words, would be taken for the words. The wordmark's own contrast is still proven by measurement at every such stop.
 
 **F68 closed (2026-11-11, coordinator).** PR #409 merged as `95c61dc3`. Acceptance criterion 5 is met on the maintainer's report: with `xcode-select` on Xcode 27.2, `install-ohand.sh --candidate` produced candidate 407 (`docs/releases/m1-trial/candidate-407-95c61dc3.json`), and it fills the inner display of the iPhone Duo instead of running in a compatibility box. Candidate 407 is the first of the two candidates for the T10b repeat on the new phone, and the first candidate on which U10b, T05b and T06 evidence can be collected. A layout made for the Duo's inner display stays in M2, as the "Not owned" paragraph says.
+
+### F69
+
+Keep every recognized segment of a voice note, not only the last one
+
+Found by the maintainer on 2026-11-16 (long voice notes were sorted from their last part only) and reproduced by the coordinator on 2026-11-17 on the trial phone (iPhone Duo, iOS 27.2.1) with synthetic `say` fixtures (16 kHz mono 16-bit WAV) in an instrumented `TranscriptionProbe` that logged every recognizer callback. The recorder is not involved: the fixtures never passed through it.
+
+`SpeechFrameworkRecognizer.recognize` (`ios/Services/Transcription/SpeechFrameworkRecognizer.swift:49-57`) issues an on-device `SFSpeechURLRecognitionRequest` with `shouldReportPartialResults = false` and takes `bestTranscription.formattedString` from the one result whose `isFinal` is true. On iOS 27.2.1 the on-device recognizer delivers one result per segment, each holding only its own segment, and only the last has `isFinal == true`. Observed with the shipped settings:
+
+| Fixture | Callback | `isFinal` | `speechRecognitionMetadata` | Audio covered by its segments | Words |
+| --- | --- | --- | --- | --- | --- |
+| 21 s, one 3 s pause at 8.6 s | 1 | false | present | 0.00–8.55 s | 30 |
+| | 2 | true | present | 11.61–20.88 s | 32 |
+| 95 s, continuous speech | 1 | false | present | 0.00–60.06 s | 206 |
+| | 2 | true | present | 60.27–95.01 s | 112 |
+
+So a pause of about 3 s ends a segment, and so does about a minute of continuous speech; the app keeps the last segment and discards the rest. Joining the two results of the 95 s fixture in callback order gave all twenty sentences (318 words) with nothing lost or repeated at the boundary. A second pass with `shouldReportPartialResults = true` delivered 349 callbacks, of which exactly the same two carried `speechRecognitionMetadata`; every other callback was a growing partial of the segment in progress. Partial results are therefore not needed: with the shipped setting every callback is a finished segment. `TranscriptionProbe`'s engine (`ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift:79-87`) has the same handling, which is why P04 and P09, run with a one-sentence fixture, did not see this.
+
+Scope:
+1. A framework-free accumulator in `ios/Services/Transcription/` that is fed one value per recognizer result (its text, its segments' confidences, the audio start and end taken from its first and last `SFTranscriptionSegment`, and whether it is final) and yields the transcript: the texts of the accepted results in audio order, joined by a single space, each trimmed. A result whose audio start lies before the end of an already accepted result restates it and replaces every accepted result it overlaps, so a recognizer that reports cumulatively (as the server recognizer does, and as another OS build may) yields its last cumulative text once, not a duplicated transcript. A result with no segments or only whitespace contributes nothing.
+2. `SpeechFrameworkRecognizer.recognize` feeds every result to the accumulator and finishes on the final result with the accumulated text. Confidence is the existing mean-of-scored-segments rule applied over the segments of all accepted results. The request keeps `requiresOnDeviceRecognition = true` and `shouldReportPartialResults = false`.
+3. Errors: an error that arrives after segments were accepted still ends the attempt as `outcome(for:)` says today, so a transcript is never built from a recognition that failed part-way, with one exception: `kAFAssistantErrorDomain` 1110 (no speech detected) after at least one accepted segment returns the accumulated transcript, since it reports a silent tail, not a failure. This exception is inferred from the error's meaning and was not observed on the device; the PR says so.
+4. `TranscriptionProbe`'s engine applies the same accumulation (sharing the accumulator source through `ios/project.yml` or keeping a copy with the same tests; the PR says which and why), and the probe's status line gains the number of results received, so a device run shows the segmentation.
+5. `docs/validation/transcription-probe.md`: the request paragraph says results arrive per segment and are accumulated, and the device steps gain a long-audio step (a fixture of at least 90 s and one with a pause of at least 3 s; record the result count and that the first and last sentences are both present).
+
+Owned paths: `ios/Services/Transcription/SpeechFrameworkRecognizer.swift`, a new accumulator file beside it, `ios/Tests/Transcription/`, `ios/TranscriptionProbe/Shared/`, `ios/TranscriptionProbe/Tests/`, `ios/TranscriptionProbe/Sources/AppDelegate.swift` (the status line only), `ios/project.yml` (only if the accumulator source is shared), `docs/validation/transcription-probe.md`.
+
+Not owned: `ios/Capture/` (recording is correct), `core/` (the transcript attachment contract is unchanged: one text and one optional confidence), `TranscriptionJobHandler` beyond what compiling requires, a move to `SpeechAnalyzer`/`SpeechTranscriber` (the long-form API; a later decision, not during the trial), and re-transcribing voice notes already stored with a truncated transcript (no such path exists; it is a separate decision for the maintainer).
+
+Acceptance:
+1. Unit tests drive the accumulator with the four observed sequences above (as value fixtures with the observed time ranges) and assert the joined transcript contains the first and the last sentence of each fixture exactly once.
+2. Unit tests cover: a single final result (unchanged behaviour); three or more segments; a cumulative recognizer (each result starts at 0 and extends the last) yielding only its last text; an empty middle result; confidence as the mean over all accepted segments, and nil when none is scored.
+3. A test over the recognition session with a fake task asserts that a non-final result does not resume the continuation, that the final one resumes it once with the accumulated text, that cancellation between results still returns `.cancelled`, that an error after a non-final result returns the error's outcome, and that 1110 after a non-final result returns the accumulated text.
+4. `TranscriptionProbe`'s tests cover the same accumulation through its engine seam.
+5. Exact-head macOS CI evidence and the Linux checks. No test claims that the speech framework recognized audio on a simulator.
+6. Device check, the coordinator's and not claimed by the worker: on the first build containing this change, the 21 s paused fixture and the 95 s continuous fixture in `TranscriptionProbe` each return their first and last sentences, and one voice note of more than a minute recorded in the app shows its opening words on the detail screen.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: every voice note longer than a sentence or two is sorted from part of what was said, which misstates intent in the way DESIGN.md forbids, and trial evidence collected before this lands understates voice capture. No task depends on F69; whether the trial candidate waits for it is the maintainer's call.
+
+### F70
+
+Play retained audio through the speaker: configure the audio session for playback
+
+Found by the maintainer on 2026-11-17 on the trial phone: pressing Play on a voice note's detail screen produced no sound. Diagnosed by the coordinator from the code; not yet confirmed by a device experiment, so criterion 1 below asks the worker to establish the mechanism in a test seam and criterion 5 is the device confirmation.
+
+The only audio-session configuration in the app is the recorder's: `AVAudioRecorderVoiceEngine.start` sets the category to `.record` and activates the session (`ios/Capture/Voice/VoiceCaptureEngine.swift:104-106`), and `stopAndClose` deactivates it without changing the category (`:130`). `AVPlaybackPlayer` (`ios/Services/Playback/PlaybackSession.swift:23-49`) builds an `AVAudioPlayer` and plays it without touching the session. After a recording in the same launch the category is therefore still `.record`, which has no output route; in a launch with no recording it is the default `.soloAmbient`, which the silent switch mutes. `AVAudioPlayer.play()` returns true in both cases, so the screen shows "playing" over silence. The simulator plays audio regardless of category and of a silent switch it does not have, so no automated check could see this.
+
+Scope:
+1. Playback owns its session configuration behind a small seam in `ios/Services/Playback/` (a protocol over the three calls it needs, with the `AVAudioSession` implementation beside it): before the first `play()` of an open `PlaybackSession`, set the category to `.playback` with mode `.spokenAudio` and activate the session; when the playback session ends for any reason (`close()`, finished, deletion requested, relock, shutdown), deactivate with `.notifyOthersOnDeactivation`. A failure to configure or activate makes `play()` return false, which the detail screen already presents through its refused-play path; it is never reported as playing.
+2. Playback and recording do not fight over the session. The worker reads `VoiceRecordingController` and the detail screen's entry points and states in the PR whether playback can be started while a recording is in progress; if it can, opening or starting playback during a recording is refused with the existing unplayable handling, and starting a recording ends an open playback first. The recorder keeps setting `.record` on every start, as it does now.
+3. An interruption (`AVAudioSession.interruptionNotification`, began) while playing leaves the control in the paused state, not "playing"; resuming after it reactivates the session.
+
+Owned paths: `ios/Services/Playback/`, `ios/Tests/Playback/`, `ios/Services/Assembly/CompositionRoot.swift` (additive: passing the session seam to `PlaybackService`), `app/source-detail/SourceDetailModel.swift` and `ios/Tests/SourceDetail/` (only what item 3 needs).
+
+Not owned: `ios/Capture/Voice/` (the recorder's session handling is unchanged), playback through the earpiece or a route picker, background audio (no `audio` background mode is added), `core/`.
+
+Acceptance:
+1. Tests with a recording fake of the session seam assert the order `setCategory(.playback)`, `setActive(true)`, player `play()` on the first play; no second configuration on resume after pause; `setActive(false)` exactly once for each way a playback session ends; and `play()` returning false, with the player never started, when configuration or activation throws.
+2. A test asserts that a play refused by the session leaves the detail model in its refused-play state, not `playing`.
+3. The PR states the answer to scope item 2 with source pointers, and a test covers whichever rule applies.
+4. Exact-head macOS CI evidence and the Linux checks. No test claims audible output.
+5. Device check, the coordinator's and not claimed by the worker: on the first build containing this change, with the phone's silent mode on, a voice note recorded in the current launch plays audibly from its detail screen, and so does one opened after a fresh launch; recording still works after a playback.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 900: retained audio is the authoritative record when a transcript is wrong, and it cannot be heard. Independent of F69 (no shared files); no task depends on F70.
