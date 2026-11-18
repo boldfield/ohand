@@ -16,6 +16,12 @@ final class ScriptedAudioReadCore: RetentionControlCore, @unchecked Sendable {
         completion(.failure(CoreFailure(errorClass: .permanent, code: "unused", message: "unused")))
     }
 
+    func readRetranscriptionStatus(
+        completion: @escaping @Sendable (Result<RetranscriptionStatusAnswer, CoreFailure>) -> Void
+    ) {
+        completion(.failure(CoreFailure(errorClass: .permanent, code: "unused", message: "unused")))
+    }
+
     func readAudio(
         itemID: String, completion: @escaping @Sendable (Result<RetentionAudioAnswer, CoreFailure>) -> Void
     ) {

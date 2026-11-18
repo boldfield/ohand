@@ -180,6 +180,7 @@ fn transcript_request(attempt: i32, text: &str) -> Value {
             "detected_language": "en-US",
             "recognizer": "sfspeech-ondevice-1",
             "audio_sha256": AUDIO_SHA256,
+            "transcript_generation": 2,
         },
     })
 }
@@ -286,6 +287,32 @@ fn a_transcript_is_attached_once_and_a_redelivery_converges() {
 }
 
 #[test]
+fn the_generation_the_outcome_carries_is_the_one_stored() {
+    let _guard = serial();
+    for generation in [1, 2] {
+        let (directory, path, attempt) = claimed_store(&format!("generation-{generation}"));
+        let session = Session::over(open_file(&path));
+        let mut request = transcript_request(attempt, TRANSCRIPT);
+        request["transcript"]["transcript_generation"] = json!(generation);
+        assert_eq!(
+            success_json(&session.apply(1, &request))["disposition"],
+            "attached"
+        );
+        let stored: i32 = database_at(&path)
+            .conn()
+            .query_row(
+                "SELECT transcript_generation FROM transcript_attachments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, generation);
+        session.close();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 fn unsupported_and_failed_outcomes_keep_the_audio_pending() {
     let _guard = serial();
     for (name, result, state, reason) in [
@@ -380,6 +407,25 @@ fn malformed_requests_are_refused_without_a_write() {
     bad_digest["transcript"]["audio_sha256"] = json!("not-a-digest");
     assert_eq!(
         failure_code(&session.apply(2, &bad_digest)),
+        "transcription_rejected"
+    );
+
+    // An outcome that does not say which recognizer generation made it is refused, not defaulted.
+    let mut without_generation = transcript_request(attempt, TRANSCRIPT);
+    without_generation["transcript"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transcript_generation");
+    let refused = consume(unsafe {
+        let bytes = serde_json::to_vec(&without_generation).unwrap();
+        ohand_core_start_apply_transcription_outcome(session.handle, 5, bytes.as_ptr(), bytes.len())
+    });
+    assert_eq!(refused.status, OHAND_CORE_STATUS_PERMANENT);
+    assert_eq!(refused.code(), "invalid_request");
+    let mut zero_generation = transcript_request(attempt, TRANSCRIPT);
+    zero_generation["transcript"]["transcript_generation"] = json!(0);
+    assert_eq!(
+        failure_code(&session.apply(6, &zero_generation)),
         "transcription_rejected"
     );
 

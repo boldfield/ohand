@@ -18,6 +18,10 @@ import OhAndCoreBridge
 ///   core could not confirm is repeated with the same outcome, which converges, before it is reported as transient.
 /// * **Recognition is bounded.** A recognition that has not answered within `recognitionTimeout` is cancelled and
 ///   ends as a transient failure, so a recognizer that never calls back cannot stall the drain.
+/// * **A replacement is the same job.** A job for a note that is already `transcribed` is a replacement requested
+///   through the core (F71a). The handler runs it as it runs a first transcription and sends the recognizer's
+///   `transcriptGeneration`; the core alone decides `replaced`, `unchanged` or `kept`, and each settles the work. A
+///   replacement of audio that is open for playback waits and is retried (`audio_in_use`).
 /// * Failure reasons are fixed labels, never captured content.
 public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sendable {
     public static let transcriptionJobType = "transcription_attachment"
@@ -25,6 +29,7 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
     private let core: TranscriptionCoreOperations
     private let recognizer: OnDeviceRecognizing
     private let audio: TranscriptionAudioLocating
+    private let audioFence: TranscriptionAudioFencing
     private let interpretation: @Sendable (TranscriptionJobSource) -> InterpretationJobRequest?
     private let applyAttempts: Int
     private let applyRetryDelay: TimeInterval
@@ -41,6 +46,7 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         core: TranscriptionCoreOperations,
         recognizer: OnDeviceRecognizing,
         audio: TranscriptionAudioLocating,
+        audioFence: TranscriptionAudioFencing = NoTranscriptionAudioFence(),
         interpretation: @escaping @Sendable (TranscriptionJobSource) -> InterpretationJobRequest? = { _ in nil },
         applyAttempts: Int = 3,
         applyRetryDelay: TimeInterval = 0.25,
@@ -49,6 +55,7 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         self.core = core
         self.recognizer = recognizer
         self.audio = audio
+        self.audioFence = audioFence
         self.interpretation = interpretation
         self.applyAttempts = max(1, applyAttempts)
         self.applyRetryDelay = applyRetryDelay
@@ -59,11 +66,12 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         core: TranscriptionCoreOperations,
         recognizer: OnDeviceRecognizing,
         layout: ProtectedStorageLayout,
+        audioFence: TranscriptionAudioFencing = NoTranscriptionAudioFence(),
         interpretation: @escaping @Sendable (TranscriptionJobSource) -> InterpretationJobRequest? = { _ in nil }
     ) {
         self.init(
             core: core, recognizer: recognizer, audio: ProtectedStorageAudioLocator(layout: layout),
-            interpretation: interpretation)
+            audioFence: audioFence, interpretation: interpretation)
     }
 
     public func run(_ job: JobCapabilityRun) async -> JobCapabilityResult {
@@ -81,12 +89,20 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         let outcome = TranscriptionOutcomeRequest(
             jobID: job.jobID, leaseAttempt: job.attempt, audioReference: reference, result: .failed)
 
-        if source.lifecycleState == "deleted" || source.transcriptionState == "transcribed" {
+        if source.lifecycleState == "deleted" {
             // Nothing to recognize. The core retires the job with its own content-free reason.
             return await apply(outcome)
         }
+        // An item that is already `transcribed` is a replacement; whether it may be replaced is the core's decision
+        // and is not second-guessed here.
+        let isReplacement = source.transcriptionState == "transcribed"
         guard let audioURL = audio.audioURL(forReference: reference) else {
             return await apply(outcome)
+        }
+        if isReplacement, audioFence.isAudioInUse(at: audioURL) {
+            // Open for playback: wait and retry rather than read it now. A removal in progress is not waited for: the
+            // file is then absent and the core settles the replacement as kept.
+            return .transientFailure(reason: "audio_in_use")
         }
         let digest: String
         switch TranscriptionAudioDigest.read(from: audioURL) {
@@ -118,7 +134,8 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
             }
             let transcript = RecognizedTranscriptRequest(
                 text: text, confidence: confidence, detectedLanguage: nil,
-                recognizer: recognizer.recognizerName, audioSHA256: digest)
+                recognizer: recognizer.recognizerName, audioSHA256: digest,
+                transcriptGeneration: recognizer.transcriptGeneration)
             return await apply(outcome.replacing(.transcript(transcript), interpretation: interpretation(source)))
         }
     }

@@ -242,6 +242,20 @@ impl Session {
         )
     }
 
+    fn retranscription_status(&mut self, scopes: &[&str]) -> Value {
+        self.body(
+            Export::Read,
+            &json!({"command": "retranscription_status", "read_scopes": scopes}),
+        )
+    }
+
+    fn retranscribe(&mut self, item_ids: &[&str]) -> Value {
+        self.body(
+            Export::Control,
+            &json!({"command": "retranscribe", "item_ids": item_ids}),
+        )
+    }
+
     fn sweep(&mut self) -> Value {
         self.body(
             Export::AudioRetention,
@@ -314,6 +328,111 @@ fn status_reports_the_default_policy_and_the_unresolved_sole_audio() {
     assert_eq!(
         unresolved[0]["options"],
         json!(["retry_transcription", "delete_audio"])
+    );
+}
+
+#[test]
+fn retranscription_status_lists_candidates_in_the_read_scopes_only() {
+    let _guard = serial();
+    let store = store("retranscription-status", "personal");
+    let mut session = Session::over(&store.path);
+
+    let status = session.retranscription_status(&["personal"]);
+    assert_eq!(
+        status["candidates"],
+        json!([{"item_id": store.transcribed, "audio_reference": TRANSCRIBED_AUDIO}])
+    );
+    assert_eq!(status["more_candidates"], false);
+    assert_eq!(status["replacements_in_flight"], 0);
+
+    let outside = session.retranscription_status(&["work"]);
+    assert_eq!(outside["candidates"], json!([]));
+
+    session.retranscribe(&[&store.transcribed]);
+    let queued = session.retranscription_status(&["personal"]);
+    assert_eq!(
+        queued["candidates"],
+        json!([]),
+        "a job in flight is not a candidate"
+    );
+    assert_eq!(queued["replacements_in_flight"], 1);
+    assert_eq!(
+        session.retranscription_status(&["work"])["replacements_in_flight"],
+        0
+    );
+}
+
+#[test]
+fn retranscription_status_without_a_read_scope_is_refused() {
+    let _guard = serial();
+    let store = store("retranscription-unscoped", "personal");
+    let mut session = Session::over(&store.path);
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": []}),
+    );
+    session.refuse(Export::Read, &json!({"command": "retranscription_status"}));
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"], "extra": 1}),
+    );
+}
+
+#[test]
+fn retranscribe_queues_candidates_and_reports_skips_by_reason() {
+    let _guard = serial();
+    let store = store("retranscribe", "personal");
+    let mut session = Session::over(&store.path);
+
+    let outcome = session.retranscribe(&[&store.transcribed, &store.sole_source, "missing-item"]);
+    assert_eq!(outcome["outcome"], "queued");
+    assert_eq!(outcome["queued"], 1);
+    assert_eq!(outcome["deferred"], 0);
+    assert_eq!(
+        outcome["skipped"],
+        json!({"not_transcribed": 1, "item_not_found": 1})
+    );
+    let text = outcome.to_string();
+    assert!(!text.contains(&store.transcribed) && !text.contains("missing-item"));
+
+    let repeated = session.retranscribe(&[&store.transcribed]);
+    assert_eq!(repeated["queued"], 0);
+    assert_eq!(repeated["skipped"], json!({"job_in_flight": 1}));
+}
+
+#[test]
+fn retranscribe_is_bounded_and_malformed_requests_queue_nothing() {
+    let _guard = serial();
+    let store = store("retranscribe-bound", "personal");
+    let mut session = Session::over(&store.path);
+
+    let many: Vec<String> = (0..MAX_RETRANSCRIPTION_BATCH + 5)
+        .map(|index| format!("missing-{index}"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let outcome = session.retranscribe(&many);
+    assert_eq!(outcome["deferred"], 5);
+    assert_eq!(
+        outcome["skipped"]["item_not_found"],
+        MAX_RETRANSCRIPTION_BATCH
+    );
+
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": []}),
+    );
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": [""]}),
+    );
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": ["x".repeat(513)]}),
+    );
+    session.refuse(Export::Control, &json!({"command": "retranscribe"}));
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": ["a"], "all": true}),
     );
 }
 

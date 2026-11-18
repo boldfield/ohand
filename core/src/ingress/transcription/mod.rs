@@ -96,6 +96,9 @@ pub struct RecognizedTranscript {
     pub recognizer: String,
     /// Lowercase hex SHA-256 of the audio file the recognizer read.
     pub audio_sha256: String,
+    /// Which recognizer behaviour produced the text; see [`CURRENT_TRANSCRIPT_GENERATION`].
+    /// Never defaulted: the recognizer states it.
+    pub transcript_generation: i32,
 }
 
 /// What the on-device recognizer concluded.
@@ -545,6 +548,9 @@ fn validate_outcome(outcome: &TranscriptionOutcome) -> Result<(), TranscriptionR
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
     if !well_formed_digest {
         return Err(MalformedField("audio_sha256"));
+    }
+    if transcript.transcript_generation < 1 {
+        return Err(MalformedField("transcript_generation"));
     }
     if let Some(language) = &transcript.detected_language {
         if language.is_empty() || language.len() > MAX_LANGUAGE_BYTES {
@@ -1008,8 +1014,8 @@ fn attach_transcript(
         "INSERT INTO transcript_attachments
             (item_id, source_job_id, transcript_record_id, text, attached_revision,
              audio_reference, audio_sha256, recognizer, detected_language, confidence,
-             transcribed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             transcribed_at, transcript_generation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             job.item_id,
             job.job_id,
@@ -1022,6 +1028,7 @@ fn attach_transcript(
             transcript.detected_language,
             transcript.confidence,
             happened_at,
+            transcript.transcript_generation,
         ],
     )?;
     let event = Event::new(

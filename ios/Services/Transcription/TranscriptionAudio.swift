@@ -7,6 +7,25 @@ public protocol TranscriptionAudioLocating: Sendable {
     func audioURL(forReference reference: String) -> URL?
 }
 
+/// Whether a recording is held in place by something the transcription handler must not read around: playback.
+/// Removal of the file is fenced by the retention service, not here (see `TranscriptionJobHandler`).
+public protocol TranscriptionAudioFencing: Sendable {
+    /// True while the file at `url` is open for playback.
+    func isAudioInUse(at url: URL) -> Bool
+}
+
+/// No audio is ever held. The default for a handler that has no playback to wait for.
+public struct NoTranscriptionAudioFence: TranscriptionAudioFencing {
+    public init() {}
+
+    public func isAudioInUse(at url: URL) -> Bool { false }
+}
+
+/// The playback fence the playback service takes a lease in while an item's audio is open.
+extension PlaybackFence: TranscriptionAudioFencing {
+    func isAudioInUse(at url: URL) -> Bool { isHeld(url) }
+}
+
 /// Resolves references against the finalized audio directory of the protected storage layout.
 struct ProtectedStorageAudioLocator: TranscriptionAudioLocating {
     let layout: ProtectedStorageLayout

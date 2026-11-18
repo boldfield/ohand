@@ -8,6 +8,8 @@ import Speech
 /// framework does not know and a language whose on-device model is not installed are both `unsupported`.
 public final class SpeechFrameworkRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     public let recognizerName: String
+    /// Generation 2: every recognized segment is accumulated (see `RecognitionAccumulator`), not only the last.
+    public let transcriptGeneration = 2
     private let mayPromptForPermission: @Sendable () -> Bool
 
     /// `mayPromptForPermission` is asked when speech permission has not been decided; answer `true` only while

@@ -24,12 +24,13 @@ public struct TranscriptionCapability: Sendable {
         core: CoreHandle,
         layout: ProtectedStorageLayout,
         mayPromptForPermission: @escaping @Sendable () -> Bool = { true },
+        audioFence: TranscriptionAudioFencing = NoTranscriptionAudioFence(),
         interpretation: @escaping @Sendable (TranscriptionJobSource) -> InterpretationJobRequest? = { _ in nil }
     ) -> TranscriptionCapability {
         make(
             core: core, layout: layout,
             recognizer: SpeechFrameworkRecognizer(mayPromptForPermission: mayPromptForPermission),
-            interpretation: interpretation)
+            audioFence: audioFence, interpretation: interpretation)
     }
 
     /// The same assembly with another recognizer, for tests that cannot make the speech framework produce speech.
@@ -37,11 +38,13 @@ public struct TranscriptionCapability: Sendable {
         core: CoreHandle,
         layout: ProtectedStorageLayout,
         recognizer: OnDeviceRecognizing,
+        audioFence: TranscriptionAudioFencing = NoTranscriptionAudioFence(),
         interpretation: @escaping @Sendable (TranscriptionJobSource) -> InterpretationJobRequest? = { _ in nil }
     ) -> TranscriptionCapability {
         let client = TranscriptionCoreClient(core: core)
         let handler = TranscriptionJobHandler(
-            core: client, recognizer: recognizer, layout: layout, interpretation: interpretation)
+            core: client, recognizer: recognizer, layout: layout, audioFence: audioFence,
+            interpretation: interpretation)
         return TranscriptionCapability(client: client, handler: handler, recognizer: recognizer)
     }
 

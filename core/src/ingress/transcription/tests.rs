@@ -218,6 +218,7 @@ fn recognized(text: &str) -> RecognizerResult {
         confidence: Some(0.91),
         detected_language: Some("en-US".to_string()),
         recognizer: "on-device-recognizer/1".to_string(),
+        transcript_generation: 1,
         audio_sha256: AUDIO_SHA256.to_string(),
     })
 }
@@ -1330,6 +1331,7 @@ fn malformed_outcomes_are_rejected_before_any_write() {
         confidence: Some(0.5),
         detected_language: Some("en-US".to_string()),
         recognizer: "on-device-recognizer/1".to_string(),
+        transcript_generation: 1,
         audio_sha256: AUDIO_SHA256.to_string(),
     };
     let malformed: Vec<(TranscriptionOutcome, TranscriptionRejection)> = vec![
@@ -1351,6 +1353,7 @@ fn malformed_outcomes_are_rejected_before_any_write() {
             outcome(
                 &job,
                 RecognizerResult::Transcript(RecognizedTranscript {
+                    transcript_generation: 1,
                     audio_sha256: "not-a-digest".to_string(),
                     ..transcript()
                 }),

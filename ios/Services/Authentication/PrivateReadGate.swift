@@ -223,6 +223,10 @@ final class PrivateReadGate {
         try startRetentionRead(operationID: operationID, kind: .status)
     }
 
+    func startRetranscriptionStatus(operationID: UInt64) throws {
+        try startRetentionRead(operationID: operationID, kind: .retranscriptionStatus)
+    }
+
     func startRetentionAudio(operationID: UInt64, itemID: String) throws {
         try startRetentionRead(operationID: operationID, kind: .audio(itemID: itemID))
     }

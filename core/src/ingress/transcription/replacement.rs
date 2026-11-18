@@ -537,7 +537,7 @@ pub(super) fn settle(
                 "UPDATE transcript_attachments SET transcript_generation = ?, recognizer = ?
                   WHERE item_id = ?",
                 rusqlite::params![
-                    CURRENT_TRANSCRIPT_GENERATION,
+                    transcript.transcript_generation,
                     transcript.recognizer,
                     job.item_id
                 ],
@@ -762,7 +762,7 @@ fn replace_transcript(
             transcript.recognizer,
             transcript.detected_language,
             transcript.confidence,
-            CURRENT_TRANSCRIPT_GENERATION,
+            transcript.transcript_generation,
             happened_at,
             job.item_id,
             current.record_id,

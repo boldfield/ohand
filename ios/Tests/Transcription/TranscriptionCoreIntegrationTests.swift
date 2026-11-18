@@ -144,7 +144,8 @@ final class TranscriptionCoreIntegrationTests: IngressStorageTestCase {
 
     private func transcript(_ text: String, digest: String? = nil) -> TranscriptionResultRequest {
         .transcript(RecognizedTranscriptRequest(
-            text: text, confidence: 0.9, detectedLanguage: nil, recognizer: "fixture/1", audioSHA256: digest ?? audioDigest))
+            text: text, confidence: 0.9, detectedLanguage: nil, recognizer: "fixture/1", audioSHA256: digest ?? audioDigest,
+            transcriptGeneration: 2))
     }
 
     // MARK: production composition
@@ -409,6 +410,112 @@ final class TranscriptionCoreIntegrationTests: IngressStorageTestCase {
         guard case .failure(let failure) = read else { return XCTFail("a call after shutdown must fail") }
         XCTAssertEqual(failure.code, "client_shut_down")
         XCTAssertEqual(failure.errorClass, .cancelled)
+    }
+
+    // MARK: replacing a transcript from the retained audio
+
+    private static let shortTranscript = "the end of the note"
+    private static let longTranscript = "the start of the note and then the end of the note"
+
+    /// Stores a note whose machine transcript is `text` at generation 1, through the real pipeline, then closes the
+    /// core so the next session opens the store afresh.
+    private func storedNoteAtGenerationOne(_ text: String) throws -> TranscriptionStore {
+        let store = try seededStore()
+        let first = try makeSession(
+            store,
+            recognizer: FakeOnDeviceRecognizer(outcome: .transcript(text: text, confidence: 0.9), transcriptGeneration: 1))
+        first.service.activate()
+        XCTAssertTrue(first.pump(until: { store.job?.status == "completed" }), "the first transcription never completed")
+        XCTAssertTrue(first.pump(until: { !first.service.isDraining }))
+        first.close()
+        XCTAssertEqual(store.attachments.map(\.text), [text])
+        return store
+    }
+
+    /// Asks the core, as the retention controls do, for a replacement of the note's transcript.
+    private func requestReplacement(in session: TranscriptionSession) throws -> RetentionControlAnswer {
+        let operationID: UInt64 = 900
+        try session.core.startRetentionControl(
+            operationID: operationID, command: .retranscribe(itemIDs: [TranscriptionFixtures.itemID]))
+        XCTAssertTrue(
+            session.pump(until: { session.otherEvents.contains { $0.operationID == operationID } }),
+            "the core never answered the request")
+        let event = try XCTUnwrap(session.otherEvents.first { $0.operationID == operationID })
+        guard case .success(let data) = event.outcome else {
+            XCTFail("the request failed")
+            throw TranscriptionStore.SeedFailure.statementFailed
+        }
+        return try JSONDecoder().decode(RetentionControlAnswer.self, from: data)
+    }
+
+    private func runReplacement(
+        _ store: TranscriptionStore, recognizer: FakeOnDeviceRecognizer, removingAudio: Bool = false
+    ) throws -> TranscriptionSession {
+        let session = try makeSession(store, recognizer: recognizer)
+        let answer = try requestReplacement(in: session)
+        XCTAssertEqual(answer.outcome, "queued")
+        XCTAssertEqual(answer.queued, 1)
+        if removingAudio { try FileManager.default.removeItem(at: audioURL) }
+        session.service.activate()
+        XCTAssertTrue(
+            session.pump(until: { store.replacementOutcomes.first.map { !$0.isEmpty } ?? false }),
+            "the replacement never settled")
+        XCTAssertTrue(session.pump(until: { !session.service.isDraining }))
+        return session
+    }
+
+    func testARequestedReplacementRunsAndTheLongerTranscriptBecomesTheItemsText() throws {
+        let store = try storedNoteAtGenerationOne(Self.shortTranscript)
+        let revisionBefore = try XCTUnwrap(store.item?.revision)
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: Self.longTranscript, confidence: 0.8))
+
+        let session = try runReplacement(store, recognizer: recognizer)
+
+        XCTAssertEqual(store.replacementOutcomes, ["replaced"])
+        XCTAssertEqual(recognizer.callCount, 1)
+        XCTAssertEqual(store.attachments.map(\.text), [Self.longTranscript])
+        XCTAssertEqual(store.item?.transcriptionState, "transcribed")
+        XCTAssertEqual(store.item?.revision, revisionBefore + 1)
+        XCTAssertEqual(store.count(of: "superseded_transcripts"), 1, "the earlier transcript is kept as history")
+        XCTAssertEqual(try Data(contentsOf: audioURL), TranscriptionFixtures.audioBytes)
+        XCTAssertEqual(session.sender.requestCount, 0, "nothing left the device")
+    }
+
+    func testAnIdenticalReplacementTranscriptEndsUnchangedWithoutANewRevision() throws {
+        let store = try storedNoteAtGenerationOne(Self.shortTranscript)
+        let revisionBefore = try XCTUnwrap(store.item?.revision)
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: Self.shortTranscript, confidence: 0.9))
+
+        _ = try runReplacement(store, recognizer: recognizer)
+
+        XCTAssertEqual(store.replacementOutcomes, ["unchanged"])
+        XCTAssertEqual(store.attachments.map(\.text), [Self.shortTranscript])
+        XCTAssertEqual(store.item?.revision, revisionBefore, "no new revision")
+        XCTAssertEqual(store.count(of: "superseded_transcripts"), 0)
+    }
+
+    func testAFailingRecognizerKeepsTheOldTextAndTheItemTranscribed() throws {
+        let store = try storedNoteAtGenerationOne(Self.shortTranscript)
+        let revisionBefore = try XCTUnwrap(store.item?.revision)
+
+        _ = try runReplacement(store, recognizer: FakeOnDeviceRecognizer(outcome: .failed))
+
+        XCTAssertEqual(store.replacementOutcomes, ["kept"])
+        XCTAssertEqual(store.attachments.map(\.text), [Self.shortTranscript])
+        XCTAssertEqual(store.item?.transcriptionState, "transcribed", "a failed replacement never fails the item")
+        XCTAssertEqual(store.item?.revision, revisionBefore)
+    }
+
+    func testARecordingThatDisappearsBeforeTheJobRunsLeavesTheOldTextInPlace() throws {
+        let store = try storedNoteAtGenerationOne(Self.shortTranscript)
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: Self.longTranscript, confidence: nil))
+
+        _ = try runReplacement(store, recognizer: recognizer, removingAudio: true)
+
+        XCTAssertEqual(store.replacementOutcomes, ["kept"])
+        XCTAssertEqual(recognizer.callCount, 0, "a missing file is never recognized")
+        XCTAssertEqual(store.attachments.map(\.text), [Self.shortTranscript])
+        XCTAssertEqual(store.item?.transcriptionState, "transcribed")
     }
 
     // MARK: the registered handler

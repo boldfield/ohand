@@ -18,6 +18,13 @@
 //!   `retry_transcription` and `delete_audio`. Such audio never expires, whatever the period is;
 //!   the way out is to retry transcription or to delete the item. Storage pressure is measured by
 //!   native code, not here.
+//! * `{"command": "retranscription_status", "read_scopes"}` answers `{"operation_id",
+//!   "candidates", "more_candidates", "replacements_in_flight"}`. `candidates` lists up to
+//!   `MAX_RETRANSCRIPTION_BATCH` live items in the scopes whose machine transcript an earlier
+//!   recognizer generation produced (F71a), each `{"item_id", "audio_reference"}`, in item id
+//!   order; `more_candidates` is true when further ones exist. `replacements_in_flight` is the
+//!   number of replacement jobs, for items in the scopes, queued or running. Native decides which
+//!   recordings are still on the phone; these identifiers are never logged or shown.
 //! * `{"command": "get_audio", "item_id", "read_scopes"}` answers `{"operation_id", "item_id",
 //!   "audio_reference", "sole_source"}`. `audio_reference` is `null` when the item holds no audio.
 //!   An item that is unknown, deleted or outside the scopes fails as `not_found`, indistinguishably.
@@ -34,6 +41,16 @@
 //!   `not_retryable` (`transcription_state`); `job_in_flight`. A refusal wrote nothing. An unknown
 //!   item fails as `not_found`.
 //!
+//! * `{"command": "retranscribe", "item_ids"}` queues one on-device replacement transcription per
+//!   named item that is a candidate (F71a), at most `MAX_RETRANSCRIPTION_BATCH` per call; the
+//!   rest are reported as `deferred`. An empty list, an empty or oversized identifier is
+//!   `invalid_request`. It answers `{"operation_id", "outcome": "queued", "queued", "deferred",
+//!   "skipped"}` where `queued` is a count and `skipped` maps each content-free reason
+//!   (`item_not_found`, `item_deleted`, `not_transcribed`, `text_corrected`, `audio_unavailable`,
+//!   `generation_current`, `job_in_flight`) to its count. No identifier or job id is returned.
+//!   Whether a recording is still on the phone is decided natively before this is sent; the form
+//!   that requests every candidate is not offered here.
+//!
 //! Failures are normalized and never echo identifiers or content.
 
 use super::capture::OHAND_CORE_MAX_CAPTURE_REQUEST_BYTES;
@@ -42,10 +59,15 @@ use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::domain::items::{load_item_state, LifecycleState};
 use crate::ingress::transcription::queue::{requeue_transcription, RequeueError, RequeueRefusal};
+use crate::ingress::transcription::{
+    request_retranscription, retranscription_candidates, RetranscriptionSelection,
+    MAX_RETRANSCRIPTION_BATCH,
+};
 use crate::lifecycle::retention::{
     assess_audio_retention, stored_retention_policy, unresolved_sole_audio, RetentionOption,
     RetentionPolicy, StoragePressure, UnresolvedReason,
 };
+use crate::privacy::routing::JOB_TYPE_TRANSCRIPTION_ATTACHMENT;
 use crate::store::events::ItemScope;
 use crate::store::schema::{Clock, Database, SystemClock};
 use chrono::{Duration, SecondsFormat};
@@ -97,6 +119,7 @@ fn option_name(option: RetentionOption) -> &'static str {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetentionReadKind {
     Status,
+    RetranscriptionStatus,
     Audio { item_id: String },
 }
 
@@ -150,6 +173,61 @@ pub fn read_retention(database: &mut Database, read: &RetentionRead) -> Result<V
             }
             Ok(json!({ "policy": policy_json(connection)?, "unresolved": unresolved }))
         }
+        RetentionReadKind::RetranscriptionStatus => {
+            let in_scope = |item_id: &str| -> Result<bool, AbiFailure> {
+                Ok(load_item_state(&transaction, item_id)
+                    .map_err(|error| store_failure(&error))?
+                    .is_some_and(|item| read.read_scopes.contains(&item.scope)))
+            };
+            let candidate_ids = retranscription_candidates(connection, usize::MAX >> 1)
+                .map_err(|error| store_failure(&error))?;
+            let mut candidates = Vec::new();
+            let mut more_candidates = false;
+            for item_id in candidate_ids {
+                if !in_scope(&item_id)? {
+                    continue;
+                }
+                if candidates.len() == MAX_RETRANSCRIPTION_BATCH {
+                    more_candidates = true;
+                    break;
+                }
+                let audio_reference: Option<String> = connection
+                    .query_row(
+                        "SELECT c.audio_reference FROM items i
+                           JOIN captures c ON c.capture_id = i.capture_id
+                          WHERE i.item_id = ?",
+                        [&item_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(sqlite_failure)?;
+                candidates.push(json!({ "item_id": item_id, "audio_reference": audio_reference }));
+            }
+            let mut statement = connection
+                .prepare(
+                    "SELECT DISTINCT j.item_id FROM jobs j
+                       JOIN transcript_replacement_requests r ON r.job_id = j.job_id
+                      WHERE j.job_type = ? AND j.status IN ('queued', 'running')",
+                )
+                .map_err(sqlite_failure)?;
+            let in_flight_ids = statement
+                .query_map([JOB_TYPE_TRANSCRIPTION_ATTACHMENT], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(sqlite_failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_failure)?;
+            let mut replacements_in_flight = 0;
+            for item_id in in_flight_ids {
+                if in_scope(&item_id)? {
+                    replacements_in_flight += 1;
+                }
+            }
+            Ok(json!({
+                "candidates": candidates,
+                "more_candidates": more_candidates,
+                "replacements_in_flight": replacements_in_flight,
+            }))
+        }
         RetentionReadKind::Audio { item_id } => {
             let item = load_item_state(&transaction, item_id)
                 .map_err(|error| store_failure(&error))?
@@ -183,6 +261,9 @@ enum ReadCommand {
     RetentionStatus {
         read_scopes: Vec<String>,
     },
+    RetranscriptionStatus {
+        read_scopes: Vec<String>,
+    },
     GetAudio {
         item_id: String,
         read_scopes: Vec<String>,
@@ -194,6 +275,9 @@ impl ReadCommand {
         let (kind, scope_names) = match self {
             ReadCommand::RetentionStatus { read_scopes } => {
                 (RetentionReadKind::Status, read_scopes)
+            }
+            ReadCommand::RetranscriptionStatus { read_scopes } => {
+                (RetentionReadKind::RetranscriptionStatus, read_scopes)
             }
             ReadCommand::GetAudio {
                 item_id,
@@ -248,6 +332,7 @@ pub fn store_retention_period(
 enum ControlRequest {
     SetPeriod(RetentionPolicy),
     RetryTranscription { item_id: String },
+    Retranscribe { item_ids: Vec<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +340,7 @@ enum ControlRequest {
 enum ControlCommand {
     SetPeriod { period_seconds: i64 },
     RetryTranscription { item_id: String },
+    Retranscribe { item_ids: Vec<String> },
 }
 
 impl ControlCommand {
@@ -273,6 +359,16 @@ impl ControlCommand {
                     return Err(AbiFailure::INVALID_REQUEST);
                 }
                 Ok(ControlRequest::RetryTranscription { item_id })
+            }
+            ControlCommand::Retranscribe { item_ids } => {
+                if item_ids.is_empty()
+                    || item_ids
+                        .iter()
+                        .any(|item_id| !acceptable_identifier(item_id))
+                {
+                    return Err(AbiFailure::INVALID_REQUEST);
+                }
+                Ok(ControlRequest::Retranscribe { item_ids })
             }
         }
     }
@@ -300,6 +396,28 @@ fn apply_control(
         ControlRequest::SetPeriod(policy) => {
             store_retention_period(database, clock, policy)?;
             Ok(json!({ "outcome": "stored", "period_seconds": period_seconds(policy) }))
+        }
+        ControlRequest::Retranscribe { item_ids } => {
+            let result = request_retranscription(
+                database,
+                RetranscriptionSelection::Items(item_ids),
+                MAX_RETRANSCRIPTION_BATCH,
+                clock.now(),
+            )
+            .map_err(|error| store_failure(&error))?;
+            let mut skipped = serde_json::Map::new();
+            for (_, reason) in &result.skipped {
+                let count = skipped
+                    .entry(reason.as_str().to_string())
+                    .or_insert_with(|| json!(0));
+                *count = json!(count.as_u64().unwrap_or(0) + 1);
+            }
+            Ok(json!({
+                "outcome": "queued",
+                "queued": result.queued.len(),
+                "deferred": result.deferred,
+                "skipped": skipped,
+            }))
         }
         ControlRequest::RetryTranscription { item_id } => {
             match requeue_transcription(database, item_id, clock.now()) {
@@ -381,7 +499,7 @@ pub unsafe extern "C" fn ohand_core_start_retention_read(
     })
 }
 
-/// Queues one retention control (`set_period` or `retry_transcription`) described by the
+/// Queues one retention control (`set_period` or `retry_transcription` or `retranscribe`) described by the
 /// `request_len` JSON bytes at `request` (see the module documentation). Unknown commands and
 /// fields, empty identifiers and out-of-bounds periods are refused as `invalid_request` before
 /// anything is queued. Native must issue it only for an authenticated session. The outcome event

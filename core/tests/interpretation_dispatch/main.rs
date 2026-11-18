@@ -935,6 +935,7 @@ fn an_attached_transcript_is_what_the_provider_sees_with_the_transcript_basis() 
                 confidence: Some(0.8),
                 detected_language: Some("en-US".to_string()),
                 recognizer: "on-device-recognizer/1".to_string(),
+                transcript_generation: 1,
                 audio_sha256: "a".repeat(64),
             }),
             interpretation: None,
