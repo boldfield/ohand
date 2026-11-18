@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod replacement;
+
 const CAPTURE_ID: &str = "3f9c1e52-0000-4000-8000-0000000000c5";
 const ROUTE_ID: &str = "route-personal";
 const AUDIO_REFERENCE: &str = "staging/2026-10-08/clip-5.m4a";

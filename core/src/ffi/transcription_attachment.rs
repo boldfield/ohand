@@ -384,6 +384,25 @@ fn apply_job(outcome: TranscriptionOutcome, operation_id: u64) -> JobFn {
                 readout.revision = Some(*revision);
                 readout.interpretation = Some(interpretation_readout(interpretation));
             }
+            TranscriptionDisposition::Replaced {
+                revision,
+                interpretation,
+            }
+            | TranscriptionDisposition::AlreadyReplaced {
+                revision,
+                interpretation,
+            } => {
+                readout.disposition = "replaced";
+                readout.revision = Some(*revision);
+                readout.interpretation = Some(interpretation_readout(interpretation));
+            }
+            TranscriptionDisposition::Unchanged => {
+                readout.disposition = "unchanged";
+            }
+            TranscriptionDisposition::Kept { reason } => {
+                readout.disposition = "kept";
+                readout.discard_reason = Some(reason);
+            }
             TranscriptionDisposition::Pending { state } => {
                 readout.disposition = "pending";
                 readout.transcription_state = Some(state.as_str());

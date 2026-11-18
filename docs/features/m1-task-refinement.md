@@ -5091,6 +5091,15 @@ Validation: `make check`, `make test`.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800. No trial task depends on F71a, F71b or F71c: the trial candidate contains F69, so notes captured during the trial are complete, and these three tasks repair notes captured before it. Because F71a adds a schema step, a candidate cut after it lands upgrades the trial database by one more step, which T10b's procedure covers as it stands.
 
+#### F71a amendment 1 (2026-11-17, coordinator): the core does not learn of audio removal; the queue hook is allowed
+
+Two findings from review round 2 of PR #411, both caused by the specification, not by the worker.
+
+1. **"Audio recorded as removed" is not something the core knows.** The F71a text above excludes a candidate whose audio is "recorded as removed". That was the coordinator's error: retention and user removal are native file effects recorded in the native ledger (`ios/Services/AudioRetention/AudioRetentionLedger.swift`); the core never opens an audio file (`core/src/ffi/audio_retention.rs`, module comment) and `captures.audio_reference` stays set after the file is gone. The worker's `recorded_audio_removals` table and `record_audio_removal` have no production caller and cannot have one inside F71a's paths, and no table could know of removals made before step 15. Decision: the core does not record removals. F71a removes that table, the function, its re-export and its tests, and corrects the step-15 schema comment. The core's candidate rule reads: a live, `transcribed` item whose attachment has a lower generation, whose current text is that transcript and whose capture still has an audio reference. Whether the file exists is decided natively, by F71b (its amendment 1). Acceptance criterion 2's "audio recorded removed" case is dropped; "audio reference gone" stays. A replacement job whose audio file is missing ends through the handler's existing missing-audio outcome and settles as `kept` with a content-free reason, and a test covers that settlement.
+2. **`core/src/jobs/queue/mod.rs` is allowed, additively.** A replacement request must not be left looking in flight when the queue cancels its job outside the settle path, and the cancellation happens in that file. F71a may add the request-settling hook to the queue's existing cancellation paths (`claim_job_with_lease_in_tx`, both paths, and `cancel_job_in_tx`) and nothing else there. No open task owns that file.
+
+The red checks on head `55edf053` were hosted-runner faults, not findings about the change: the upgrade job's simulator boot failed with "The iOS 27.2 simulator runtime is not available. runtime path not found" (exit 145), and the largest-text accessibility audit failed `testHomePopulated` on a change that touches no Swift. The next head needs its own exact-head green run, as always; a job that fails for a runner fault is rerun, never waived. The PR description is updated to match the head.
+
 ### F71b
 
 Boundary and native handler: request and run transcript replacements
@@ -5119,6 +5128,18 @@ Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
 
+#### F71b amendment 1 (2026-11-17, coordinator): native code decides whether the recording still exists
+
+Follows F71a amendment 1. The core lists candidates by what it knows; only native code knows whether an audio file is still on the phone, including files removed before this feature existed. F71b therefore changes as follows; where this amendment and the text above disagree, the amendment governs.
+
+- `retranscription_status` answers, in an authenticated read session, the candidate items in the read scopes as `item_id` and `audio_reference` pairs (bounded by `MAX_RETRANSCRIPTION_BATCH`, with a flag when more exist) and the number of replacement jobs queued or running. Like the boundary's other answers, these identifiers go to the native service and are never logged or shown.
+- `RetentionControlService.retranscriptionStatus()` keeps only the candidates whose recording is present: the file exists at the layout's path for that reference and the retention ledger does not record it as removed, decided with the same file-system seam and ledger `AudioRetentionService` and playback availability use. It reports that count, and the count of candidates whose recording is gone separately.
+- `retranscribe` is always sent with explicit `item_ids`, the present ones; the "all candidates" form of the command is not offered to native callers and may be omitted from the boundary. A recording removed between the status and the job is the handler's existing missing-audio outcome, which the core settles as `kept`.
+- Added acceptance: a test in `ios/Tests/AudioRetention/` with one candidate whose file is present, one whose file is absent and one the ledger records as removed asserts that only the first is counted and requested; and a real-core test that a job whose file disappears before it runs ends with the old text in place.
+- Added owned path: `ios/Services/AudioRetention/AudioRetentionLedger.swift` is read, not changed.
+
+F71c shows the count of recordings that can be redone and, when some are gone, says how many notes cannot be redone because their recording was already removed; its wording rule is unchanged.
+
 ### F71c
 
 Settings: turn kept recordings into text again
@@ -5144,3 +5165,67 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
+
+### CI04
+
+Recover once when a simulator never becomes responsive
+
+Requested by the maintainer on 2026-11-17. Seven `ios.yml` runs started that day across three pull requests (F69 #412, F70 #410, F71a #411). One was cancelled and one failed on a real compile error. Of the other five, four had at least one job fail for a reason outside their diff, some on two or three attempts in a row, and one passed first time. The runner image (`xcode-27-arm64` 20261103.629) and the selected runtime (iOS 27.2) are the ones F68's green run used on 2026-11-11, so this is host pressure on the hosted runners, not an image change. The failures, by kind:
+
+| Kind | Count | Where |
+| --- | --- | --- |
+| `prepare-simulator.sh`: "simulator did not answer 10 probes in a row within 3s inside 480s" | 3 | run 44148283529 attempt 1 (simulator job, settle step); 44145594127 attempt 1 and 44187328566 attempts 1 and 2 (regular-width walkthrough) |
+| Launch or device fault before any assertion ("Failed to launch", "Unable to find a device matching the provided destination specifier ... Shutdown", "Device does not have a 'default' display port") | 3 | 44148283529 attempt 2 (CaptureProbe handoff); 44145594127 attempts 1 and 2 (Tauri job) |
+| Test assertion failed on a slow host or a flaky test | 4 | CaptureProbe "app never left the foreground" (44148283529 attempt 3); `testHomePopulated` "excused under or on glass" (44161872581, 44187328566); accessibility audit "did not run", code -56 (44187328566) |
+| `upgrade.yml`: "iOS 27.2 simulator runtime is not available. runtime path not found" | 1 | F71a's first run |
+
+CI04 owns the first row, CI05 the second. The third and fourth rows are not owned by either task: a failed assertion is never retried automatically, and the coordinator keeps rerunning those by hand until each has its own diagnosis.
+
+`ios/scripts/prepare-simulator.sh` boots the device once and exits 1 when `wait_for_simulator_to_respond` or `wait_for_host_to_settle` times out (`:189-201`). Every caller then fails its job. A rerun on a fresh runner passes, which is what the coordinator has been doing by hand. Whether a second boot on the same starved host also passes is not known; this task makes the attempt and records the result so the rate can be read from evidence.
+
+Scope:
+1. When the device does not become responsive, or the host does not settle, `prepare-simulator.sh` makes exactly one recovery attempt: write the host snapshot, shut down every simulator, stop the CoreSimulator service so it restarts clean, wait for the host to quieten (bounded, at most 120 s, diagnostic CPU idle logged), then repeat the same preparation with the same gates and the same timeouts. For `--erase` the device is erased again; for `--clone` the failed clone is deleted and a new one made from the template, and the new UDID replaces the old one in the `--udid-file`. A second failure exits 1 as now. No gate, probe count or timeout is lowered, and there is never a third attempt.
+2. Every recovery is visible. The script prints a GitHub `::warning::` line naming the label, the kind and which gate failed, appends a line to `host-pressure.txt` with kind `<kind>-recovered` or `<kind>-failed-twice`, and appends one line per recovery to `simulator-recoveries.txt` in the evidence directory (label, kind, first-attempt seconds, second-attempt seconds, outcome). The file is absent when no recovery happened.
+3. The three jobs that call the script (`simulator`, `walkthrough`, `accessibility`) upload `simulator-recoveries.txt` inside their existing routine artifact; no new artifact and no new upload step.
+4. AGENTS.md, "Required checks for macOS workers": the sentence describing the preparation gate gains the one-recovery rule and the evidence file. Nothing else in AGENTS.md changes.
+
+Owned paths: `ios/scripts/prepare-simulator.sh`, `ios/scripts/test_prepare_simulator.py`, `.github/workflows/ios.yml` (only what item 3 needs, if anything), the one AGENTS.md sentence.
+
+Not owned: the probe counts and timeouts, `quiet-host.sh`, `select_simulator.py`, the runner label, `upgrade.yml`, any test source, any retry of a test run (CI05).
+
+Acceptance:
+1. `test_prepare_simulator.py` runs the script against a fake `xcrun` on `PATH` (a stub script the test writes, so the test runs on Linux) and asserts: a device that answers on the first attempt produces no recovery, no warning and no `simulator-recoveries.txt`; a device that fails the first attempt and answers on the second exits 0, with the warning line, the `-recovered` pressure line and one recoveries line; a device that fails twice exits 1 with `-failed-twice` and exactly two boot attempts; the `--clone` recovery deletes the first clone and writes the second UDID to the `--udid-file`. The timeouts are made injectable through environment variables read only by the tests so the suite runs in seconds; the defaults stay 480 s and the test asserts the defaults are unchanged.
+2. `make check` passes (it runs `ios-check`, which runs these tests).
+3. Exact-head `ios.yml` evidence. The PR states, for its own run, whether any recovery happened and quotes the recoveries file if so. A run with no recovery is acceptable; the worker does not manufacture a starved host on the hosted runner.
+4. The artifact budget in AGENTS.md still holds (the new file is a few lines of text).
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 950: every native task currently needs manual reruns to land. No dependencies.
+
+### CI05
+
+Retry a simulator test step once when it failed before any assertion ran
+
+Second row of the table in CI04. In these failures no product code was judged: the test runner could not launch the app or could not find a booted device. A manual rerun passes. The rule that keeps this from hiding real failures: a step is retried only when every failure in its log matches a closed list of launch and device signatures. One failed assertion of any other kind means no retry.
+
+Scope:
+1. `ios/scripts/classify_simulator_fault.py` reads a step log and prints `infrastructure` or `test-failure`, with the matched lines. It answers `infrastructure` only when the log has at least one match from the closed list and no failing test whose message is outside the list. The initial list is the three signatures in CI04's table, taken verbatim from the cited runs' logs (the worker reads those logs with `gh run view <id> --attempt <n> --log-failed`; they are kept 90 days). "app never left the foreground", any `XCTAssert` failure, an accessibility audit finding and a compile error are `test-failure`. The list lives in one place in that file, each entry with the run it was observed in.
+2. `ios/scripts/retry-simulator-step.sh <udid> <log> -- <command...>` runs the command; on a non-zero exit it classifies the log; for `infrastructure` it prints a `::warning::` line, re-prepares the device with `prepare-simulator.sh <udid>` (a warm boot, with CI04's gates), keeps the first log beside the second as `<log>.attempt-1`, appends a line to `simulator-recoveries.txt` (CI04's file and format, kind `test-launch`), and runs the command once more. The second exit status is final. `test-failure` returns the original status immediately.
+3. `ios.yml` runs its `xcodebuild test-without-building` invocations and app-launch smoke scripts through the wrapper: in the `simulator` job (directly or inside the scripts those steps call), and in the two Tauri steps "Install, launch and assert echo round-trip" and "Native-to-Tauri handoff UI tests". The walkthrough and accessibility jobs are wired the same way where their scripts invoke `xcodebuild`. A step's result bundle path is made unique per attempt so the second attempt does not fail on an existing bundle, and the failure-diagnostics export still finds both.
+4. AGENTS.md, same section: one sentence stating the rule in the first paragraph above and naming the evidence file.
+
+Owned paths: the two new scripts and their unit tests (`ios/scripts/test_classify_simulator_fault.py`, `ios/scripts/test_retry_simulator_step.py`), `.github/workflows/ios.yml`, the `ios/scripts/*-simulator.sh` scripts (only the invocation lines), `ios/scripts/check_project_config.py` and its tests if a structural check is added, the Makefile `ios-check` target (adding the new tests), the one AGENTS.md sentence.
+
+Not owned: any test source under `ios/` or `app/`, any assertion, timeout or expectation inside a test, `upgrade.yml`, `prepare-simulator.sh` (CI04).
+
+Acceptance:
+1. Classifier tests use synthetic log excerpts shaped like the cited ones (no copied device identifiers) and assert: each listed signature alone is `infrastructure`; each of "app never left the foreground", an `XCTAssertEqual` failure, the `testHomePopulated` message and a compile error is `test-failure`; a log with one listed signature and one unlisted test failure is `test-failure`; an empty or missing log is `test-failure`.
+2. Wrapper tests with stub commands assert: success runs once; an infrastructure failure followed by success exits 0 with two runs, the warning, the kept first log and one recoveries line; an infrastructure failure twice exits non-zero after exactly two runs; a test failure exits with the original status after exactly one run and no re-preparation.
+3. A structural test fails if `ios.yml` or a `*-simulator.sh` script invokes `xcodebuild test-without-building` outside the wrapper.
+4. `make check` passes; exact-head `ios.yml` evidence; the PR states whether any retry happened in its own run and quotes the recoveries file if so.
+5. The artifact budget still holds: a kept first-attempt log is text and is uploaded inside the existing routine artifact.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940. Depends on CI04 (shared `ios.yml`, the recoveries file and the warm re-preparation).

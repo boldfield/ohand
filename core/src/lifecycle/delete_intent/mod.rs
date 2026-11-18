@@ -667,6 +667,17 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         rusqlite::params![item_id],
     )?;
 
+    // Delete the transcripts replacements displaced and the replacement requests: both hold or
+    // point at readable transcript content.
+    tx.execute(
+        "DELETE FROM superseded_transcripts WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+    tx.execute(
+        "DELETE FROM transcript_replacement_requests WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
     // Delete proposal rows (suggestions, interpretation results)
     tx.execute(
         "DELETE FROM proposals WHERE item_id = ?",

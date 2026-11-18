@@ -4763,7 +4763,8 @@
         "core/src/lifecycle/ and core/src/ffi/reset* (removal of the new rows only)",
         "core/src/export/ (superseded transcripts only)",
         "core/tests/",
-        "docs/architecture/m1-contracts.md"
+        "docs/architecture/m1-contracts.md",
+        "core/src/jobs/queue/mod.rs (additive: settle a replacement request when the queue cancels its job)"
       ],
       "intent": "Let the core replace an uncorrected machine transcript with a new on-device transcription of the same retained audio, on explicit request, keeping the superseded text as history and leaving retention unchanged.",
       "acceptance": [
@@ -4790,7 +4791,8 @@
         "ios/Services/Transcription/",
         "ios/Services/AudioRetention/RetentionControlService.swift",
         "ios/Tests/Transcription/",
-        "ios/Tests/AudioRetention/"
+        "ios/Tests/AudioRetention/",
+        "ios/Services/AudioRetention/AudioRetentionLedger.swift (read only)"
       ],
       "intent": "Expose the replacement request and status over the retention boundary, carry the recognizer generation with each outcome, and have the native handler run replacement jobs.",
       "acceptance": [
@@ -4831,6 +4833,57 @@
         "app/data-settings/RetentionSettingsModel.swift",
         "app/data-settings/RetentionSettingsView.swift",
         "app/data-settings/RetentionSettingsText.swift"
+      ]
+    },
+    {
+      "key": "CI04",
+      "parent": null,
+      "title": "Recover once when a simulator never becomes responsive",
+      "file_scope": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/test_prepare_simulator.py",
+        ".github/workflows/ios.yml",
+        "AGENTS.md (one sentence)"
+      ],
+      "intent": "Make the simulator preparation attempt one recorded recovery before failing the job, without lowering any gate.",
+      "acceptance": [
+        "See the CI04 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/test_prepare_simulator.py",
+        ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "CI05",
+      "parent": null,
+      "title": "Retry a simulator test step once when it failed before any assertion ran",
+      "file_scope": [
+        "ios/scripts/classify_simulator_fault.py",
+        "ios/scripts/retry-simulator-step.sh",
+        "ios/scripts/test_classify_simulator_fault.py",
+        "ios/scripts/test_retry_simulator_step.py",
+        ".github/workflows/ios.yml",
+        "ios/scripts/*-simulator.sh (invocation lines)",
+        "ios/scripts/check_project_config.py",
+        "Makefile (ios-check)",
+        "AGENTS.md (one sentence)"
+      ],
+      "intent": "Retry a simulator test step once only when every failure in its log is a listed launch or device fault; never retry a failed assertion.",
+      "acceptance": [
+        "See the CI05 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI04"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/smoke-capture-simulator.sh",
+        "ios/scripts/prepare-simulator.sh"
       ]
     }
   ],
@@ -5707,6 +5760,10 @@
     ],
     "F71c": [
       "F71b"
+    ],
+    "CI04": [],
+    "CI05": [
+      "CI04"
     ]
   },
   "retained_dependency_overrides": {
@@ -6041,6 +6098,14 @@
     {
       "date": "2026-11-17",
       "change": "F71a, F71b and F71c added at the maintainer's request: re-transcribe voice notes stored before F69 from their retained audio. The core stores one transcript per item, so F71a adds an explicit, guarded replacement of an uncorrected machine transcript (schema step 15, superseded text kept as history, retention clock unchanged), F71b the boundary and native handler, F71c one explicit action on the retention screen. Chain F71a -> F71b (also after F69) -> F71c. No trial task depends on them. The repair reaches only notes whose audio is still retained."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F71a amendment 1 and F71b amendment 1, from review round 2 of PR #411: the core does not record audio removal (a native file effect held in the native ledger), so F71a drops its recorded_audio_removals table and lists candidates by audio reference only, and F71b decides natively which candidates still have a recording and requests only those. F71a may add its request-settling hook to core/src/jobs/queue/mod.rs. The specification's 'recorded as removed' exclusion was the coordinator's error."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "CI04 and CI05 added at the maintainer's request: every ios.yml run started on 2026-11-17 needed manual reruns for hosted-runner simulator faults. CI04 gives prepare-simulator.sh one recorded recovery attempt; CI05 retries a test step once when every failure in its log is a listed launch or device fault. Failed assertions are never retried."
     }
   ]
 }
