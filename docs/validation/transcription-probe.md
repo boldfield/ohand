@@ -7,7 +7,8 @@ P04 probes whether `SFSpeechRecognizer` can transcribe synthetic audio **on the 
 | Path | Role |
 | --- | --- |
 | `ios/TranscriptionProbe/Shared/TranscriptionModel.swift` | Testable core (Foundation only): `SpeechPermission`, `RecognizerSnapshot`, `evaluateReadiness` (authorization, recognizer existence, on-device support and availability to a `PendingReason` or nil), `TranscriptionStatus`, `TranscriptionCoordinator` (state machine, cancellation, duration, interruption log), `TranscriptionFixture` (deterministic fixture lookup). |
-| `ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift` | The only code that touches `SFSpeechRecognizer`. Compiled into both the probe app and the test bundle. |
+| `ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift` | The only code that touches `SFSpeechRecognizer`, plus `RecognitionResultReducer`, which accumulates its results. Compiled into both the probe app and the test bundle. |
+| `ios/Services/Transcription/RecognitionAccumulator.swift`, `RecognitionResultValue+Speech.swift` | The accumulator the app's recognizer also uses, compiled into the probe and its tests through `ios/project.yml` (shared, not copied, so one set of tests covers both). |
 | `ios/TranscriptionProbe/Sources/` | Probe screen (`AppDelegate.swift`) and `SyntheticSpeechFixtureGenerator`, which renders a fixed phrase with `AVSpeechSynthesizer`. |
 | `ios/TranscriptionProbe/Tests/TranscriptionProbeTests.swift` | XCTest suite with a fake engine, plus tests of the real engine that need no permission or model. |
 | `ios/TranscriptionProbe/Info.plist` | `NSSpeechRecognitionUsageDescription` only. The probe transcribes files and never records, so it has no microphone string. |
@@ -16,7 +17,7 @@ P04 probes whether `SFSpeechRecognizer` can transcribe synthetic audio **on the 
 
 ## On-device requirement (no cloud fallback)
 
-Every request the probe makes is built with `requiresOnDeviceRecognition = true` and `shouldReportPartialResults = false`. Before a request is built, two gates run:
+Every request the probe makes is built with `requiresOnDeviceRecognition = true` and `shouldReportPartialResults = false`. On-device recognition delivers one finished result per segment, not one result for the file: a pause of about 3 s or about a minute of continuous speech ends a segment, and only the last result has `isFinal` set. The engine therefore accumulates every result in audio order (a result that restates an earlier one replaces it) and ends the run on the final result; a `kAFAssistantErrorDomain` 1110 after at least one segment returns the accumulated transcript (inferred from the error's meaning, not observed on a device), and any other error is a failure. Before a request is built, two gates run:
 
 1. `TranscriptionCoordinator.startTranscription` re-reads a fresh `RecognizerSnapshot` and refuses to call the engine unless `evaluateReadiness` returns nil.
 2. `SpeechFrameworkEngine.recognize` independently refuses to create a request unless the recognizer exists and `supportsOnDeviceRecognition` is true, and completes with a failure saying no request was made.
@@ -31,7 +32,7 @@ The status label shows exactly one of these (text in `TranscriptionStatus.descri
 - `Ready: on-device recognition is available`
 - `Pending: <reason>. Audio kept; no transcription was attempted.` with reason one of: permission not requested yet; permission denied or revoked; restricted on this device; language `<locale>` not supported by the speech framework (no recognizer could be created); on-device recognition unavailable for `<locale>` (model not installed or device unsupported); recognizer for `<locale>` currently unavailable.
 - `Transcribing on device...`
-- `Transcribed on device in <s>s: "<text>"` with the mean segment confidence when available.
+- `Transcribed on device in <s>s, <n> result(s) received: "<text>"` with the mean segment confidence when available. `<n>` shows the segmentation.
 - `Failed after <s>s: <reason>. Audio kept; retry is possible.` (includes an empty transcript, reported as `No speech recognized`, and any framework error shown as `domain code: description`).
 - `Cancelled. Audio kept.`
 
@@ -78,3 +79,4 @@ Run on the target phone with synthetic content only, and record the values each 
 5. **Timing:** record the duration shown for at least five runs of the fixture and the OS build; do not generalize beyond the observed values.
 6. **Interruption:** start a run and immediately lock the phone, then repeat by switching apps. Record the interruption line, the final status and the duration, and whether recognition finished, failed or was suspended.
 7. **Cancel:** record that Cancel shows `Cancelled` and that no later status replaces it.
+8. **Long audio:** place a synthetic fixture of at least 90 s of continuous speech, and another of about 20 s with a pause of at least 3 s, as `transcription-fixture.wav` (one at a time) and press **Transcribe On Device**. Record the result count in the status line and that both the first and the last sentence are in the transcript, each once.
