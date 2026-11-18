@@ -114,6 +114,8 @@ case "$2" in
     spawns=$(( $(cat "${FAKE_DIR}/spawns.${boots}" 2>/dev/null || echo 0) + 1 ))
     echo "${spawns}" > "${FAKE_DIR}/spawns.${boots}"
     if [ "${boots:-0}" -le "${FAKE_UNSETTLED_BOOTS:-0}" ] && [ "${spawns}" -gt 10 ]; then exit 1; fi
+    # Boot FAKE_SLOW_SETTLE_BOOT answers its settle probes (after the 10 responsive ones) slowly but within the probe limit.
+    if [ "${boots:-0}" = "${FAKE_SLOW_SETTLE_BOOT:-0}" ] && [ "${spawns}" -gt 10 ]; then sleep 1; fi
     ;;
 esac
 exit 0
@@ -228,22 +230,44 @@ class PrepareSimulatorRecoveryTests(unittest.TestCase):
         # The settle gate alone ran for the 2 s timeout, so the first attempt lasted at least that long.
         self.assertGreaterEqual(int(first_seconds), 2)
 
-    def test_recovery_wait_is_bounded_by_wall_clock_and_unreadable_cpu_waits(self):
-        # A `top` that takes 1 s per call and reports a busy host: the wait must stop at the 3 s deadline, even though sleeps alone would stretch it.
-        slow_top = self.bin_dir / "top"
-        slow_top.write_text("#!/usr/bin/env bash\nsleep 1\necho 'CPU usage: 90.0% user, 5.0% sys, 5.0% idle'\n")
-        slow_top.chmod(slow_top.stat().st_mode | stat.S_IEXEC)
-        result = self.run_script(["udid", "--label", "bounded"], 1, extra_env={**FIRST_ATTEMPT_TIMES_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "3"})
+    def test_recovered_attempt_records_whole_attempt_duration_including_settle(self):
+        # The recovery attempt answers its 3 settle probes 1 s each, after becoming responsive at once.
+        result = self.run_script(["udid", "--erase", "--label", "slow"], 1, extra_env={**FIRST_ATTEMPT_TIMES_OUT, "FAKE_SLOW_SETTLE_BOOT": "2"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        waited = [int(m) for m in re.findall(r"quieten \(CPU [^,]*, (\d+)s of 3s", result.stdout)]
-        self.assertGreaterEqual(max(waited), 3)
-        self.assertLessEqual(max(waited), 5)
-        # An unreadable CPU sample keeps waiting until the deadline instead of ending the wait at once.
-        slow_top.write_text("#!/usr/bin/env bash\nsleep 1\necho garbage\n")
-        result = self.run_script(["udid", "--label", "unreadable"], 3, extra_env={**BOTH_ATTEMPTS_TIME_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "3"})
-        waits = [line for line in result.stdout.splitlines() if "waiting for the host to quieten" in line]
-        self.assertGreater(len(waits), 1, result.stdout)
+        label, kind, first_seconds, second_seconds, outcome = self.recoveries()[0].split()
+        self.assertEqual(outcome, "recovered")
+        self.assertGreaterEqual(int(second_seconds), 3)
+        # The pressure file keeps the time to responsive, which excludes the settle gate.
+        pressure_seconds = next(line.split()[2] for line in self.pressure().splitlines() if line.startswith("slow cold-boot-recovered "))
+        self.assertLess(int(pressure_seconds), int(second_seconds))
 
+    def quiet_waits(self, stdout, deadline):
+        return [float(m) for m in re.findall(rf"quieten \(CPU [^,]*, ([\d.]+)s of {deadline}s", stdout)]
+
+    def test_recovery_wait_is_bounded_by_wall_clock(self):
+        # A `top` that takes 2 s and reports a busy host. With an 8 s deadline the wait samples (0-2 s), sleeps 5 s, then starts
+        # a sample with 1 s left: that sample must be cut off at the deadline instead of running its full 2 s.
+        slow_top = self.bin_dir / "top"
+        slow_top.write_text("#!/usr/bin/env bash\nsleep 2 >/dev/null\necho 'CPU usage: 90.0% user, 5.0% sys, 5.0% idle'\n")
+        slow_top.chmod(slow_top.stat().st_mode | stat.S_IEXEC)
+        result = self.run_script(["udid", "--label", "bounded"], 1, extra_env={**FIRST_ATTEMPT_TIMES_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "8"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        waited = self.quiet_waits(result.stdout, 8)
+        self.assertEqual(len(waited), 2, result.stdout)
+        self.assertIn("CPU unknown% idle", result.stdout)
+        # The only slack allowed is ending the cut-off sample process; a full extra sample would reach 9 s.
+        self.assertLessEqual(max(waited), 8.5, result.stdout)
+        self.assertIn("stopped waiting for the host to quieten at the 8s deadline", result.stdout)
+
+    def test_unreadable_cpu_sample_keeps_waiting_until_deadline(self):
+        slow_top = self.bin_dir / "top"
+        slow_top.write_text("#!/usr/bin/env bash\nsleep 1 >/dev/null\necho garbage\n")
+        slow_top.chmod(slow_top.stat().st_mode | stat.S_IEXEC)
+        result = self.run_script(["udid", "--label", "unreadable"], 3, extra_env={**BOTH_ATTEMPTS_TIME_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "3"})
+        # An unreadable sample does not end the wait: it runs on to the deadline, and not past it.
+        self.assertIn("CPU unknown% idle", result.stdout)
+        self.assertLessEqual(max(self.quiet_waits(result.stdout, 3)), 3.5, result.stdout)
+        self.assertIn("stopped waiting for the host to quieten at the 3s deadline", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()

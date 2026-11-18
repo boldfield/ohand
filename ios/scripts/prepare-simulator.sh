@@ -232,7 +232,9 @@ attempt_preparation() {
     attempt_seconds="$((SECONDS - prepare_started))"
     return 1
   fi
-  attempt_seconds="${responsive_seconds}"
+  # The whole attempt, both gates included, so the recoveries file compares like with like; record_pressure keeps the
+  # time to responsive for its own column.
+  attempt_seconds="$((SECONDS - prepare_started))"
   return 0
 }
 
@@ -245,20 +247,27 @@ recover_host() {
     xcrun simctl delete "${udid}" 2>/dev/null || true
   fi
   killall com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null || true
-  local started=${SECONDS} waited=0 remaining idle=""
+  # The deadline is wall-clock and checked before every sample; a sample is cut off at the deadline (the alarm survives
+  # exec), so neither `top` nor a sleep can carry the wait past it.
+  local started deadline remaining waited idle=""
+  started="$(now_seconds)"
+  deadline="$(awk -v s="${started}" -v w="${recovery_quiet_wait_seconds}" 'BEGIN {printf "%.2f", s + w}')"
   while :; do
-    idle="$(top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
-    waited=$((SECONDS - started))
-    log "recovery: waiting for the host to quieten (CPU ${idle:-unknown}% idle, ${waited}s of ${recovery_quiet_wait_seconds}s)"
-    if [ "${waited}" -ge "${recovery_quiet_wait_seconds}" ]; then
+    remaining="$(awk -v d="${deadline}" -v n="$(now_seconds)" 'BEGIN {r = d - n; printf "%.2f", (r > 0 ? r : 0)}')"
+    if awk -v r="${remaining}" 'BEGIN { exit !(r <= 0) }'; then
+      log "recovery: stopped waiting for the host to quieten at the ${recovery_quiet_wait_seconds}s deadline"
       break
     fi
+    idle="$(perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV' "${remaining}" top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
+    # A sample cut off or unreadable is not a number; it never ends the wait early.
+    [[ "${idle}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || idle=""
+    waited="$(awk -v s="${started}" -v n="$(now_seconds)" 'BEGIN {printf "%.2f", n - s}')"
+    log "recovery: waiting for the host to quieten (CPU ${idle:-unknown}% idle, ${waited}s of ${recovery_quiet_wait_seconds}s)"
     if [ -n "${idle}" ] && awk -v i="${idle}" -v t="${recovery_quiet_idle_percent}" 'BEGIN { exit !(i >= t) }'; then
       break
     fi
-    # Never sleep past the deadline: the wait is bounded in wall-clock time, top included.
-    remaining=$((recovery_quiet_wait_seconds - waited))
-    sleep "$((remaining < 5 ? remaining : 5))"
+    remaining="$(awk -v d="${deadline}" -v n="$(now_seconds)" 'BEGIN {r = d - n; printf "%.2f", (r > 5 ? 5 : (r > 0 ? r : 0))}')"
+    sleep "${remaining}"
   done
 }
 
@@ -272,7 +281,7 @@ record_recovery() {
 }
 
 if attempt_preparation 1; then
-  record_pressure "${kind}" "${attempt_seconds}"
+  record_pressure "${kind}" "${responsive_seconds}"
 else
   first_gate="${failed_gate}"
   first_seconds="${attempt_seconds}"
@@ -281,7 +290,7 @@ else
   recover_host
   if attempt_preparation 2; then
     echo "::warning::simulator preparation ${label} (${kind}): recovered after the ${first_gate} gate failed on the first attempt"
-    record_pressure "${kind}-recovered" "${attempt_seconds}"
+    record_pressure "${kind}-recovered" "${responsive_seconds}"
     record_recovery "recovered" "${first_seconds}" "${attempt_seconds}"
   else
     echo "::warning::simulator preparation ${label} (${kind}): failed twice (first the ${first_gate} gate, then the ${failed_gate} gate)"
