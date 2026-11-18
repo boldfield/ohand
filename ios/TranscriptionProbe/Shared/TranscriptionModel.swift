@@ -67,7 +67,7 @@ func evaluateReadiness(_ snapshot: RecognizerSnapshot, localeIdentifier: String)
 }
 
 enum RecognitionOutcome: Equatable {
-    case transcript(text: String, confidence: Float?)
+    case transcript(text: String, confidence: Float?, resultCount: Int = 1)
     case failure(reason: String)
 }
 
@@ -91,7 +91,7 @@ enum TranscriptionStatus: Equatable {
     case ready
     case pending(PendingReason)
     case inProgress
-    case transcribed(text: String, confidence: Float?, durationSeconds: Double)
+    case transcribed(text: String, confidence: Float?, durationSeconds: Double, resultCount: Int = 1)
     case failed(reason: String, durationSeconds: Double)
     case cancelled
 
@@ -105,9 +105,11 @@ enum TranscriptionStatus: Equatable {
             return "Pending: \(reason.description). Audio kept; no transcription was attempted."
         case .inProgress:
             return "Transcribing on device..."
-        case .transcribed(let text, let confidence, let durationSeconds):
+        case .transcribed(let text, let confidence, let durationSeconds, let resultCount):
             let confidenceText = confidence.map { String(format: ", mean confidence %.2f", $0) } ?? ""
-            return String(format: "Transcribed on device in %.2fs%@: \"%@\"", durationSeconds, confidenceText, text)
+            let resultsText = ", \(resultCount) \(resultCount == 1 ? "result" : "results") received"
+            return String(
+                format: "Transcribed on device in %.2fs%@%@: \"%@\"", durationSeconds, confidenceText, resultsText, text)
         case .failed(let reason, let durationSeconds):
             return String(format: "Failed after %.2fs: %@. Audio kept; retry is possible.", durationSeconds, reason)
         case .cancelled:
@@ -292,12 +294,13 @@ final class TranscriptionCoordinator {
         activeHandle = nil
         let elapsedSeconds = max(0, now() - startedAt)
         switch outcome {
-        case .transcript(let text, let confidence):
+        case .transcript(let text, let confidence, let resultCount):
             let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedText.isEmpty {
                 status = .failed(reason: "No speech recognized", durationSeconds: elapsedSeconds)
             } else {
-                status = .transcribed(text: trimmedText, confidence: confidence, durationSeconds: elapsedSeconds)
+                status = .transcribed(
+                    text: trimmedText, confidence: confidence, durationSeconds: elapsedSeconds, resultCount: resultCount)
             }
         case .failure(let reason):
             status = .failed(reason: reason, durationSeconds: elapsedSeconds)
