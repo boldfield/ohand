@@ -218,7 +218,7 @@ attempt_preparation() {
   if ! wait_for_host_to_settle; then
     host_snapshot "host never settled"
     failed_gate="settle"
-    attempt_seconds="${responsive_seconds}"
+    attempt_seconds="$((SECONDS - prepare_started))"
     return 1
   fi
   attempt_seconds="${responsive_seconds}"
@@ -234,16 +234,20 @@ recover_host() {
     xcrun simctl delete "${udid}" 2>/dev/null || true
   fi
   killall com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null || true
-  local waited=0 idle=""
+  local started=${SECONDS} waited=0 remaining idle=""
   while :; do
     idle="$(top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
+    waited=$((SECONDS - started))
     log "recovery: waiting for the host to quieten (CPU ${idle:-unknown}% idle, ${waited}s of ${recovery_quiet_wait_seconds}s)"
-    if [ -z "${idle}" ] || [ "${waited}" -ge "${recovery_quiet_wait_seconds}" ] \
-      || awk -v i="${idle}" -v t="${recovery_quiet_idle_percent}" 'BEGIN { exit !(i >= t) }'; then
+    if [ "${waited}" -ge "${recovery_quiet_wait_seconds}" ]; then
       break
     fi
-    sleep 5
-    waited=$((waited + 5))
+    if [ -n "${idle}" ] && awk -v i="${idle}" -v t="${recovery_quiet_idle_percent}" 'BEGIN { exit !(i >= t) }'; then
+      break
+    fi
+    # Never sleep past the deadline: the wait is bounded in wall-clock time, top included.
+    remaining=$((recovery_quiet_wait_seconds - waited))
+    sleep "$((remaining < 5 ? remaining : 5))"
   done
 }
 
