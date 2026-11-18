@@ -5051,6 +5051,19 @@ Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 900: retained audio is the authoritative record when a transcript is wrong, and it cannot be heard. Independent of F69 (no shared files); no task depends on F70.
 
+#### F70 amendment 1 (2026-11-18, coordinator): ownership of the recording-start wiring
+
+Three review rounds on PRs #410 and #414 asked for a coordinator grant. The original owned paths could not satisfy scope item 2: "starting a recording ends an open playback first" has to be wired where the recorder and the playback service are assembled, and that is `ios/AppAssembly/`. The omission was the coordinator's.
+
+F70 additionally owns, for scope item 2 only:
+- `ios/AppAssembly/AppServices.swift` (additive: connecting the voice services' before-recording-starts hook to `PlaybackService.recordingWillStart()`),
+- `ios/AppAssembly/VoiceServiceAdapters.swift` (additive: the hook on the recorder fan-out and the decorator that runs it on every route that starts the engine, including recovery continuation),
+- `ios/Tests/VoiceCapture/` (new test files for that decorator; existing files unchanged).
+
+Acceptance criterion 3 is read as the round-3 review read it: one test must fail if the production assignment in `AppServices.swift` is removed or miswired. It builds the real assembly (or the smallest real part of it that contains that assignment) and asserts that starting a recording ends an open playback. Tests that set the hook by hand do not meet it.
+
+No other task in flight edits those two files. `ios/Services/Assembly/CompositionRoot.swift` is also edited additively by F71b (PR #416); whichever lands second rebases.
+
 ### F71a
 
 Core: replace a voice note's machine transcript from its retained audio
