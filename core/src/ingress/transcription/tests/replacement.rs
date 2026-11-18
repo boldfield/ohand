@@ -56,19 +56,6 @@ fn text_correction_of_transcript(store: &Store, new_value: &str) {
     save_event(&mut store.open(), &event, revision).unwrap();
 }
 
-/// Native code reported the removal of the item's audio file; the capture row keeps its reference.
-fn record_removal_of_audio(store: &Store) {
-    let mut database = store.open();
-    let audio_reference: String = database
-        .conn()
-        .query_row("SELECT audio_reference FROM captures", [], |row| row.get(0))
-        .unwrap();
-    let transaction = database.immediate_transaction().unwrap();
-    record_audio_removal(&transaction, &store.item_id, &audio_reference, later()).unwrap();
-    record_audio_removal(&transaction, &store.item_id, &audio_reference, later()).unwrap();
-    transaction.commit().unwrap();
-}
-
 fn request_all(store: &Store) -> RetranscriptionRequestResult {
     request_retranscription(
         &mut store.open(),
@@ -165,7 +152,7 @@ fn a_live_transcribed_note_with_an_older_generation_is_a_candidate() {
 #[test]
 fn every_exclusion_keeps_a_note_from_being_a_candidate() {
     type Setup = fn(&Store);
-    let cases: [(&str, Setup, RetranscriptionSkip); 7] = [
+    let cases: [(&str, Setup, RetranscriptionSkip); 6] = [
         (
             "deleted",
             |store| {
@@ -192,11 +179,6 @@ fn every_exclusion_keeps_a_note_from_being_a_candidate() {
                     .execute("UPDATE captures SET audio_reference = NULL, text = ''", [])
                     .unwrap();
             },
-            RetranscriptionSkip::AudioUnavailable,
-        ),
-        (
-            "audio recorded removed",
-            record_removal_of_audio,
             RetranscriptionSkip::AudioUnavailable,
         ),
         (
@@ -1111,27 +1093,27 @@ fn deletion_leaves_no_superseded_transcript_and_no_request_for_the_item() {
 }
 
 #[test]
-fn audio_recorded_removed_after_the_request_discards_the_outcome() {
+fn a_replacement_whose_audio_file_is_missing_natively_settles_as_kept() {
+    // The core cannot see the file: the capture still has its audio reference, the item is a
+    // candidate, and the handler's missing-audio outcome is a failed recognition.
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    record_removal_of_audio(&store);
     let acknowledgment = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, RecognizerResult::Failed),
         settle_time(),
     )
     .unwrap();
     assert_eq!(
         acknowledgment.disposition,
-        TranscriptionDisposition::Discarded(DiscardReason::AudioUnavailable)
+        TranscriptionDisposition::Kept {
+            reason: FAILED_REASON
+        }
     );
     assert_eq!(provenance(&store).text, TRANSCRIPT);
     assert_eq!(
         request_row(&store, &job.job_id),
-        (
-            Some("discarded".to_string()),
-            Some("audio_unavailable".to_string())
-        )
+        (Some("kept".to_string()), Some(FAILED_REASON.to_string()))
     );
 }
 
