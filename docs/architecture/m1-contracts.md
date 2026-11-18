@@ -94,6 +94,7 @@ Transient failures (timeout, network, outage) keep the state `unprocessed` or `p
 - `audio_pending`: audio saved, on-device transcription not started.
 - `transcribing`: in progress.
 - `transcribed`: transcript text attached; the transcript is the searchable source text and the audio retention clock starts.
+- A machine transcript can be replaced from its retained audio. Each stored transcript records a generation; the current one (generation 2) keeps every recognized segment, and earlier ones may lack the beginning of a long or paused note. A replacement is requested explicitly, runs as an ordinary on-device transcription job (never pinned to a profile) and leaves the item `transcribed` and searchable while it runs. A user text correction always wins: the replacement is discarded when one exists, including one that cleared the text, when the item is deleted, or when the audio is gone or is not the audio the transcript came from. An identical transcript changes nothing; a different one becomes a new `transcript` revision (not a text correction, so `text_corrected` stays false and the text basis stays `Transcript`), and the superseded transcript is kept as history until the item is deleted or reset. Unsupported, failed or empty recognition keeps the existing transcript and never moves the item to `transcription_failed`. A replacement does not restart the audio retention clock, and it leaves earlier proposals and the item's reminder as a user text correction does.
 - `transcription_unsupported`: language or model not available on the device; audio retained with visible retry and delete options.
 - `transcription_failed`: transcription failed (for example unreadable audio); audio retained with visible retry and delete options.
 
@@ -558,7 +559,7 @@ After a restore from backup, core re-reconciles reminders against the OS, rebuil
 
 ### Audio retention
 
-- Raw audio expires seven days after successful transcription (the clock starts at transcript success, never at capture). The period is configurable.
+- Raw audio expires seven days after successful transcription (the clock starts at the first transcript success, never at capture, and a transcript replacement does not restart it). The period is configurable.
 - Audio that is the sole source (transcription pending, unsupported or failed) is retained with a visible unresolved state until recoverable text exists or the user explicitly deletes it.
 - Disk pressure is documented and never causes silent loss of a sole source.
 

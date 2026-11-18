@@ -9,7 +9,8 @@
 //!
 //! * The retention clock starts at successful transcription (`transcript_attachments.
 //!   transcribed_at`), never at capture. Audio expires `RetentionPolicy::period` later (seven days
-//!   by default). A later user correction neither restarts nor shortens the clock.
+//!   by default). A later user correction neither restarts nor shortens the clock, and neither does a
+//!   transcript replacement (F71a): it keeps `transcribed_at` and records its own time in `replaced_at`.
 //! * Audio with no usable transcription-success timestamp never expires automatically: pending,
 //!   unsupported and failed transcription, audio kept next to user-written or captured text but
 //!   without a transcript, a transcript whose text is empty or whitespace only, and records that
