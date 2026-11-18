@@ -36,7 +36,7 @@ probe_hard_limit_seconds=10
 # answer 30 probes in a row, each within 3 s (the gate needs 10). If that does not happen within 480 s the preparation
 # fails with a host snapshot, so no UI test starts on a starved host. CPU idle is still logged for diagnosis.
 settle_probes_required="${OHAND_TEST_SETTLE_PROBES:-30}"
-settle_timeout_seconds="${OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS:-480}"
+settle_timeout_seconds="${OHAND_TEST_SETTLE_TIMEOUT_SECONDS:-480}"
 
 udid=""
 erase=0
@@ -192,7 +192,8 @@ attempt_preparation() {
     prepare_started=${SECONDS}
     udid="$(xcrun simctl clone "${clone_of}" "ohand-${label}-$$-${first_call}")" || exit 1
     log "cloned settled simulator ${clone_of} to ${udid}"
-    echo "${udid}" > "${udid_file}"
+    # errexit is off inside a function called from an `if`, so a failed write must exit explicitly or the caller keeps a stale UDID.
+    echo "${udid}" > "${udid_file}" || { echo "cannot write ${udid_file}" >&2; exit 1; }
   else
     log "preparing simulator ${udid} (kind=${kind})"
     host_snapshot "before"

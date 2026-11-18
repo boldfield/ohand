@@ -25,7 +25,7 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertIn("responsive_probe_limit_seconds=3", self.script)
         self.assertIn("responsive_probes_required=10", self.script)
         self.assertIn('responsive_timeout_seconds="${OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS:-480}"', self.script)
-        self.assertIn('settle_timeout_seconds="${OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS:-480}"', self.script)
+        self.assertIn('settle_timeout_seconds="${OHAND_TEST_SETTLE_TIMEOUT_SECONDS:-480}"', self.script)
         self.assertIn("settle_probes_required=\"${OHAND_TEST_SETTLE_PROBES:-30}\"", self.script)
         self.assertIn('probe_interval_seconds="${OHAND_TEST_PROBE_INTERVAL_SECONDS:-1}"', self.script)
         self.assertIn('recovery_quiet_wait_seconds="${OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS:-120}"', self.script)
@@ -203,8 +203,14 @@ class PrepareSimulatorRecoveryTests(unittest.TestCase):
         self.assertIn("suite clone-recovered ", self.pressure())
         self.assertEqual(len(self.recoveries()), 1)
 
+    def test_clone_fails_closed_when_udid_file_is_unwritable(self):
+        udid_file = self.dir / "missing-dir" / "suite-udid.txt"
+        result = self.run_script(["--clone", "template", "--udid-file", str(udid_file), "--label", "suite"], 0)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("ready", result.stdout)
+
     def test_settle_failure_records_whole_attempt_duration(self):
-        result = self.run_script(["udid", "--erase", "--label", "settle"], 0, unsettled_boots=1)
+        result = self.run_script(["udid", "--erase", "--label", "settle"], 0, unsettled_boots=1, extra_env={"OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS": "60", "OHAND_TEST_SETTLE_TIMEOUT_SECONDS": "2"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("settle gate", result.stdout)
         label, kind, first_seconds, second_seconds, outcome = self.recoveries()[0].split()
