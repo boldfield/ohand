@@ -111,9 +111,7 @@ final class AppServices {
         // recording that starts ends any open playback first.
         let recordingController = RecordingStateReader(controller: voice.controller)
         root.playback.setRecordingProbe { recordingController.isActive }
-        (voice.recorder as? VoiceRecorderFanOut)?.beforeStart = { [playback = root.playback] in
-            playback.recordingWillStart()
-        }
+        voice.beforeRecordingStarts = { [playback = root.playback] in playback.recordingWillStart() }
 
         let access: () -> CaptureEntryAccess = { [weak root] in
             CaptureEntryAccess(

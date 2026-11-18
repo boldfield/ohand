@@ -5051,6 +5051,10 @@ Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 900: retained audio is the authoritative record when a transcript is wrong, and it cannot be heard. Independent of F69 (no shared files); no task depends on F70.
 
+#### F70 amendment 1 (2026-11-18, worker, for coordinator confirmation): the recording-start hook lives in the app assembly
+
+Scope item 2 requires that starting a recording ends an open playback first. The recorder is built in `ios/AppAssembly/VoiceServiceAdapters.swift` (`VoiceCaptureServices`) and wired to playback in `ios/AppAssembly/AppServices.swift`; neither is in F70's owned paths, and `ios/Capture/Voice/` is not owned either. Review of PR #410 found that a hook on the capture surface's `VoiceRecorderFanOut.start` misses the second production start route, `VoiceRecoveryCoordinator.continueRecording`. Decision: F70 additionally owns small additive edits to those two assembly files and one new test file under `ios/Tests/VoiceCapture/`: a `VoiceCaptureEngine` decorator wraps the engine, so every recording, new or continued, ends playback immediately before the engine starts writing. `ios/Capture/Voice/` stays unchanged.
+
 ### F71a
 
 Core: replace a voice note's machine transcript from its retained audio
