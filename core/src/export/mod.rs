@@ -169,6 +169,25 @@ pub struct ExportedTranscript {
     pub audio_sha256: Option<String>,
 }
 
+/// A machine transcript that a later replacement displaced (F71a). It is exported as superseded
+/// history beside the current transcript, never as the item's text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportedSupersededTranscript {
+    pub transcript_record_id: String,
+    pub text: String,
+    pub attached_revision: i32,
+    pub recognizer: String,
+    pub detected_language: Option<String>,
+    pub confidence: Option<f64>,
+    pub transcribed_at: String,
+    /// When the replacement that displaced it was settled.
+    pub superseded_at: String,
+    /// The record id of the transcript that replaced it.
+    pub superseded_by_record_id: String,
+    /// Present only when audio references were requested.
+    pub audio_sha256: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportedCorrection {
     pub correction_id: String,
@@ -244,6 +263,9 @@ pub struct ExportedItem {
     pub provenance: ExportedProvenance,
     pub capture: ExportedCapture,
     pub transcript: Option<ExportedTranscript>,
+    /// Transcripts displaced by replacements, oldest first; empty for an item never replaced.
+    #[serde(default)]
+    pub superseded_transcripts: Vec<ExportedSupersededTranscript>,
     pub audio: ExportedAudio,
     pub corrections: Vec<ExportedCorrection>,
     pub history: Vec<ExportedEvent>,
@@ -521,6 +543,7 @@ fn read_item(
             created_at: capture.created_at,
         },
         transcript: read_transcript(tx, item_id, audio)?,
+        superseded_transcripts: read_superseded_transcripts(tx, item_id, audio)?,
         audio: audio_reference,
         corrections: read_corrections(tx, item_id)?,
         history: read_events(tx, item_id)?,
@@ -559,6 +582,38 @@ fn read_transcript(
         }
         transcript
     }))
+}
+
+fn read_superseded_transcripts(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    audio: AudioInclusion,
+) -> Result<Vec<ExportedSupersededTranscript>, ExportError> {
+    let mut statement = tx.prepare(
+        "SELECT transcript_record_id, text, attached_revision, recognizer, detected_language,
+                confidence, transcribed_at, superseded_at, superseded_by_record_id, audio_sha256
+         FROM superseded_transcripts WHERE item_id = ?
+         ORDER BY attached_revision, transcript_record_id",
+    )?;
+    let transcripts = statement
+        .query_map([item_id], |row| {
+            Ok(ExportedSupersededTranscript {
+                transcript_record_id: row.get(0)?,
+                text: row.get(1)?,
+                attached_revision: row.get(2)?,
+                recognizer: row.get(3)?,
+                detected_language: row.get(4)?,
+                confidence: row.get(5)?,
+                transcribed_at: row.get(6)?,
+                superseded_at: row.get(7)?,
+                superseded_by_record_id: row.get(8)?,
+                audio_sha256: (audio == AudioInclusion::References)
+                    .then(|| row.get(9))
+                    .transpose()?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(transcripts)
 }
 
 fn read_corrections(

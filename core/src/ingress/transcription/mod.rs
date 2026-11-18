@@ -29,7 +29,9 @@
 //! A transcript is stored once. A retry of the same job after a crash or lost acknowledgment finds
 //! the job's row and returns the committed result only when the retry carries the same text, audio
 //! reference, digest, recognizer, language and confidence; anything else is a conflict. A different
-//! job cannot attach a second transcript because the item is already `transcribed`. The record id
+//! job cannot attach a second transcript because the item is already `transcribed`; the one way a
+//! transcript changes is the explicit replacement of [`replacement`], decided by the job's request
+//! row. The record id
 //! is derived from the item and the job, but event ids share one unrestricted namespace, so an id
 //! that a foreign event or record already holds is skipped rather than trusted, and redelivery is
 //! decided only by the job's own row. Saved audio (`save_state`), transcript completion
@@ -59,6 +61,14 @@ use std::fmt;
 pub use crate::ingress::import::CommitStatus;
 
 pub mod queue;
+mod replacement;
+
+pub use replacement::{
+    count_retranscription_candidates, request_retranscription, retranscription_candidates,
+    superseded_transcripts, QueuedReplacement, RetranscriptionRequestResult,
+    RetranscriptionSelection, RetranscriptionSkip, SupersededTranscript,
+    CURRENT_TRANSCRIPT_GENERATION, MAX_RETRANSCRIPTION_BATCH,
+};
 
 /// Largest transcript accepted, in bytes.
 pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
@@ -129,6 +139,12 @@ pub enum DiscardReason {
     NotAudioCapture,
     AudioUnavailable,
     AudioIdentityMismatch,
+    /// A replacement found no attached transcript to replace.
+    NoTranscriptToReplace,
+    /// A replacement found a user text correction in force.
+    TextCorrected,
+    /// A replacement found that another replacement already changed the transcript.
+    TranscriptChanged,
 }
 
 impl DiscardReason {
@@ -141,7 +157,27 @@ impl DiscardReason {
             DiscardReason::NotAudioCapture => "not_audio_capture",
             DiscardReason::AudioUnavailable => "audio_unavailable",
             DiscardReason::AudioIdentityMismatch => "audio_identity_mismatch",
+            DiscardReason::NoTranscriptToReplace => "no_transcript_to_replace",
+            DiscardReason::TextCorrected => "text_corrected",
+            DiscardReason::TranscriptChanged => "transcript_changed",
         }
+    }
+
+    /// The reason a retired job recorded, read back.
+    fn from_job_reason(reason: &str) -> Option<Self> {
+        [
+            DiscardReason::ItemDeleted,
+            DiscardReason::AlreadyTranscribed,
+            DiscardReason::TextAlreadyPresent,
+            DiscardReason::NotAudioCapture,
+            DiscardReason::AudioUnavailable,
+            DiscardReason::AudioIdentityMismatch,
+            DiscardReason::NoTranscriptToReplace,
+            DiscardReason::TextCorrected,
+            DiscardReason::TranscriptChanged,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.job_reason() == reason)
     }
 }
 
@@ -173,6 +209,24 @@ pub enum TranscriptionDisposition {
         state: TranscriptionState,
     },
     Discarded(DiscardReason),
+    /// A replacement transcript is now the item's text. `revision` is the item revision that
+    /// includes it; the superseded transcript is kept as history.
+    Replaced {
+        revision: i32,
+        interpretation: InterpretationQueued,
+    },
+    /// An earlier delivery of the same job already replaced the transcript with the identical one.
+    AlreadyReplaced {
+        revision: i32,
+        interpretation: InterpretationQueued,
+    },
+    /// The replacement transcript has the same text as the stored one; nothing about the item
+    /// changed.
+    Unchanged,
+    /// Recognition was unsupported, failed or produced no text; the existing transcript stays.
+    Kept {
+        reason: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -317,6 +371,18 @@ pub(crate) fn apply_with_fault_points(
     let item = load_item(&transaction, &job.item_id)?;
     let resolved = resolve(&outcome.result);
 
+    if let Some(request) = replacement::load_replacement_request(&transaction, &job.job_id)? {
+        return replacement::settle(
+            transaction,
+            &job,
+            &item,
+            &request,
+            outcome,
+            &resolved,
+            transcribed_at,
+            fault_point,
+        );
+    }
     if let Some(attachment) = load_attachment_for_job(&transaction, &job.job_id)? {
         let disposition = redelivery(&transaction, &job, &attachment, &resolved, outcome)?;
         return Ok(acknowledgment(&job, disposition));
@@ -611,13 +677,18 @@ pub struct TranscriptProvenance {
     pub recognizer: String,
     pub detected_language: Option<String>,
     pub confidence: Option<f64>,
-    /// When recognition succeeded (RFC 3339).
+    /// When recognition first succeeded (RFC 3339). A replacement does not change it, so it keeps
+    /// starting the audio retention clock.
     pub transcribed_at: String,
+    /// Which recognizer behaviour produced the text; see [`CURRENT_TRANSCRIPT_GENERATION`].
+    pub transcript_generation: i32,
+    /// When a replacement last changed the transcript (RFC 3339), if one did.
+    pub replaced_at: Option<String>,
 }
 
 const PROVENANCE_COLUMNS: &str = "item_id, source_job_id, transcript_record_id, text,
     attached_revision, audio_reference, audio_sha256, recognizer, detected_language, confidence,
-    transcribed_at";
+    transcribed_at, transcript_generation, replaced_at";
 
 fn provenance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptProvenance> {
     Ok(TranscriptProvenance {
@@ -632,6 +703,8 @@ fn provenance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptPr
         detected_language: row.get(8)?,
         confidence: row.get(9)?,
         transcribed_at: row.get(10)?,
+        transcript_generation: row.get(11)?,
+        replaced_at: row.get(12)?,
     })
 }
 
@@ -651,15 +724,31 @@ pub fn transcript_provenance(
         .optional()?)
 }
 
+/// The stored result of a job: the current attachment when it is the job's, else the transcript a
+/// later replacement superseded, so a late redelivery of a job that was since replaced still
+/// finds its own result.
 fn load_attachment_for_job(
     transaction: &Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<TranscriptProvenance>, TranscriptionError> {
-    Ok(transaction
+    let current = transaction
         .query_row(
             &format!(
                 "SELECT {PROVENANCE_COLUMNS} FROM transcript_attachments WHERE source_job_id = ?"
             ),
+            [job_id],
+            provenance_from_row,
+        )
+        .optional()?;
+    if current.is_some() {
+        return Ok(current);
+    }
+    Ok(transaction
+        .query_row(
+            "SELECT item_id, source_job_id, transcript_record_id, text, attached_revision,
+                    audio_reference, audio_sha256, recognizer, detected_language, confidence,
+                    transcribed_at, transcript_generation, NULL
+               FROM superseded_transcripts WHERE source_job_id = ?",
             [job_id],
             provenance_from_row,
         )
@@ -761,24 +850,33 @@ fn redelivery(
     if !same_identity || attachment.text != transcript.text {
         return Err(conflict());
     }
+    Ok(TranscriptionDisposition::AlreadyAttached {
+        revision: attachment.attached_revision,
+        interpretation: recorded_interpretation(
+            transaction,
+            &job.item_id,
+            attachment.attached_revision,
+        )?,
+    })
+}
+
+/// The interpretation job an earlier delivery queued at `revision`, if any.
+fn recorded_interpretation(
+    transaction: &Transaction<'_>,
+    item_id: &str,
+    revision: i32,
+) -> Result<InterpretationQueued, TranscriptionError> {
     let queued_interpretation: Option<String> = transaction
         .query_row(
             "SELECT job_id FROM jobs WHERE item_id = ? AND job_type = ? AND source_revision = ?
               ORDER BY created_at ASC, rowid ASC LIMIT 1",
-            rusqlite::params![
-                job.item_id,
-                JOB_TYPE_INTERPRET,
-                attachment.attached_revision
-            ],
+            rusqlite::params![item_id, JOB_TYPE_INTERPRET, revision],
             |row| row.get(0),
         )
         .optional()?;
-    Ok(TranscriptionDisposition::AlreadyAttached {
-        revision: attachment.attached_revision,
-        interpretation: match queued_interpretation {
-            Some(job_id) => InterpretationQueued::Queued { job_id },
-            None => InterpretationQueued::NotRequested,
-        },
+    Ok(match queued_interpretation {
+        Some(job_id) => InterpretationQueued::Queued { job_id },
+        None => InterpretationQueued::NotRequested,
     })
 }
 
