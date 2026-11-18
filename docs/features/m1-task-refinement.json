@@ -4737,7 +4737,10 @@
         "ios/Tests/Playback/",
         "ios/Services/Assembly/CompositionRoot.swift (additive)",
         "app/source-detail/SourceDetailModel.swift (interruption state only)",
-        "ios/Tests/SourceDetail/"
+        "ios/Tests/SourceDetail/",
+        "ios/AppAssembly/AppServices.swift (additive, amendment 1)",
+        "ios/AppAssembly/VoiceServiceAdapters.swift (additive, amendment 1)",
+        "ios/Tests/VoiceCapture/ (new files, amendment 1)"
       ],
       "intent": "Set and activate a playback audio session before playing retained audio and release it when playback ends, so Play is audible after a recording and with the silent switch on.",
       "acceptance": [
@@ -6106,6 +6109,10 @@
     {
       "date": "2026-11-17",
       "change": "CI04 and CI05 added at the maintainer's request: every ios.yml run started on 2026-11-17 needed manual reruns for hosted-runner simulator faults. CI04 gives prepare-simulator.sh one recorded recovery attempt; CI05 retries a test step once when every failure in its log is a listed launch or device fault. Failed assertions are never retried."
+    },
+    {
+      "date": "2026-11-18",
+      "change": "F70 amendment 1: F70 also owns additive edits to ios/AppAssembly/AppServices.swift and VoiceServiceAdapters.swift and new tests under ios/Tests/VoiceCapture/, which scope item 2 needs; criterion 3 requires a test that fails if the production assignment in AppServices.swift is removed. Requested by reviewers on PRs #410 and #414; the narrow original ownership was the coordinator's omission."
     }
   ]
 }
