@@ -648,3 +648,73 @@ fn retry_transcription_requeues_through_the_core_and_reports_refusals() {
         &json!({"command": "retry_transcription", "item_id": ""}),
     );
 }
+
+#[test]
+fn retranscription_status_pages_past_a_window_of_candidates_with_a_cursor() {
+    let _guard = serial();
+    let store = store("retranscription-paging", "personal");
+    let mut database = Database::open(&store.path, Arc::new(SystemClock)).unwrap();
+    let total_extra = MAX_RETRANSCRIPTION_BATCH + 5;
+    for index in 0..total_extra {
+        let audio = format!("FinalizedAudio/extra-{index}.m4a");
+        let item_id = import_voice(
+            &mut database,
+            &format!("capture-extra-{index}"),
+            &audio,
+            "personal",
+            "2026-10-01T08:00:00Z",
+        );
+        transcribe(
+            &database,
+            &item_id,
+            &audio,
+            Utc::now() - chrono::Duration::days(10),
+        );
+    }
+    drop(database);
+    let mut session = Session::over(&store.path);
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut request = json!({"command": "retranscription_status", "read_scopes": ["personal"]});
+        if let Some(cursor) = &after {
+            request["after_item_id"] = json!(cursor);
+        }
+        let status = session.body(Export::Read, &request);
+        let page = status["candidates"].as_array().unwrap();
+        assert!(page.len() <= MAX_RETRANSCRIPTION_BATCH);
+        seen.extend(
+            page.iter()
+                .map(|c| c["item_id"].as_str().unwrap().to_string()),
+        );
+        pages += 1;
+        if status["more_candidates"] != true {
+            break;
+        }
+        after = seen.last().cloned();
+    }
+    assert_eq!(pages, 2, "a bounded page, then the rest after the cursor");
+    assert_eq!(seen.len(), total_extra + 1);
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, seen, "pages are in item id order without repeats");
+}
+
+#[test]
+fn retranscription_status_refuses_an_empty_or_oversized_cursor() {
+    let _guard = serial();
+    let store = store("retranscription-cursor", "personal");
+    let mut session = Session::over(&store.path);
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"], "after_item_id": ""}),
+    );
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"],
+                "after_item_id": "x".repeat(MAX_IDENTIFIER_BYTES + 1)}),
+    );
+}

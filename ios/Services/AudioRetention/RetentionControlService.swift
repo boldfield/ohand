@@ -303,19 +303,50 @@ public final class RetentionControlService: @unchecked Sendable {
     }
 
     /// How many notes can be transcribed again now (their transcript came from an earlier recognizer and their recording
-    /// is on the phone) and how many cannot because the recording is gone. Read through the private read gate.
+    /// is on the phone) and how many cannot because the recording is gone. Read through the private read gate, one
+    /// bounded page after another; past `maximumRetranscriptionPages` pages the counts are a lower bound and
+    /// `moreCandidates` is true.
     public func retranscriptionStatus() async throws -> RetranscriptionStatus {
-        let answer = try await readRetranscriptionStatus()
-        let present = recordings.presentRecordings(among: answer.candidates)
+        let scan = try await scanRetranscriptionCandidates(stopAfterPresent: nil)
         return RetranscriptionStatus(
-            redoableCount: present.count, recordingGoneCount: answer.candidates.count - present.count,
-            moreCandidates: answer.moreCandidates, inFlightCount: answer.replacementsInFlight)
+            redoableCount: scan.present.count, recordingGoneCount: scan.goneCount, moreCandidates: scan.hasMore,
+            inFlightCount: scan.inFlightCount)
     }
 
-    /// The items whose recording is on the phone, for `retranscribe`: the same decision `retranscriptionStatus` counts.
+    /// The items whose recording is on the phone, for `retranscribe`: the same decision `retranscriptionStatus` counts,
+    /// at most `RetranscriptionAnswer.maximumBatch` of them. Pages past candidates whose recording is gone, so a long
+    /// history of removed recordings never hides a present one.
     public func redoableItemIDs() async throws -> [String] {
-        let answer = try await readRetranscriptionStatus()
-        return recordings.presentRecordings(among: answer.candidates).map(\.itemID)
+        let scan = try await scanRetranscriptionCandidates(stopAfterPresent: RetranscriptionAnswer.maximumBatch)
+        return Array(scan.present.prefix(RetranscriptionAnswer.maximumBatch)).map(\.itemID)
+    }
+
+    /// The most pages one status or redo scan reads: each page is at most `RetranscriptionAnswer.maximumBatch`
+    /// candidates, so a scan is bounded however long the history is.
+    static let maximumRetranscriptionPages = 50
+
+    private func scanRetranscriptionCandidates(
+        stopAfterPresent limit: Int?
+    ) async throws -> (present: [RetranscriptionCandidateAnswer], goneCount: Int, inFlightCount: Int, hasMore: Bool) {
+        var present: [RetranscriptionCandidateAnswer] = []
+        var goneCount = 0
+        var inFlightCount = 0
+        var cursor: String?
+        for _ in 0..<Self.maximumRetranscriptionPages {
+            let answer = try await readRetranscriptionStatus(after: cursor)
+            inFlightCount = answer.replacementsInFlight
+            let found = recordings.presentRecordings(among: answer.candidates)
+            present.append(contentsOf: found)
+            goneCount += answer.candidates.count - found.count
+            guard answer.moreCandidates, let last = answer.candidates.last else {
+                return (present, goneCount, inFlightCount, false)
+            }
+            if let limit, present.count >= limit {
+                return (present, goneCount, inFlightCount, true)
+            }
+            cursor = last.itemID
+        }
+        return (present, goneCount, inFlightCount, true)
     }
 
     /// Asks the core to transcribe these notes again from their retained audio, and asks the job runner to drain so the
@@ -371,10 +402,10 @@ public final class RetentionControlService: @unchecked Sendable {
         return try Self.value(of: result)
     }
 
-    private func readRetranscriptionStatus() async throws -> RetranscriptionStatusAnswer {
+    private func readRetranscriptionStatus(after cursor: String?) async throws -> RetranscriptionStatusAnswer {
         let result = await withCheckedContinuation {
             (continuation: CheckedContinuation<Result<RetranscriptionStatusAnswer, CoreFailure>, Never>) in
-            core.readRetranscriptionStatus { continuation.resume(returning: $0) }
+            core.readRetranscriptionStatus(after: cursor) { continuation.resume(returning: $0) }
         }
         return try Self.value(of: result)
     }

@@ -8,8 +8,10 @@ protocol RetentionControlCore: Sendable {
     /// Reads the stored policy and the unresolved sole-audio cases through the private read gate; calls `completion`
     /// once.
     func readStatus(completion: @escaping @Sendable (Result<RetentionStatusAnswer, CoreFailure>) -> Void)
-    /// Reads the candidates for a replacement transcript through the private read gate; calls `completion` once.
+    /// Reads one page of the candidates for a replacement transcript through the private read gate, starting after the
+    /// item id `after` (the first page when nil); calls `completion` once.
     func readRetranscriptionStatus(
+        after: String?,
         completion: @escaping @Sendable (Result<RetranscriptionStatusAnswer, CoreFailure>) -> Void)
     /// Reads one item's audio reference through the private read gate; calls `completion` once.
     func readAudio(
@@ -60,10 +62,11 @@ final class CoreRetentionControlClient: RetentionControlCore, @unchecked Sendabl
     }
 
     func readRetranscriptionStatus(
+        after: String?,
         completion: @escaping @Sendable (Result<RetranscriptionStatusAnswer, CoreFailure>) -> Void
     ) {
         start(isGatedRead: true, completion: completion) { operationID in
-            try self.gate.startRetranscriptionStatus(operationID: operationID)
+            try self.gate.startRetranscriptionStatus(operationID: operationID, after: after)
         }
     }
 

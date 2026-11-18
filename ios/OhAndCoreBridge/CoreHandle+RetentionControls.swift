@@ -6,8 +6,10 @@ public enum RetentionReadKind: Equatable, Sendable {
     /// The stored policy with the live items whose audio is their only source and so never expires.
     case status
     /// The live items whose machine transcript an earlier recognizer generation produced and that could be transcribed
-    /// again, with the number of replacement jobs queued or running.
-    case retranscriptionStatus
+    /// again, with the number of replacement jobs queued or running. `after` is the last item id of the previous page
+    /// (nil for the first): the core lists at most `RetranscriptionAnswer.maximumBatch` candidates per read, so native
+    /// code pages past those whose recording is gone.
+    case retranscriptionStatus(after: String?)
     /// One item's audio reference and whether that audio is the item's only source.
     case audio(itemID: String)
 }
@@ -213,20 +215,23 @@ extension CoreHandle {
             let command: String
             let itemID: String?
             let readScopes: [String]
+            var afterItemID: String?
 
             enum CodingKeys: String, CodingKey {
                 case command
                 case itemID = "item_id"
                 case readScopes = "read_scopes"
+                case afterItemID = "after_item_id"
             }
         }
         let request: Request
         switch kind {
         case .status:
             request = Request(command: "retention_status", itemID: nil, readScopes: readScopes.map(\.rawValue))
-        case .retranscriptionStatus:
+        case .retranscriptionStatus(let after):
             request = Request(
-                command: "retranscription_status", itemID: nil, readScopes: readScopes.map(\.rawValue))
+                command: "retranscription_status", itemID: nil, readScopes: readScopes.map(\.rawValue),
+                afterItemID: after)
         case .audio(let itemID):
             request = Request(command: "get_audio", itemID: itemID, readScopes: readScopes.map(\.rawValue))
         }

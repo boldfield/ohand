@@ -18,11 +18,13 @@
 //!   `retry_transcription` and `delete_audio`. Such audio never expires, whatever the period is;
 //!   the way out is to retry transcription or to delete the item. Storage pressure is measured by
 //!   native code, not here.
-//! * `{"command": "retranscription_status", "read_scopes"}` answers `{"operation_id",
+//! * `{"command": "retranscription_status", "read_scopes", "after_item_id"?}` answers `{"operation_id",
 //!   "candidates", "more_candidates", "replacements_in_flight"}`. `candidates` lists up to
 //!   `MAX_RETRANSCRIPTION_BATCH` live items in the scopes whose machine transcript an earlier
 //!   recognizer generation produced (F71a), each `{"item_id", "audio_reference"}`, in item id
-//!   order; `more_candidates` is true when further ones exist. `replacements_in_flight` is the
+//!   order; `more_candidates` is true when further ones exist. `after_item_id` (the last
+//!   `item_id` of the previous answer) starts the list after it, so native code can page past
+//!   candidates whose recording is gone without the window ever filling up with them. `replacements_in_flight` is the
 //!   number of replacement jobs, for items in the scopes, queued or running. Native decides which
 //!   recordings are still on the phone; these identifiers are never logged or shown.
 //! * `{"command": "get_audio", "item_id", "read_scopes"}` answers `{"operation_id", "item_id",
@@ -60,7 +62,7 @@ use super::core_handle::instance::{self, lock, JobFn};
 use crate::domain::items::{load_item_state, LifecycleState};
 use crate::ingress::transcription::queue::{requeue_transcription, RequeueError, RequeueRefusal};
 use crate::ingress::transcription::{
-    request_retranscription, retranscription_candidates, RetranscriptionSelection,
+    request_retranscription, retranscription_candidates_after, RetranscriptionSelection,
     MAX_RETRANSCRIPTION_BATCH,
 };
 use crate::lifecycle::retention::{
@@ -86,6 +88,9 @@ fn store_failure(error: &anyhow::Error) -> AbiFailure {
 fn sqlite_failure(error: rusqlite::Error) -> AbiFailure {
     store_failure(&anyhow::Error::new(error))
 }
+
+/// How many candidates one scan step reads while looking for items inside the read scopes.
+const RETRANSCRIPTION_SCAN_CHUNK: usize = 500;
 
 fn acceptable_identifier(identifier: &str) -> bool {
     !identifier.is_empty() && identifier.len() <= MAX_IDENTIFIER_BYTES
@@ -119,7 +124,7 @@ fn option_name(option: RetentionOption) -> &'static str {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetentionReadKind {
     Status,
-    RetranscriptionStatus,
+    RetranscriptionStatus { after_item_id: Option<String> },
     Audio { item_id: String },
 }
 
@@ -173,24 +178,40 @@ pub fn read_retention(database: &mut Database, read: &RetentionRead) -> Result<V
             }
             Ok(json!({ "policy": policy_json(connection)?, "unresolved": unresolved }))
         }
-        RetentionReadKind::RetranscriptionStatus => {
+        RetentionReadKind::RetranscriptionStatus { after_item_id } => {
             let in_scope = |item_id: &str| -> Result<bool, AbiFailure> {
                 Ok(load_item_state(&transaction, item_id)
                     .map_err(|error| store_failure(&error))?
                     .is_some_and(|item| read.read_scopes.contains(&item.scope)))
             };
-            let candidate_ids = retranscription_candidates(connection, usize::MAX >> 1)
+            // Scan chunk by chunk past candidates outside the scopes until one more than a page is
+            // in scope or the candidates run out, so a read stays bounded.
+            let mut in_scope_ids: Vec<String> = Vec::new();
+            let mut cursor = after_item_id.clone();
+            while in_scope_ids.len() <= MAX_RETRANSCRIPTION_BATCH {
+                let chunk = retranscription_candidates_after(
+                    connection,
+                    cursor.as_deref(),
+                    RETRANSCRIPTION_SCAN_CHUNK,
+                )
                 .map_err(|error| store_failure(&error))?;
-            let mut candidates = Vec::new();
-            let mut more_candidates = false;
-            for item_id in candidate_ids {
-                if !in_scope(&item_id)? {
-                    continue;
-                }
-                if candidates.len() == MAX_RETRANSCRIPTION_BATCH {
-                    more_candidates = true;
+                let Some(last) = chunk.last().cloned() else {
                     break;
+                };
+                for item_id in chunk {
+                    if in_scope_ids.len() > MAX_RETRANSCRIPTION_BATCH {
+                        break;
+                    }
+                    if in_scope(&item_id)? {
+                        in_scope_ids.push(item_id);
+                    }
                 }
+                cursor = Some(last);
+            }
+            let more_candidates = in_scope_ids.len() > MAX_RETRANSCRIPTION_BATCH;
+            in_scope_ids.truncate(MAX_RETRANSCRIPTION_BATCH);
+            let mut candidates = Vec::new();
+            for item_id in in_scope_ids {
                 let audio_reference: Option<String> = connection
                     .query_row(
                         "SELECT c.audio_reference FROM items i
@@ -263,6 +284,7 @@ enum ReadCommand {
     },
     RetranscriptionStatus {
         read_scopes: Vec<String>,
+        after_item_id: Option<String>,
     },
     GetAudio {
         item_id: String,
@@ -276,8 +298,20 @@ impl ReadCommand {
             ReadCommand::RetentionStatus { read_scopes } => {
                 (RetentionReadKind::Status, read_scopes)
             }
-            ReadCommand::RetranscriptionStatus { read_scopes } => {
-                (RetentionReadKind::RetranscriptionStatus, read_scopes)
+            ReadCommand::RetranscriptionStatus {
+                read_scopes,
+                after_item_id,
+            } => {
+                if after_item_id
+                    .as_deref()
+                    .is_some_and(|item_id| !acceptable_identifier(item_id))
+                {
+                    return Err(AbiFailure::INVALID_REQUEST);
+                }
+                (
+                    RetentionReadKind::RetranscriptionStatus { after_item_id },
+                    read_scopes,
+                )
             }
             ReadCommand::GetAudio {
                 item_id,

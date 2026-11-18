@@ -65,9 +65,9 @@ mod replacement;
 
 pub use replacement::{
     count_retranscription_candidates, request_retranscription, retranscription_candidates,
-    superseded_transcripts, QueuedReplacement, RetranscriptionRequestResult,
-    RetranscriptionSelection, RetranscriptionSkip, SupersededTranscript,
-    CURRENT_TRANSCRIPT_GENERATION, MAX_RETRANSCRIPTION_BATCH,
+    retranscription_candidates_after, superseded_transcripts, QueuedReplacement,
+    RetranscriptionRequestResult, RetranscriptionSelection, RetranscriptionSkip,
+    SupersededTranscript, CURRENT_TRANSCRIPT_GENERATION, MAX_RETRANSCRIPTION_BATCH,
 };
 
 /// Largest transcript accepted, in bytes.

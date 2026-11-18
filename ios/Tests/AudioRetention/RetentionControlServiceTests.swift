@@ -13,7 +13,9 @@ private final class ScriptedRetentionControlCore: RetentionControlCore, @uncheck
         RetentionControlAnswer(outcome: "stored", periodSeconds: 86_400))
     private var retranscriptionResult: Result<RetranscriptionStatusAnswer, CoreFailure> = .success(
         RetranscriptionStatusAnswer(candidates: [], moreCandidates: false, replacementsInFlight: 0))
+    private var pagedRetranscription: [String?: RetranscriptionStatusAnswer]?
     private(set) var retranscriptionReads = 0
+    private(set) var retranscriptionCursors: [String?] = []
     private(set) var statusReads = 0
     private(set) var audioReads: [String] = []
     private(set) var commands: [RetentionControlCommand] = []
@@ -21,6 +23,11 @@ private final class ScriptedRetentionControlCore: RetentionControlCore, @uncheck
     func script(status: Result<RetentionStatusAnswer, CoreFailure>) { locked { statusResult = status } }
     func script(retranscription: Result<RetranscriptionStatusAnswer, CoreFailure>) {
         locked { retranscriptionResult = retranscription }
+    }
+    /// Answers each read with the page that starts after its cursor, from `pages` keyed by that cursor (`nil` is the
+    /// first page); a cursor no page names answers an empty last page.
+    func script(retranscriptionPages pages: [String?: RetranscriptionStatusAnswer]) {
+        locked { pagedRetranscription = pages }
     }
     func script(audio: Result<RetentionAudioAnswer, CoreFailure>) { locked { audioResult = audio } }
     func script(control: Result<RetentionControlAnswer, CoreFailure>) { locked { controlResult = control } }
@@ -30,9 +37,19 @@ private final class ScriptedRetentionControlCore: RetentionControlCore, @uncheck
     }
 
     func readRetranscriptionStatus(
+        after: String?,
         completion: @escaping @Sendable (Result<RetranscriptionStatusAnswer, CoreFailure>) -> Void
     ) {
-        completion(locked { retranscriptionReads += 1; return retranscriptionResult })
+        completion(locked {
+            retranscriptionReads += 1
+            retranscriptionCursors.append(after)
+            if let pages = pagedRetranscription {
+                return .success(
+                    pages[after]
+                        ?? RetranscriptionStatusAnswer(candidates: [], moreCandidates: false, replacementsInFlight: 0))
+            }
+            return retranscriptionResult
+        })
     }
 
     func readAudio(
@@ -248,15 +265,56 @@ final class RetentionControlServiceTests: XCTestCase {
                 RetranscriptionCandidateAnswer(itemID: "item-present", audioReference: "FinalizedAudio/p.m4a"),
                 RetranscriptionCandidateAnswer(itemID: "item-absent", audioReference: "FinalizedAudio/a.m4a"),
                 RetranscriptionCandidateAnswer(itemID: "item-removed", audioReference: "FinalizedAudio/r.m4a"),
-            ], moreCandidates: true, replacementsInFlight: 2)))
+            ], moreCandidates: false, replacementsInFlight: 2)))
         let service = makeService()
 
         let status = try await service.retranscriptionStatus()
 
         XCTAssertEqual(
-            status, RetranscriptionStatus(redoableCount: 1, recordingGoneCount: 2, moreCandidates: true, inFlightCount: 2))
+            status, RetranscriptionStatus(redoableCount: 1, recordingGoneCount: 2, moreCandidates: false, inFlightCount: 2))
         let requested = try await service.redoableItemIDs()
         XCTAssertEqual(requested, ["item-present"], "only a present recording is ever requested")
+    }
+
+    func testAFullPageOfGoneRecordingsDoesNotHideAPresentOneBeyondIt() async throws {
+        let batch = RetranscriptionAnswer.maximumBatch
+        let gone = (0..<batch).map {
+            RetranscriptionCandidateAnswer(
+                itemID: String(format: "item-%04d", $0), audioReference: "FinalizedAudio/gone-\($0).m4a")
+        }
+        let present = RetranscriptionCandidateAnswer(itemID: "item-9999", audioReference: "FinalizedAudio/here.m4a")
+        presentItemIDs = ["item-9999"]
+        core.script(retranscriptionPages: [
+            nil: RetranscriptionStatusAnswer(candidates: gone, moreCandidates: true, replacementsInFlight: 3),
+            gone.last?.itemID: RetranscriptionStatusAnswer(
+                candidates: [present], moreCandidates: false, replacementsInFlight: 3),
+        ])
+        let service = makeService()
+
+        let status = try await service.retranscriptionStatus()
+        XCTAssertEqual(
+            status,
+            RetranscriptionStatus(redoableCount: 1, recordingGoneCount: batch, moreCandidates: false, inFlightCount: 3))
+        let requested = try await service.redoableItemIDs()
+        XCTAssertEqual(requested, ["item-9999"], "the present recording past the gone window can still be requested")
+        XCTAssertEqual(core.retranscriptionCursors.compactMap { $0 }.last, gone.last?.itemID)
+    }
+
+    func testPagingForRedoableItemsStopsOnceABatchIsFound() async throws {
+        let batch = RetranscriptionAnswer.maximumBatch
+        let first = (0..<batch).map {
+            RetranscriptionCandidateAnswer(itemID: String(format: "item-%04d", $0), audioReference: "FinalizedAudio/\($0).m4a")
+        }
+        presentItemIDs = Set(first.map(\.itemID))
+        core.script(retranscriptionPages: [
+            nil: RetranscriptionStatusAnswer(candidates: first, moreCandidates: true, replacementsInFlight: 0)
+        ])
+        let service = makeService()
+
+        let requested = try await service.redoableItemIDs()
+
+        XCTAssertEqual(requested.count, batch)
+        XCTAssertEqual(core.retranscriptionReads, 1, "a full batch of present recordings needs no further page")
     }
 
     func testRetranscribeSendsTheNamedItemsAndRequestsADrainOnlyWhenSomethingWasQueued() async throws {

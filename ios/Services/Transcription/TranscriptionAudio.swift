@@ -7,11 +7,18 @@ public protocol TranscriptionAudioLocating: Sendable {
     func audioURL(forReference reference: String) -> URL?
 }
 
-/// Whether a recording is held in place by something the transcription handler must not read around: playback.
-/// Removal of the file is fenced by the retention service, not here (see `TranscriptionJobHandler`).
+/// The fence the transcription handler shares with playback and with audio removal: a recording open for playback is
+/// waited for, and a recording being read is kept from removal. Removal itself is done by the retention service under
+/// the same fence (`PlaybackFence.withUnheld`).
 public protocol TranscriptionAudioFencing: Sendable {
     /// True while the file at `url` is open for playback.
     func isAudioInUse(at url: URL) -> Bool
+
+    /// Keeps removal of the file at `url` (the audio of `itemID`) out until the returned release is called, and returns
+    /// nil when the file is not there to be read or its item was deleted since the job began. A removal that arrives
+    /// while the lease is held is refused as audio in use, so the file never disappears under a digest or a
+    /// recognition; it is retried by its own caller.
+    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)?
 }
 
 /// No audio is ever held. The default for a handler that has no playback to wait for.
@@ -19,11 +26,30 @@ public struct NoTranscriptionAudioFence: TranscriptionAudioFencing {
     public init() {}
 
     public func isAudioInUse(at url: URL) -> Bool { false }
+
+    public func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? { {} }
 }
 
 /// The playback fence the playback service takes a lease in while an item's audio is open.
 extension PlaybackFence: TranscriptionAudioFencing {
     func isAudioInUse(at url: URL) -> Bool { isHeld(url) }
+
+    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? {
+        struct AudioAbsent: Error {}
+        do {
+            // The existence check runs under the fence's lock, so a removal either finished first (and the file is
+            // absent) or waits for the release.
+            let lease = try admit(
+                itemID: itemID, url: url, generation: generation(of: itemID),
+                verify: {
+                    guard FileManager.default.fileExists(atPath: url.path) else { throw AudioAbsent() }
+                },
+                end: { _ in })
+            return { [self] in release(lease) }
+        } catch {
+            return nil
+        }
+    }
 }
 
 /// Resolves references against the finalized audio directory of the protected storage layout.

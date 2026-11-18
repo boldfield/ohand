@@ -21,7 +21,8 @@ import OhAndCoreBridge
 /// * **A replacement is the same job.** A job for a note that is already `transcribed` is a replacement requested
 ///   through the core (F71a). The handler runs it as it runs a first transcription and sends the recognizer's
 ///   `transcriptGeneration`; the core alone decides `replaced`, `unchanged` or `kept`, and each settles the work. A
-///   replacement of audio that is open for playback waits and is retried (`audio_in_use`).
+///   replacement of audio that is open for playback waits and is retried (`audio_in_use`). Every job holds a lease in
+///   the shared fence while it reads the audio, so a removal waits for the job instead of overlapping it.
 /// * Failure reasons are fixed labels, never captured content.
 public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sendable {
     public static let transcriptionJobType = "transcription_attachment"
@@ -100,10 +101,17 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
             return await apply(outcome)
         }
         if isReplacement, audioFence.isAudioInUse(at: audioURL) {
-            // Open for playback: wait and retry rather than read it now. A removal in progress is not waited for: the
-            // file is then absent and the core settles the replacement as kept.
+            // Open for playback: wait and retry rather than read it now. This spends the job's retry budget; a
+            // replacement that stays blocked until it is exhausted ends as a failed job, and asking again queues a
+            // new one.
             return .transientFailure(reason: "audio_in_use")
         }
+        // Keep a removal (retention sweep or the user's) from unlinking the file under the digest and the recognition;
+        // it waits for the release. A file already removed is absent here, and the core settles that as kept.
+        guard let releaseAudio = audioFence.holdAgainstRemoval(itemID: source.itemID, at: audioURL) else {
+            return await apply(outcome)
+        }
+        defer { releaseAudio() }
         let digest: String
         switch TranscriptionAudioDigest.read(from: audioURL) {
         case .digest(let value):

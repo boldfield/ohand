@@ -131,6 +131,50 @@ final class TranscriptionJobHandlerTests: XCTestCase {
         XCTAssertEqual(core.applied.count, 1)
     }
 
+    func testARemovalWaitsWhileTheJobReadsTheAudioAndTheJobSettlesBeforeItRuns() async throws {
+        for isReplacement in [false, true] {
+            let source = TranscriptionFixtures.source(
+                audioReference: reference, transcriptionState: isReplacement ? "transcribed" : "pending")
+            let core = makeCore(source: source)
+            let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "the whole note", confidence: nil))
+            let fence = PlaybackFence()
+            let removalDuringRecognition = RemovalProbe()
+            let url = audioURL
+            recognizer.setOnRecognize { _ in
+                // A retention sweep or the user's removal arriving while the recognizer reads the file.
+                do {
+                    try fence.withUnheld(url) { removalDuringRecognition.record(ran: true) }
+                } catch {
+                    removalDuringRecognition.record(ran: false)
+                }
+            }
+
+            let result = await makeHandler(core: core, recognizer: recognizer, audioFence: fence).run(run)
+
+            XCTAssertEqual(result, .settled)
+            XCTAssertEqual(removalDuringRecognition.outcomes, [false], "the removal is refused while the job reads")
+            XCTAssertEqual(core.applied.count, 1)
+            // The lease is released when the job ends, so the removal can then go ahead.
+            var removedAfter = false
+            try fence.withUnheld(url) { removedAfter = true }
+            XCTAssertTrue(removedAfter)
+        }
+    }
+
+    func testAJobForAudioRemovedBeforeItReadsIsAppliedAsMissingNotRecognized() async throws {
+        let source = TranscriptionFixtures.source(audioReference: reference, transcriptionState: "transcribed")
+        let core = makeCore(source: source)
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "never read", confidence: nil))
+        let fence = PlaybackFence()
+        try fence.withUnheld(audioURL) { try FileManager.default.removeItem(at: audioURL) }
+
+        let result = await makeHandler(core: core, recognizer: recognizer, audioFence: fence).run(run)
+
+        XCTAssertEqual(result, .settled, "the core settles the replacement as kept")
+        XCTAssertEqual(recognizer.callCount, 0)
+        XCTAssertEqual(core.applied.count, 1)
+    }
+
     func testAFirstTranscriptionDoesNotWaitForPlayback() async {
         let core = makeCore()
         let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "first time", confidence: nil))
@@ -399,6 +443,24 @@ final class TranscriptionJobHandlerTests: XCTestCase {
     }
 }
 
+/// Records whether a removal attempted during recognition ran.
+private final class RemovalProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Bool] = []
+
+    var outcomes: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(ran: Bool) {
+        lock.lock()
+        recorded.append(ran)
+        lock.unlock()
+    }
+}
+
 /// An audio fence that holds the files it is given until they are released.
 private final class HeldAudioFence: TranscriptionAudioFencing, @unchecked Sendable {
     private let lock = NSLock()
@@ -419,4 +481,6 @@ private final class HeldAudioFence: TranscriptionAudioFencing, @unchecked Sendab
         defer { lock.unlock() }
         return held.contains(url.standardizedFileURL.path)
     }
+
+    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? { {} }
 }

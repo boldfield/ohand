@@ -17,6 +17,7 @@ final class ScriptedAudioReadCore: RetentionControlCore, @unchecked Sendable {
     }
 
     func readRetranscriptionStatus(
+        after: String?,
         completion: @escaping @Sendable (Result<RetranscriptionStatusAnswer, CoreFailure>) -> Void
     ) {
         completion(.failure(CoreFailure(errorClass: .permanent, code: "unused", message: "unused")))
