@@ -145,16 +145,20 @@ final class SpeechFrameworkRecognizerTests: XCTestCase {
             text: text, segmentConfidences: [confidence], audioStart: start, audioEnd: end, isFinal: isFinal)
     }
 
-    private func outcomeOfSession(_ drive: (RecognitionSession) -> Void) async -> OnDeviceRecognitionOutcome {
+    private func outcomeOfSession(
+        task: FakeRecognitionTask = FakeRecognitionTask(), _ drive: (RecognitionSession) -> Void
+    ) async -> OnDeviceRecognitionOutcome {
         let session = RecognitionSession(keepingAlive: NSObject())
         return await withCheckedContinuation { (continuation: CheckedContinuation<OnDeviceRecognitionOutcome, Never>) in
             XCTAssertTrue(session.install(continuation))
+            session.attach(task)
             drive(session)
         }
     }
 
     func testANonFinalResultDoesNotResumeAndTheFinalOneResumesOnceWithEverySegment() async throws {
         let session = RecognitionSession(keepingAlive: NSObject())
+        session.attach(FakeRecognitionTask())
         let progress = ResumeProgress()
         let running = Task { () -> OnDeviceRecognitionOutcome in
             let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<OnDeviceRecognitionOutcome, Never>) in
@@ -178,12 +182,14 @@ final class SpeechFrameworkRecognizerTests: XCTestCase {
     }
 
     func testCancellationBetweenResultsStillReturnsCancelled() async {
-        let outcome = await outcomeOfSession { session in
+        let task = FakeRecognitionTask()
+        let outcome = await outcomeOfSession(task: task) { session in
             session.receive(segment("first part", from: 0, to: 8.5))
             session.cancel()
             session.receive(segment("last part", from: 11.6, to: 20.9, isFinal: true))
         }
         XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(task.cancelCount, 1)
     }
 
     func testAnErrorAfterANonFinalResultReturnsTheErrorsOutcome() async {

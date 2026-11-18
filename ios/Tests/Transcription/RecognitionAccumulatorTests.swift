@@ -82,6 +82,16 @@ final class RecognitionAccumulatorTests: XCTestCase {
             "alpha beta gamma")
     }
 
+    func testARestatementLeavesALaterNonOverlappingResultInPlace() {
+        XCTAssertEqual(
+            transcript(of: [
+                result("alpha", from: 0, to: 3),
+                result("beta", from: 5, to: 8),
+                result("gamma", from: 2, to: 4, isFinal: true),
+            ]),
+            "gamma beta")
+    }
+
     func testEmptyAndSegmentlessResultsContributeNothing() {
         var accumulator = RecognitionAccumulator()
         accumulator.add(result("start", from: 0, to: 2))

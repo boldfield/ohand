@@ -48,12 +48,15 @@ struct RecognitionAccumulator {
         guard !trimmedText.isEmpty, let audioStart = result.audioStart, let audioEnd = result.audioEnd else {
             return
         }
-        acceptedResults.removeAll { $0.audioEnd > audioStart }
-        acceptedResults.append(
-            AcceptedResult(
-                text: trimmedText,
-                segmentConfidences: result.segmentConfidences,
-                audioStart: audioStart,
-                audioEnd: audioEnd))
+        // Strict comparisons, as specified: a result that starts before an accepted one ends restates it. Results that
+        // only touch, or that lie wholly before or after the new one, stay.
+        acceptedResults.removeAll { $0.audioEnd > audioStart && $0.audioStart < audioEnd }
+        let accepted = AcceptedResult(
+            text: trimmedText,
+            segmentConfidences: result.segmentConfidences,
+            audioStart: audioStart,
+            audioEnd: audioEnd)
+        let insertionIndex = acceptedResults.firstIndex { $0.audioStart > audioStart } ?? acceptedResults.endIndex
+        acceptedResults.insert(accepted, at: insertionIndex)
     }
 }
