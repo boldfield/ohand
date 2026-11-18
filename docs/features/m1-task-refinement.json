@@ -4737,10 +4737,7 @@
         "ios/Tests/Playback/",
         "ios/Services/Assembly/CompositionRoot.swift (additive)",
         "app/source-detail/SourceDetailModel.swift (interruption state only)",
-        "ios/Tests/SourceDetail/",
-        "ios/AppAssembly/AppServices.swift (recording-start hook, amendment 1)",
-        "ios/AppAssembly/VoiceServiceAdapters.swift (recording-start hook, amendment 1)",
-        "ios/Tests/VoiceCapture/PlaybackEndingVoiceEngineTests.swift"
+        "ios/Tests/SourceDetail/"
       ],
       "intent": "Set and activate a playback audio session before playing retained audio and release it when playback ends, so Play is audible after a recording and with the silent switch on.",
       "acceptance": [
