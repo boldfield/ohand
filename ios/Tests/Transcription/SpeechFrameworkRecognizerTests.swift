@@ -158,11 +158,12 @@ final class SpeechFrameworkRecognizerTests: XCTestCase {
 
     func testANonFinalResultDoesNotResumeAndTheFinalOneResumesOnceWithEverySegment() async throws {
         let session = RecognitionSession(keepingAlive: NSObject())
-        session.attach(FakeRecognitionTask())
+        let task = FakeRecognitionTask()
         let progress = ResumeProgress()
         let running = Task { () -> OnDeviceRecognitionOutcome in
             let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<OnDeviceRecognitionOutcome, Never>) in
                 XCTAssertTrue(session.install(continuation))
+                session.attach(task)
                 progress.markInstalled()
             }
             progress.markResumed()
@@ -176,6 +177,7 @@ final class SpeechFrameworkRecognizerTests: XCTestCase {
         session.receive(segment("late", from: 25, to: 26, isFinal: true))
         let outcome = await running.value
         XCTAssertEqual(progress.resumeCount, 1)
+        XCTAssertEqual(task.cancelCount, 0, "the attached task is not cancelled when the recognition completes normally")
         guard case .transcript(let text, let confidence) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(text, "first part last part")
         XCTAssertEqual(confidence ?? 0, 0.6, accuracy: 0.0001)
