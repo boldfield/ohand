@@ -18,6 +18,22 @@ public protocol TranscriptionAudioFencing: Sendable {
     /// nil when the file is not there to be read or its item was deleted since the job began. A removal that arrives
     /// while the lease is held is refused as audio in use, so the file never disappears under a digest or a
     /// recognition; it is retried by its own caller.
+    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)?
+}
+
+/// No audio is ever held. The default for a handler that has no playback to wait for.
+public struct NoTranscriptionAudioFence: TranscriptionAudioFencing {
+    public init() {}
+
+    public func isAudioInUse(at url: URL) -> Bool { false }
+
+    public func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? { {} }
+}
+
+/// The playback fence the playback service takes a lease in while an item's audio is open.
+extension PlaybackFence: TranscriptionAudioFencing {
+    func isAudioInUse(at url: URL) -> Bool { isHeld(url) }
+
     func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? {
         struct AudioAbsent: Error {}
         let lease = LeaseBox()
