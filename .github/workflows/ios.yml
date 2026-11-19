@@ -665,6 +665,7 @@ jobs:
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
             ios/.evidence/simulator.txt
+            ios/.evidence/simulator-recoveries.txt
             !ios/.evidence/**/*.xcresult
             !ios/.evidence/**/*.xcresult/**
           include-hidden-files: true

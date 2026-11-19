@@ -12,13 +12,22 @@
 # gives a suite a `simctl clone` of such a settled device (first-boot state kept, no app data), which the caller deletes.
 # Every preparation appends one line (label, kind, time to responsive, highest 1-minute load, lowest free memory) to the
 # file named by OHAND_HOST_PRESSURE_FILE, if set. That file is diagnostic only.
+# If the device does not become responsive, or the host does not settle, the preparation makes exactly one recovery attempt
+# (host snapshot, shut down every simulator, restart the CoreSimulator service, wait up to 120 s for the host to quieten) and
+# then repeats the same preparation with the same gates and timeouts; a second failure exits 1. Each recovery prints a
+# `::warning::` line, records kind `<kind>-recovered` or `<kind>-failed-twice` in the pressure file and appends one line
+# (label, kind, first-attempt seconds, second-attempt seconds, outcome) to simulator-recoveries.txt beside that file.
 # Usage: prepare-simulator.sh <simulator-udid> [--erase] [--shutdown-after] [--label <name>]
 #        prepare-simulator.sh --clone <settled-simulator-udid> --udid-file <path> [--label <name>]
 set -euo pipefail
 
 responsive_probe_limit_seconds=3
 responsive_probes_required=10
-responsive_timeout_seconds=480
+# The OHAND_TEST_* variables are read only by test_prepare_simulator.py so the suite runs in seconds; the defaults are the gates.
+responsive_timeout_seconds="${OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS:-480}"
+probe_interval_seconds="${OHAND_TEST_PROBE_INTERVAL_SECONDS:-1}"
+recovery_quiet_wait_seconds="${OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS:-120}"
+recovery_quiet_idle_percent=50
 probe_hard_limit_seconds=10
 # After the readiness gate passes, a first or cloned boot keeps the runner busy with first-boot work. CPU idle cannot be the
 # signal on a hosted runner: run 40165860852 on macos-26-intel stayed at 0% idle for 8 minutes with a fully responsive
@@ -26,8 +35,12 @@ probe_hard_limit_seconds=10
 # The settle step therefore asks the question UI tests care about, stricter than the readiness gate: the simulator must
 # answer 30 probes in a row, each within 3 s (the gate needs 10). If that does not happen within 480 s the preparation
 # fails with a host snapshot, so no UI test starts on a starved host. CPU idle is still logged for diagnosis.
-settle_probes_required=30
-settle_timeout_seconds=480
+settle_probes_required="${OHAND_TEST_SETTLE_PROBES:-30}"
+settle_timeout_seconds="${OHAND_TEST_SETTLE_TIMEOUT_SECONDS:-480}"
+# Test-only: a test can time the first attempt out quickly while the recovery attempt keeps a generous window, so a healthy
+# fake device never races a short deadline. Unset, both attempts use the same timeouts.
+first_attempt_responsive_timeout_seconds="${OHAND_TEST_FIRST_ATTEMPT_RESPONSIVE_TIMEOUT_SECONDS:-${responsive_timeout_seconds}}"
+first_attempt_settle_timeout_seconds="${OHAND_TEST_FIRST_ATTEMPT_SETTLE_TIMEOUT_SECONDS:-${settle_timeout_seconds}}"
 
 udid=""
 erase=0
@@ -124,17 +137,18 @@ wait_for_simulator_to_respond() {
       log "simulator responsive after $((SECONDS - started))s"
       return 0
     fi
-    sleep 1
+    sleep "${probe_interval_seconds}"
   done
   log "ERROR: simulator did not answer ${required} probes in a row within ${responsive_probe_limit_seconds}s inside ${timeout}s"
   return 1
 }
 
 wait_for_host_to_settle() {
+  local timeout="$1"
   local idle
   idle="$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
   log "settle: waiting for ${settle_probes_required} probes in a row (CPU ${idle:-unknown}% idle, diagnostic only)"
-  wait_for_simulator_to_respond "${settle_probes_required}" "${settle_timeout_seconds}"
+  wait_for_simulator_to_respond "${settle_probes_required}" "${timeout}"
 }
 
 step() {
@@ -161,46 +175,130 @@ record_pressure() {
 
 if [ -n "${clone_of}" ]; then
   kind="clone"
-  # The settled template is shut down, and no other simulator may be running while the clone boots: shut down all of them.
-  log "shutting down every booted simulator before cloning"
-  xcrun simctl shutdown all 2>/dev/null || true
-  host_snapshot "before"
-  sample_pressure
-  prepare_started=${SECONDS}
-  udid="$(xcrun simctl clone "${clone_of}" "ohand-${label}-$$")"
-  log "cloned settled simulator ${clone_of} to ${udid}"
-  echo "${udid}" > "${udid_file}"
 else
   kind="warm-boot"
   if [ "${erase}" -eq 1 ]; then
     kind="cold-boot"
   fi
-  log "preparing simulator ${udid} (kind=${kind})"
-  host_snapshot "before"
+fi
+
+# Sets failed_gate to "responsive" or "settle" and returns 1 when a gate fails. Other failures exit the script. Called in an
+# `if`, where `set -e` does not apply, so the steps that must not fail exit explicitly.
+failed_gate=""
+attempt_seconds=0
+attempt_preparation() {
+  local first_call="$1"
+  local attempt_responsive_timeout="${responsive_timeout_seconds}" attempt_settle_timeout="${settle_timeout_seconds}"
+  if [ "${first_call}" -eq 1 ]; then
+    attempt_responsive_timeout="${first_attempt_responsive_timeout_seconds}"
+    attempt_settle_timeout="${first_attempt_settle_timeout_seconds}"
+  fi
+  if [ -n "${clone_of}" ]; then
+    # The settled template is shut down, and no other simulator may be running while the clone boots: shut down all of them.
+    log "shutting down every booted simulator before cloning"
+    xcrun simctl shutdown all 2>/dev/null || true
+    host_snapshot "before"
+    sample_pressure
+    prepare_started=${SECONDS}
+    udid="$(xcrun simctl clone "${clone_of}" "ohand-${label}-$$-${first_call}")" || exit 1
+    log "cloned settled simulator ${clone_of} to ${udid}"
+    # errexit is off inside a function called from an `if`, so a failed write must exit explicitly or the caller keeps a stale UDID.
+    echo "${udid}" > "${udid_file}" || { echo "cannot write ${udid_file}" >&2; exit 1; }
+  else
+    log "preparing simulator ${udid} (kind=${kind})"
+    host_snapshot "before"
+    sample_pressure
+    prepare_started=${SECONDS}
+    step shutdown xcrun simctl shutdown "${udid}" 2>/dev/null || true
+    if [ "${erase}" -eq 1 ]; then
+      step erase xcrun simctl erase "${udid}" || exit 1
+    fi
+  fi
+  step boot xcrun simctl boot "${udid}" 2>/dev/null || true
+  step bootstatus xcrun simctl bootstatus "${udid}" -b >/dev/null || exit 1
+
+  if ! wait_for_simulator_to_respond "${responsive_probes_required}" "${attempt_responsive_timeout}"; then
+    host_snapshot "simulator never became responsive"
+    failed_gate="responsive"
+    attempt_seconds="$((SECONDS - prepare_started))"
+    return 1
+  fi
   sample_pressure
-  prepare_started=${SECONDS}
-  step shutdown xcrun simctl shutdown "${udid}" 2>/dev/null || true
-  if [ "${erase}" -eq 1 ]; then
-    step erase xcrun simctl erase "${udid}"
+  host_snapshot "after boot completed and simulator responsive"
+  responsive_seconds="$((SECONDS - prepare_started))"
+  if ! wait_for_host_to_settle "${attempt_settle_timeout}"; then
+    host_snapshot "host never settled"
+    failed_gate="settle"
+    attempt_seconds="$((SECONDS - prepare_started))"
+    return 1
+  fi
+  # The whole attempt, both gates included, so the recoveries file compares like with like; record_pressure keeps the
+  # time to responsive for its own column.
+  attempt_seconds="$((SECONDS - prepare_started))"
+  return 0
+}
+
+# Shuts down every simulator, restarts the CoreSimulator service and waits (bounded) for the host to quieten. The failed
+# clone is deleted so a new one can be made from the template.
+recover_host() {
+  log "recovery: shutting down every simulator and restarting the CoreSimulator service"
+  xcrun simctl shutdown all 2>/dev/null || true
+  if [ -n "${clone_of}" ]; then
+    xcrun simctl delete "${udid}" 2>/dev/null || true
+  fi
+  killall com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null || true
+  # The deadline is wall-clock and checked before every sample; a sample is cut off at the deadline (the alarm survives
+  # exec), so neither `top` nor a sleep can carry the wait past it.
+  local started deadline remaining waited idle=""
+  started="$(now_seconds)"
+  deadline="$(awk -v s="${started}" -v w="${recovery_quiet_wait_seconds}" 'BEGIN {printf "%.2f", s + w}')"
+  while :; do
+    remaining="$(awk -v d="${deadline}" -v n="$(now_seconds)" 'BEGIN {r = d - n; printf "%.2f", (r > 0 ? r : 0)}')"
+    if awk -v r="${remaining}" 'BEGIN { exit !(r <= 0) }'; then
+      log "recovery: stopped waiting for the host to quieten at the ${recovery_quiet_wait_seconds}s deadline"
+      break
+    fi
+    idle="$(perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV' "${remaining}" top -l 2 -n 0 -s 1 2>/dev/null | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9.]+)% idle.*/\1/')" || idle=""
+    # A sample cut off or unreadable is not a number; it never ends the wait early.
+    [[ "${idle}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || idle=""
+    waited="$(awk -v s="${started}" -v n="$(now_seconds)" 'BEGIN {printf "%.2f", n - s}')"
+    log "recovery: waiting for the host to quieten (CPU ${idle:-unknown}% idle, ${waited}s of ${recovery_quiet_wait_seconds}s)"
+    if [ -n "${idle}" ] && awk -v i="${idle}" -v t="${recovery_quiet_idle_percent}" 'BEGIN { exit !(i >= t) }'; then
+      break
+    fi
+    remaining="$(awk -v d="${deadline}" -v n="$(now_seconds)" 'BEGIN {r = d - n; printf "%.2f", (r > 5 ? 5 : (r > 0 ? r : 0))}')"
+    sleep "${remaining}"
+  done
+}
+
+record_recovery() {
+  local outcome="$1" first_seconds="$2" second_seconds="$3"
+  if [ -n "${OHAND_HOST_PRESSURE_FILE:-}" ]; then
+    local recoveries_file
+    recoveries_file="$(dirname "${OHAND_HOST_PRESSURE_FILE}")/simulator-recoveries.txt"
+    echo "${label} ${kind} ${first_seconds} ${second_seconds} ${outcome}" >> "${recoveries_file}"
+  fi
+}
+
+if attempt_preparation 1; then
+  record_pressure "${kind}" "${responsive_seconds}"
+else
+  first_gate="${failed_gate}"
+  first_seconds="${attempt_seconds}"
+  echo "::warning::simulator preparation ${label} (${kind}): the ${first_gate} gate failed; recovering once"
+  host_snapshot "recovery"
+  recover_host
+  if attempt_preparation 2; then
+    echo "::warning::simulator preparation ${label} (${kind}): recovered after the ${first_gate} gate failed on the first attempt"
+    record_pressure "${kind}-recovered" "${responsive_seconds}"
+    record_recovery "recovered" "${first_seconds}" "${attempt_seconds}"
+  else
+    echo "::warning::simulator preparation ${label} (${kind}): failed twice (first the ${first_gate} gate, then the ${failed_gate} gate)"
+    record_pressure "${kind}-failed-twice" "${attempt_seconds}"
+    record_recovery "failed-twice" "${first_seconds}" "${attempt_seconds}"
+    exit 1
   fi
 fi
-step boot xcrun simctl boot "${udid}" 2>/dev/null || true
-step bootstatus xcrun simctl bootstatus "${udid}" -b >/dev/null
-
-if ! wait_for_simulator_to_respond; then
-  host_snapshot "simulator never became responsive"
-  record_pressure "${kind}-failed" "$((SECONDS - prepare_started))"
-  exit 1
-fi
-sample_pressure
-host_snapshot "after boot completed and simulator responsive"
-responsive_seconds="$((SECONDS - prepare_started))"
-if ! wait_for_host_to_settle; then
-  host_snapshot "host never settled"
-  record_pressure "${kind}-unsettled" "${responsive_seconds}"
-  exit 1
-fi
-record_pressure "${kind}" "${responsive_seconds}"
 if [ "${shutdown_after}" -eq 1 ]; then
   step "shutdown after settling" xcrun simctl shutdown "${udid}"
 fi
