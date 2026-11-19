@@ -199,15 +199,16 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          xcodebuild test-without-building \
+          # A launch or device fault before any assertion ran is retried once; retry-simulator-step.sh writes the log.
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/OhAndTests.log -- xcodebuild test-without-building \
             -project OhAnd.xcodeproj \
             -scheme OhAndTests \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
             -derivedDataPath .derived \
-            -resultBundlePath .evidence/OhAndTests.xcresult \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
+            -resultBundlePath ".evidence/OhAndTests%ATTEMPT_SUFFIX%.xcresult" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 
       - name: Run credential cross-process relaunch check
         shell: bash
@@ -232,18 +233,18 @@ jobs:
           for suite in NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests; do
             ./scripts/prepare-simulator.sh --clone "${TEMPLATE_UDID}" --udid-file .evidence/suite-udid.txt --label "${suite}"
             suite_udid="$(cat .evidence/suite-udid.txt)"
-            rm -rf "${evidence_dir}/${suite}.xcresult"
+            rm -rf "${evidence_dir}/${suite}"*.xcresult
             suite_status=0
-            xcodebuild test-without-building \
+            ./scripts/retry-simulator-step.sh "${suite_udid}" "${evidence_dir}/${suite}.log" -- xcodebuild test-without-building \
               -project OhAnd.xcodeproj \
               -scheme NotificationProbeUITests \
               -configuration Debug \
               -sdk iphonesimulator \
               -destination "platform=iOS Simulator,id=${suite_udid}" \
               -derivedDataPath .derived \
-              -resultBundlePath "${evidence_dir}/${suite}.xcresult" \
+              -resultBundlePath "${evidence_dir}/${suite}%ATTEMPT_SUFFIX%.xcresult" \
               -only-testing:"NotificationProbeUITests/${suite}" \
-              CODE_SIGNING_ALLOWED=NO 2>&1 | tee "${evidence_dir}/${suite}.log" || suite_status=$?
+              CODE_SIGNING_ALLOWED=NO || suite_status=$?
             if [ "${suite_status}" -ne 0 ]; then
               overall_status="${suite_status}"
             fi
@@ -275,12 +276,12 @@ jobs:
           set -euo pipefail
           echo "Smoke test device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
-          ./scripts/smoke-simulator.sh \
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/smoke.log -- ./scripts/smoke-simulator.sh \
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app \
             com.boldfield.ohand.probes.bridge \
             .evidence \
-            "bridgeprobe-launch.png" 2>&1 | tee .evidence/smoke.log
+            "bridgeprobe-launch.png"
 
       - name: Launch CredentialProbe smoke test
         shell: bash
@@ -292,12 +293,12 @@ jobs:
           set -euo pipefail
           echo "CredentialProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
-          ./scripts/smoke-simulator.sh \
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/credential-smoke.log -- ./scripts/smoke-simulator.sh \
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app \
             com.boldfield.ohand.probes.credential \
             .evidence \
-            "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
+            "credentialprobe-launch.png"
 
       - name: Launch OhAndApp smoke test
         shell: bash
@@ -309,12 +310,12 @@ jobs:
           set -euo pipefail
           echo "OhAndApp smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
-          ./scripts/smoke-simulator.sh \
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/ohandapp-smoke.log -- ./scripts/smoke-simulator.sh \
             "${SIMULATOR_UDID}" \
             .derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app \
             com.boldfield.ohand.app \
             .evidence \
-            "ohandapp-launch.png" 2>&1 | tee .evidence/ohandapp-smoke.log
+            "ohandapp-launch.png"
 
       - name: Verify OhAndApp embedded frameworks
         shell: bash
@@ -348,12 +349,12 @@ jobs:
           set -euo pipefail
           echo "TranscriptionProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
-          ./scripts/smoke-simulator.sh \
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/transcription-smoke.log -- ./scripts/smoke-simulator.sh \
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/TranscriptionProbe.app \
             com.boldfield.ohand.probes.transcription \
             .evidence \
-            "transcriptionprobe-launch.png" 2>&1 | tee .evidence/transcription-smoke.log
+            "transcriptionprobe-launch.png"
 
       - name: CaptureProbe handoff UI test and ingress smoke test
         shell: bash
@@ -553,13 +554,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-  # Accessibility audits at the default and the largest accessibility content size on one iPhone simulator. Any audit
-  # issue fails the job; the artifact holds the audit log, the summary and the large-text screenshots.
+  # Accessibility audits at the default and the largest accessibility content size, in two jobs that each run half of the
+  # tests (ios/scripts/accessibility-groups.txt) at both sizes, in order, on their own iPhone simulator: the largest size
+  # settles from the default size's settled-default.txt, so the sizes cannot be split, the tests can. Any audit issue fails
+  # the job; each artifact holds the audit log, the summary and the large-text screenshots.
   accessibility:
-    name: Accessibility audits (default and largest text)
+    name: accessibility (group ${{ matrix.group }})
     runs-on: xcode-27
     # Generating the project alone took 8 minutes on one hosted runner (run 41720210504), and the two audit runs about 45.
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [a, b]
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
@@ -624,10 +631,11 @@ jobs:
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          AUDIT_GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
           cd ios
-          ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence
+          ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence "${AUDIT_GROUP}"
 
       - name: Show host pressure
         if: always()
@@ -656,7 +664,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: ios-accessibility
+          name: ios-accessibility-${{ matrix.group }}
           path: |
             ios/.evidence/accessibility/audit-*.log
             ios/.evidence/accessibility/settled-*.txt
@@ -664,6 +672,7 @@ jobs:
             ios/.evidence/accessibility/xxxl-*.png
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
+            ios/.evidence/accessibility-*.attempt-1
             ios/.evidence/simulator.txt
             ios/.evidence/simulator-recoveries.txt
             !ios/.evidence/**/*.xcresult
@@ -687,7 +696,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: ios-accessibility-failure
+          name: ios-accessibility-${{ matrix.group }}-failure
           path: |
             ios/.evidence/failure-diagnostics
             ios/.evidence/accessibility/default-*.jpg
@@ -789,6 +798,9 @@ jobs:
           echo "App bundle: ${app_path}" | tee -a .evidence/roundtrip.log
           plutil -p "${app_path}/Info.plist" > .evidence/app-Info.plist.txt
 
+          # A device fault before any assertion ran (no booted device, no display port) is retried once by
+          # retry-simulator-step.sh, which re-prepares the device; the install, launch and assertions run again.
+          roundtrip_check() {
           xcrun simctl bootstatus "${SIMULATOR_UDID}" -b 2>&1 | tee -a .evidence/roundtrip.log
           xcrun simctl install "${SIMULATOR_UDID}" "${app_path}" 2>&1 | tee -a .evidence/roundtrip.log
           launch_output="$(xcrun simctl launch --stdout="$PWD/.evidence/app-stdout.log" --stderr="$PWD/.evidence/app-stderr.log" "${SIMULATOR_UDID}" "${bundle_id}")"
@@ -823,6 +835,10 @@ jobs:
           xcrun simctl io "${SIMULATOR_UDID}" screenshot .evidence/screenshot.png
           test -s .evidence/screenshot.png
           echo "Tauri probe passed" | tee -a .evidence/roundtrip.log
+          }
+          export -f roundtrip_check
+          export app_path bundle_id
+          ../../ios/scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/roundtrip-run.log -- bash -c 'set -euo pipefail; roundtrip_check'
 
       - name: Install XcodeGen launcher
         run: brew install mint
@@ -849,17 +865,18 @@ jobs:
           (
             cd ../../ios
             ./scripts/generate.sh
-            rm -rf "${evidence_dir}/ManagementHandoffUITests.xcresult"
-            xcodebuild test \
+            rm -rf "${evidence_dir}"/ManagementHandoffUITests*.xcresult
+            # A launch or device fault before any assertion ran is retried once; retry-simulator-step.sh writes ${log_file}.
+            ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" "${log_file}" -- xcodebuild test \
               -project OhAnd.xcodeproj \
               -scheme ManagementHandoffUITests \
               -configuration Debug \
               -sdk iphonesimulator \
               -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
               -derivedDataPath .derived \
-              -resultBundlePath "${evidence_dir}/ManagementHandoffUITests.xcresult" \
+              -resultBundlePath "${evidence_dir}/ManagementHandoffUITests%ATTEMPT_SUFFIX%.xcresult" \
               CODE_SIGNING_ALLOWED=NO
-          ) 2>&1 | tee "${log_file}" || uitest_status=$?
+          ) 2>&1 || uitest_status=$?
 
           grep -o 'HANDOFF-PHASE .*' "${log_file}" | awk '!seen[$2]++' | tee "${evidence_dir}/handoff-phases.txt" || true
 

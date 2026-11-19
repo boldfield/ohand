@@ -23,10 +23,16 @@ struct ScreenElement: Equatable {
         "\(card)|\(identifier)|\(stableLabel(label))"
     }
 
-    /// A Home card named by what it says, without the age in its caption ("8 sec. ago"), so the same card has the same
-    /// name in every launch and at both text sizes (its identifier is a new UUID each launch).
+    /// A Home card named by what it says, without the age in its caption, so the same card has the same name in every
+    /// launch and at both text sizes (its identifier is a new UUID each launch). The age is a position in the caption, what
+    /// stands between the type's separator and the comma that ends the caption ("Action \u{00B7} now, text", "Action \u{00B7} 4 sec. ago, text",
+    /// "Idea \u{00B7} yesterday, text", "Note \u{00B7} in 4 sec., text"), not a list of phrases, because the formatter writes an age of zero
+    /// as "now" and the next stop writes the same card as "4 sec. ago".
     static func cardName(_ cardLabel: String) -> String {
-        cardLabel.replacingOccurrences(of: "[0-9]+ [A-Za-z]+\\.? ago", with: "", options: .regularExpression)
+        guard let separator = cardLabel.range(of: " \u{00B7} "),
+              let comma = cardLabel.range(of: ",", range: separator.upperBound..<cardLabel.endIndex)
+        else { return cardLabel }
+        return String(cardLabel[..<separator.upperBound]) + String(cardLabel[comma.lowerBound...])
     }
 }
 

@@ -4888,6 +4888,52 @@
         "ios/scripts/smoke-capture-simulator.sh",
         "ios/scripts/prepare-simulator.sh"
       ]
+    },
+    {
+      "key": "F72",
+      "parent": null,
+      "title": "Accessibility audit: a Home card keeps one name however its age is worded",
+      "file_scope": [
+        "ios/UITests/Accessibility/",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Stop testHomePopulated failing when a card's caption age changes wording between audit stops, and diagnose the remaining unsettled-excuse failures from evidence.",
+      "acceptance": [
+        "See the F72 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/UITests/Accessibility/GlassContrast.swift",
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift",
+        "app/home/HomeBodyView.swift"
+      ]
+    },
+    {
+      "key": "CI06",
+      "parent": null,
+      "title": "Split the accessibility job into two parallel halves by test group",
+      "file_scope": [
+        ".github/workflows/ios.yml (accessibility job)",
+        "ios/scripts/accessibility-simulator.sh",
+        "ios/scripts/ (new groups file and its test)",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/test_accessibility_gate.py",
+        "Makefile (ios-check)",
+        "AGENTS.md (macOS checks passage)",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Run the accessibility audits as two parallel jobs split by test group, each at both text sizes, so each finishes well inside the time limit and a flaky failure reruns half the work.",
+      "acceptance": [
+        "See the CI06 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/accessibility-simulator.sh",
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5767,7 +5813,9 @@
     "CI04": [],
     "CI05": [
       "CI04"
-    ]
+    ],
+    "F72": [],
+    "CI06": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -6113,6 +6161,14 @@
     {
       "date": "2026-11-18",
       "change": "F70 amendment 1: F70 also owns additive edits to ios/AppAssembly/AppServices.swift and VoiceServiceAdapters.swift and new tests under ios/Tests/VoiceCapture/, which scope item 2 needs; criterion 3 requires a test that fails if the production assignment in AppServices.swift is removed. Requested by reviewers on PRs #410 and #414; the narrow original ownership was the coordinator's omission."
+    },
+    {
+      "date": "2026-11-19",
+      "change": "F72 added: testHomePopulated failed in four hosted attempts on three unrelated pull requests because a Home card's ledger name changes when its caption age goes from 'now' to 'N sec. ago'; a second, undiagnosed cause is to be established from the audit logs. The audit rule is unchanged and nothing is retried."
+    },
+    {
+      "date": "2026-11-19",
+      "change": "CI06 added at the maintainer's request: the accessibility job is split into two parallel jobs by test group. It cannot be split by text size because the largest-size pass settles owed elements from the default-size pass's settled-default.txt. The 75-minute limit is not raised."
     }
   ]
 }

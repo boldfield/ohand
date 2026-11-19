@@ -40,16 +40,17 @@ echo "=== Removing any earlier install so the data container starts empty ==="
 xcrun simctl uninstall "${udid}" "${bundle_id}" 2>/dev/null || true
 
 echo "=== Running CaptureProbeUITests ==="
-rm -rf "${evidence_dir}/CaptureProbeUITests.xcresult"
-xcodebuild test-without-building \
+rm -rf "${evidence_dir}"/CaptureProbeUITests*.xcresult
+# A launch or device fault before any assertion ran is retried once (retry-simulator-step.sh); it writes ${ui_test_log}.
+"${script_dir}/retry-simulator-step.sh" "${udid}" "${ui_test_log}" -- xcodebuild test-without-building \
   -project OhAnd.xcodeproj \
   -scheme CaptureProbeUITests \
   -configuration Debug \
   -sdk iphonesimulator \
   -destination "platform=iOS Simulator,id=${udid}" \
   -derivedDataPath .derived \
-  -resultBundlePath "${evidence_dir}/CaptureProbeUITests.xcresult" \
-  CODE_SIGNING_ALLOWED=NO 2>&1 | tee "${ui_test_log}"
+  -resultBundlePath "${evidence_dir}/CaptureProbeUITests%ATTEMPT_SUFFIX%.xcresult" \
+  CODE_SIGNING_ALLOWED=NO
 
 echo "=== Rendered phases ==="
 phase_lines="$(grep -o 'CAPTURE-PHASE .*' "${ui_test_log}" | awk '!seen[$2]++')"

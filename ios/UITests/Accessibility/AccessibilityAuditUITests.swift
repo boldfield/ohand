@@ -880,11 +880,19 @@ final class AccessibilityAuditUITests: XCTestCase {
             attempted.insert(owed.key)
             guard let placement = owedPlacements[owed.key] else { continue }
             let screenFrame = app.frame
-            for _ in 0..<6 {
-                let elements = screenElements()
-                guard let target = elements.first(where: { $0.key == owed.key }) else { break }
+            for drag in 0..<6 {
+                var elements = screenElements()
+                // The audit before this stop leaves the content elsewhere (it scrolls to reach the rest), so the owed element
+                // can be off screen where this stop starts: look for it instead of giving up on it.
+                if !elements.contains(where: { $0.key == owed.key }) { elements = findOwedElement(owed.key) ?? elements }
+                guard let target = elements.first(where: { $0.key == owed.key }) else {
+                    auditLines.append("SETTLE-DRAG \(currentScreen): '\(owed.key)' is not on screen at drag \(drag + 1) and was not found by scrolling")
+                    break
+                }
                 let band = clearBand(from: elements)
-                if GlassContrastLedger.isUnobstructed(target, placement: placement, clearBand: band, screen: screenFrame, others: elements) { break }
+                let unobstructed = GlassContrastLedger.isUnobstructed(target, placement: placement, clearBand: band, screen: screenFrame, others: elements)
+                auditLines.append("SETTLE-DRAG \(currentScreen): '\(owed.key)' at drag \(drag + 1) is at \(target.frame.debugDescription), clear band \(band), \(unobstructed ? "unobstructed" : "obstructed")")
+                if unobstructed { break }
                 switch placement {
                 case .scrollsUnderGlass:
                     let visibleBottom = min(band.upperBound, screenFrame.maxY)
@@ -899,6 +907,32 @@ final class AccessibilityAuditUITests: XCTestCase {
             auditLines.append("SETTLE \(currentScreen): scrolled for '\(owed.key)' (excused at \(owed.firstScreen))")
             audit("\(firstScreenOfTest)-settle-\(stop)", checksLabels: false)
         }
+    }
+
+    /// Scrolls the Home list, slowly, to the top and then down a band at a time (at most 6 swipes up and 8 drags down),
+    /// until an element with `key` is on screen, and returns the snapshot that shows it. Each step is logged (`FIND`).
+    private func findOwedElement(_ key: String) -> [ScreenElement]? {
+        func shows(_ elements: [ScreenElement]) -> Bool { elements.contains { $0.key == key } }
+        for swipe in 1...6 {
+            app.swipeDown()
+            Thread.sleep(forTimeInterval: 1)
+            let elements = screenElements()
+            if shows(elements) {
+                auditLines.append("FIND \(currentScreen): '\(key)' found after \(swipe) swipe(s) towards the top")
+                return elements
+            }
+        }
+        for drag in 1...8 {
+            let band = currentClearBand()
+            scrollContent(by: band.upperBound - band.lowerBound, between: band)
+            let elements = screenElements()
+            if shows(elements) {
+                auditLines.append("FIND \(currentScreen): '\(key)' found after the top and \(drag) drag(s) down")
+                return elements
+            }
+        }
+        auditLines.append("FIND \(currentScreen): '\(key)' was not found from the top through 8 drags")
+        return nil
     }
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
