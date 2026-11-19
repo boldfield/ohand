@@ -18,38 +18,34 @@ public protocol TranscriptionAudioFencing: Sendable {
     /// nil when the file is not there to be read or its item was deleted since the job began. A removal that arrives
     /// while the lease is held is refused as audio in use, so the file never disappears under a digest or a
     /// recognition; it is retried by its own caller.
-    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)?
-}
-
-/// No audio is ever held. The default for a handler that has no playback to wait for.
-public struct NoTranscriptionAudioFence: TranscriptionAudioFencing {
-    public init() {}
-
-    public func isAudioInUse(at url: URL) -> Bool { false }
-
-    public func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? { {} }
-}
-
-/// The playback fence the playback service takes a lease in while an item's audio is open.
-extension PlaybackFence: TranscriptionAudioFencing {
-    func isAudioInUse(at url: URL) -> Bool { isHeld(url) }
-
     func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? {
         struct AudioAbsent: Error {}
+        let lease = LeaseBox()
         do {
             // The existence check runs under the fence's lock, so a removal either finished first (and the file is
-            // absent) or waits for the release.
-            let lease = try admit(
+            // absent) or waits for the release. A deletion of the item is not waited for: it ends the lease, as it
+            // ends playback, and the core retires the job's late result.
+            lease.identifier = try admit(
                 itemID: itemID, url: url, generation: generation(of: itemID),
                 verify: {
                     guard FileManager.default.fileExists(atPath: url.path) else { throw AudioAbsent() }
                 },
-                end: { _ in })
-            return { [self] in release(lease) }
+                end: { [weak self, lease] reason in
+                    guard reason == .deletionRequested, let identifier = lease.identifier else { return }
+                    self?.release(identifier)
+                })
+            return { [self, lease] in
+                if let identifier = lease.identifier { release(identifier) }
+            }
         } catch {
             return nil
         }
     }
+}
+
+/// Holds the identifier a lease was admitted under, so its own end callback can release it.
+private final class LeaseBox: @unchecked Sendable {
+    var identifier: UUID?
 }
 
 /// Resolves references against the finalized audio directory of the protected storage layout.

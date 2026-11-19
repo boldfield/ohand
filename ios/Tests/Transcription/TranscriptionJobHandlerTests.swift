@@ -161,6 +161,27 @@ final class TranscriptionJobHandlerTests: XCTestCase {
         }
     }
 
+    func testADeletionOfTheItemEndsTheLeaseSoItsRemovalIsNotKeptWaiting() async throws {
+        let core = makeCore(source: TranscriptionFixtures.source(audioReference: reference))
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "late words", confidence: nil))
+        let fence = PlaybackFence()
+        let removalDuringRecognition = RemovalProbe()
+        let url: URL = audioURL
+        recognizer.setOnRecognize { _ in
+            // The user deletes the item while it is being recognized: the deletion is not made to wait.
+            fence.endPlayback(itemID: TranscriptionFixtures.itemID)
+            do {
+                try fence.withUnheld(url) { removalDuringRecognition.record(ran: true) }
+            } catch {
+                removalDuringRecognition.record(ran: false)
+            }
+        }
+
+        _ = await makeHandler(core: core, recognizer: recognizer, audioFence: fence).run(run)
+
+        XCTAssertEqual(removalDuringRecognition.outcomes, [true])
+    }
+
     func testAJobForAudioRemovedBeforeItReadsIsAppliedAsMissingNotRecognized() async throws {
         let source = TranscriptionFixtures.source(audioReference: reference, transcriptionState: "transcribed")
         let core = makeCore(source: source)
