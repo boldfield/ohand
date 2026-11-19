@@ -458,6 +458,8 @@ struct CompositionAdapters {
     /// The reset core the reset service and control use, given the root's real client. Production uses the client
     /// itself; a debug test may wrap it to fail a read.
     let resetCore: (ResetCore) -> ResetCore
+    /// The audio session playback configures before it plays and releases when it ends.
+    let playbackAudioSession: PlaybackAudioSessionControlling
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -471,7 +473,8 @@ struct CompositionAdapters {
         recognizer: OnDeviceRecognizing?,
         readSession: ReadAuthenticationSession,
         credentials: CredentialService,
-        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 },
+        playbackAudioSession: PlaybackAudioSessionControlling = AVPlaybackAudioSession()
     ) {
         self.kind = kind
         self.sender = sender
@@ -485,6 +488,7 @@ struct CompositionAdapters {
         self.readSession = readSession
         self.credentials = credentials
         self.resetCore = resetCore
+        self.playbackAudioSession = playbackAudioSession
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -520,14 +524,16 @@ struct CompositionAdapters {
         recognizer: OnDeviceRecognizing? = nil,
         credentials: CredentialService = CredentialService(
             serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)"),
-        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 },
+        playbackAudioSession: PlaybackAudioSessionControlling = AVPlaybackAudioSession()
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore)
+            recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore,
+            playbackAudioSession: playbackAudioSession)
     }
 
     /// Debug builds only: the adapter set a UI-test fixture launch runs on. Its read session starts locked, unlocks on
@@ -2148,7 +2154,7 @@ public final class ServiceCompositionRoot {
             let playbackFence = PlaybackFence()
             let playback = PlaybackService(
                 core: retentionControlClient, session: adapters.readSession, layout: layout, fence: playbackFence,
-                playerFactory: avPlaybackPlayerFactory)
+                audioSession: adapters.playbackAudioSession, playerFactory: avPlaybackPlayerFactory)
             undo.append { playback.shutDown() }
             itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)

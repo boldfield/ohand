@@ -2,6 +2,7 @@ import XCTest
 import OhAndCoreBridge
 import OhAndServices
 @testable import OhAnd
+@testable import OhAndServices
 
 private final class FakeDetailReader: SourceDetailReading, @unchecked Sendable {
     var result: Result<CoreItemDetail, Error>
@@ -29,6 +30,8 @@ private final class FakeAudioSession: SourceAudioSession {
 
     func pause() { pauses += 1 }
 
+    func setInterruptionHandler(_ handler: @escaping () -> Void) {}
+
     func close() {
         closes += 1
         if endReason == nil { endReason = .closed }
@@ -52,6 +55,31 @@ private final class FakeAudioOpener: SourceAudioOpening, @unchecked Sendable {
         opens += 1
         return try result.get()
     }
+}
+
+private struct SessionRefusal: Error {}
+
+private final class RefusingAudioSession: PlaybackAudioSessionControlling, @unchecked Sendable {
+    func setPlaybackCategory() throws { throw SessionRefusal() }
+    func activate() throws {}
+    func deactivate() {}
+}
+
+private final class SilentPlayer: PlaybackPlayer {
+    private(set) var plays = 0
+    func play() -> Bool {
+        plays += 1
+        return true
+    }
+    func pause() {}
+    func stop() {}
+}
+
+private final class RealSessionOpener: SourceAudioOpening, @unchecked Sendable {
+    let session: PlaybackSession
+    init(session: PlaybackSession) { self.session = session }
+    func audioAvailability(itemID: String) async -> PlaybackAvailability { .available }
+    func openAudio(itemID: String) async throws -> SourceAudioSession { session }
 }
 
 @MainActor
@@ -365,5 +393,67 @@ final class SourceDetailModelTests: XCTestCase {
 
         XCTAssertEqual(model.audio, .playing)
         XCTAssertEqual(second.plays, 1)
+    }
+
+    func testAPlayRefusedByTheAudioSessionLeavesTheRefusedStateNotPlaying() async {
+        let player = SilentPlayer()
+        let session = PlaybackSession(
+            itemID: Self.itemID, player: player, audioSession: RefusingAudioSession(), release: {})
+        let model = SourceDetailModel(
+            itemID: Self.itemID, reader: FakeDetailReader(.success(detail(audioReference: "audio:1"))),
+            opener: RealSessionOpener(session: session))
+        await model.load()
+
+        await model.play()
+
+        XCTAssertEqual(model.audio, .unplayable)
+        XCTAssertEqual(player.plays, 0)
+        XCTAssertFalse(session.isOpen)
+    }
+
+    func testARecordingInProgressRefusesAnOpenWithTheUnplayableHandling() async {
+        let opener = FakeAudioOpener(.failure(PlaybackError.recordingInProgress))
+        let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), opener)
+        await model.load()
+
+        await model.play()
+
+        XCTAssertEqual(model.audio, .unplayable)
+    }
+
+    func testAnInterruptionWhilePlayingLeavesThePausedStateAndPlayResumes() async {
+        let session = FakeAudioSession()
+        let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), FakeAudioOpener(.success(session)))
+        await model.load()
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
+
+        model.playbackInterrupted()
+
+        XCTAssertEqual(model.audio, .paused)
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
+        XCTAssertEqual(session.plays, 2)
+    }
+
+    func testARealSessionInterruptedByTheSystemLeavesThePausedStateInTheModel() async {
+        let notifications = NotificationCenter()
+        let player = SilentPlayer()
+        let session = PlaybackSession(
+            itemID: Self.itemID, player: player, notificationCenter: notifications, release: {})
+        let model = SourceDetailModel(
+            itemID: Self.itemID, reader: FakeDetailReader(.success(detail(audioReference: "audio:1"))),
+            opener: RealSessionOpener(session: session))
+        await model.load()
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
+
+        notifications.post(
+            name: .playbackAudioInterruption, object: nil, userInfo: ["AVAudioSessionInterruptionTypeKey": UInt(1)])
+        for _ in 0..<50 where model.audio == .playing { await Task.yield() }
+
+        XCTAssertEqual(model.audio, .paused)
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
     }
 }
