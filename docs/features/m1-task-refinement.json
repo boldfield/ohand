@@ -6137,7 +6137,7 @@
     },
     {
       "date": "2026-11-19",
-      "change": "F72 added: testHomePopulated failed in five hosted attempts on three unrelated pull requests because a Home card's ledger name changes when its caption age goes from 'now' to 'N sec. ago'; a second, undiagnosed cause is to be established from the audit logs. The audit rule is unchanged and nothing is retried."
+      "change": "F72 added: testHomePopulated failed in four hosted attempts on three unrelated pull requests because a Home card's ledger name changes when its caption age goes from 'now' to 'N sec. ago'; a second, undiagnosed cause is to be established from the audit logs. The audit rule is unchanged and nothing is retried."
     }
   ]
 }
