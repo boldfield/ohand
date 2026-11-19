@@ -325,3 +325,9 @@ modelled on `docs/validation/evidence/device-feasibility/2026-10-10-latency-acce
 ## 5. Device results
 
 Recorded by U10b.
+
+## A Home card keeps one name however its age is worded (F72)
+
+The glass ledger names an element by its card, with the age in the card's caption removed. `ScreenElement.cardName` removes what stands between the type's separator and the first comma, so "now", "4 sec. ago", "yesterday" and "in 4 sec." give one name. It once removed only `N unit ago`, so a card excused as "Action · now, …" was named "Action · , …" at the next stop and its excuse could never be settled.
+
+The audit also leaves the Home list elsewhere (the `MOVED` lines). The settle loop used to give up silently when the owed element was off screen at the start of its stop; it now scrolls to the top and down to find it, and logs `SETTLE-DRAG` (position and clear band at each drag) and `FIND` lines in `audit-<size>.log`.

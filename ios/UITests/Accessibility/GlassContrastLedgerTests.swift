@@ -134,6 +134,37 @@ final class GlassContrastLedgerTests: XCTestCase {
         XCTAssertTrue(ScreenElement.cardName("Remind me 2099-01-15 11:00:00 to call mom").contains("2099-01-15 11:00:00"))
     }
 
+    /// The formatter writes an age of zero as "now", a past age as "N sec. ago", a day as "yesterday" and a future time as
+    /// "in N sec."; the largest text size repeats the caption in the same form. One card keeps one name in each.
+    func testACardKeepsOneNameInEveryWordingOfItsAge() {
+        let text = "Synthetic spoken action to water the ferns"
+        let ages = ["now", "4 sec. ago", "1 min. ago", "21 min. ago", "3 hr. ago", "yesterday", "2 days ago", "in 4 sec.", "in 2 min."]
+        let names = Set(ages.map { ScreenElement.cardName("Action \u{00B7} \($0), \(text)") })
+        XCTAssertEqual(names.count, 1, "\(names)")
+        XCTAssertEqual(ScreenElement.cardName("Action \u{00B7} now, \(text)"), ScreenElement.cardName("Action \u{00B7} , \(text)"))
+        let withComma = "Note \u{00B7} now, Buy eggs, milk, and flour"
+        XCTAssertEqual(ScreenElement.cardName(withComma), ScreenElement.cardName("Note \u{00B7} 4 sec. ago, Buy eggs, milk, and flour"))
+        XCTAssertNotEqual(ScreenElement.cardName("Action \u{00B7} now, \(text)"), ScreenElement.cardName("Idea \u{00B7} now, \(text)"))
+        XCTAssertNotEqual(ScreenElement.cardName("Action \u{00B7} now, \(text)"), ScreenElement.cardName("Action \u{00B7} now, Synthetic typed action to sweep the porch"))
+    }
+
+    /// F72: an element excused on a card captioned "now" is settled by an unobstructed audit of the same card captioned
+    /// "4 sec. ago".
+    func testAnExcuseOnACardCaptionedNowIsSettledWhenTheCardReadsSecondsAgo() {
+        func spokenText(caption: String, y: CGFloat) -> ScreenElement {
+            let card = ScreenElement.cardName("Action \u{00B7} \(caption), Synthetic spoken action to water the ferns")
+            return element("Synthetic spoken action to water the ferns", card: card, CGRect(x: 32, y: y, width: 323, height: 249))
+        }
+        var ledger = GlassContrastLedger()
+        let obstructed = spokenText(caption: "now", y: 469)
+        _ = ledger.decide(contrastIssueOn: obstructed, placement: .scrollsUnderGlass, screenName: "home-populated", clearBand: clearBand,
+                          screen: screen, others: [], measure: { nil })
+        XCTAssertEqual(ledger.unsettled.map(\.key), [obstructed.key])
+        let clear = spokenText(caption: "4 sec. ago", y: 295)
+        ledger.recordStop("home-populated-settle-3", listed: [(clear, .scrollsUnderGlass)], flaggedKeys: [], clearBand: clearBand, screen: screen, others: [])
+        XCTAssertTrue(ledger.unsettled.isEmpty, "\(ledger.unsettled.map(\.key))")
+    }
+
     func testSettlingByEvidenceFromElsewhereClearsAnExcuse() {
         var ledger = GlassContrastLedger()
         let card = element("Idea \u{00B7} 8 sec. ago", card: "Idea, herb planter", CGRect(x: 48, y: 651, width: 313, height: 52))
