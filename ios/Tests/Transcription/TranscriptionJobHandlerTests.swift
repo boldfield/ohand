@@ -139,7 +139,7 @@ final class TranscriptionJobHandlerTests: XCTestCase {
             let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: "the whole note", confidence: nil))
             let fence = PlaybackFence()
             let removalDuringRecognition = RemovalProbe()
-            let url = audioURL
+            let url: URL = audioURL
             recognizer.setOnRecognize { _ in
                 // A retention sweep or the user's removal arriving while the recognizer reads the file.
                 do {
