@@ -31,6 +31,11 @@ class AccessibilityGateTests(unittest.TestCase):
     def setUp(self):
         self.job = accessibility_job()
 
+    def test_job_is_a_two_group_matrix_that_does_not_cancel_its_sibling(self):
+        self.assertEqual(self.job["strategy"]["matrix"]["group"], ["a", "b"])
+        self.assertIs(self.job["strategy"]["fail-fast"], False)
+        self.assertEqual(self.job["timeout-minutes"], 75)
+
     def test_job_itself_cannot_be_skipped_or_made_non_fatal(self):
         self.assertNotIn("if", self.job)
         self.assertNotIn("continue-on-error", self.job)
@@ -48,6 +53,8 @@ class AccessibilityGateTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", run)
         self.assertIn(AUDIT_SCRIPT, run)
         self.assertIn("steps.simulator.outputs.udid", str(step_named(self.job, "Accessibility audits").get("env")))
+        self.assertIn("matrix.group", str(step_named(self.job, "Accessibility audits").get("env")))
+        self.assertIn('.evidence "${AUDIT_GROUP}"', run)
 
     def test_selection_step_is_not_guarded(self):
         run = step_named(self.job, "Select simulator")["run"]
@@ -102,6 +109,7 @@ class AccessibilityGateTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         script = (SCRIPTS / "accessibility-simulator.sh").read_text()
+        self.assertIn("-only-testing:", script)
         self.assertIn('grep -q "^PASS "', script)
         self.assertIn("^(ISSUE|ERROR|FAIL|UNVERIFIED) ", script)
         self.assertTrue(script.rstrip().endswith('[ "${missing}" -eq 0 ]'))

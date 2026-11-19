@@ -3,7 +3,8 @@
 # largest accessibility size, and checks that each run produced its audit log and screenshots. Any audit issue fails the
 # test, and so this script. The UI tests must already be built (build-for-testing into .derived/Accessibility) so no
 # compile runs beside a booted simulator.
-# Usage: accessibility-simulator.sh <simulator-udid> <evidence-dir>
+# Usage: accessibility-simulator.sh <simulator-udid> <evidence-dir> <group>
+# <group> names a half of the tests in accessibility-groups.txt; only that half runs (-only-testing), default size then largest size.
 # Output: <evidence-dir>/accessibility/{audit-<size>.log, <size>-*.png}, accessibility-<size>.log, accessibility-<size>.xcresult. macOS only.
 # The audit log has one line per decision: ISSUE, ERROR, UNVERIFIED, EXEMPT, OWED, CLEAR, CLEAR-AT-DEFAULT, MEASURED, MOVED, FRAMES,
 # RELAUNCH, then PASS or FAIL per screen. settled-<size>.txt lists what each size audited unobstructed; the largest-size
@@ -12,11 +13,24 @@ set -euo pipefail
 
 udid="${1:?simulator udid required}"
 evidence_dir="${2:?evidence directory required}"
+group="${3:?group required (a or b, from accessibility-groups.txt)}"
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 ios_dir="$(cd "${script_dir}/.." && pwd)"
 evidence_dir="$(mkdir -p "${evidence_dir}" && cd "${evidence_dir}" && pwd)"
 output_dir="${evidence_dir}/accessibility"
+
+# The tests of this group; a group with none fails rather than running nothing.
+only_testing=()
+while read -r line_group test_id; do
+  if [ "${line_group}" = "${group}" ]; then
+    only_testing+=("-only-testing:${test_id}")
+  fi
+done < <(grep -vE '^[[:space:]]*(#|$)' "${script_dir}/accessibility-groups.txt")
+if [ "${#only_testing[@]}" -eq 0 ]; then
+  echo "FAILURE: no tests in group '${group}' of accessibility-groups.txt" >&2
+  exit 2
+fi
 rm -rf "${output_dir}" "${evidence_dir}"/accessibility-*.xcresult
 mkdir -p "${output_dir}"
 
@@ -62,6 +76,7 @@ for size in default xxxl; do
       env TEST_RUNNER_ACCESSIBILITY_OUTPUT_DIR="${output_dir}" TEST_RUNNER_ACCESSIBILITY_CONTENT_SIZE="${size}" xcodebuild test-without-building \
       -project OhAnd.xcodeproj \
       -scheme OhAndAccessibilityUITests \
+      "${only_testing[@]}" \
       -configuration Debug \
       -sdk iphonesimulator \
       -destination "platform=iOS Simulator,id=${udid}" \

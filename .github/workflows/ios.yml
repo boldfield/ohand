@@ -554,13 +554,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-  # Accessibility audits at the default and the largest accessibility content size on one iPhone simulator. Any audit
-  # issue fails the job; the artifact holds the audit log, the summary and the large-text screenshots.
+  # Accessibility audits at the default and the largest accessibility content size, in two jobs that each run half of the
+  # tests (ios/scripts/accessibility-groups.txt) at both sizes, in order, on their own iPhone simulator: the largest size
+  # settles from the default size's settled-default.txt, so the sizes cannot be split, the tests can. Any audit issue fails
+  # the job; each artifact holds the audit log, the summary and the large-text screenshots.
   accessibility:
-    name: Accessibility audits (default and largest text)
+    name: accessibility (group ${{ matrix.group }})
     runs-on: xcode-27
     # Generating the project alone took 8 minutes on one hosted runner (run 41720210504), and the two audit runs about 45.
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [a, b]
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
@@ -625,10 +631,11 @@ jobs:
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          AUDIT_GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
           cd ios
-          ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence
+          ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence "${AUDIT_GROUP}"
 
       - name: Show host pressure
         if: always()
@@ -657,7 +664,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: ios-accessibility
+          name: ios-accessibility-${{ matrix.group }}
           path: |
             ios/.evidence/accessibility/audit-*.log
             ios/.evidence/accessibility/settled-*.txt
@@ -689,7 +696,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: ios-accessibility-failure
+          name: ios-accessibility-${{ matrix.group }}-failure
           path: |
             ios/.evidence/failure-diagnostics
             ios/.evidence/accessibility/default-*.jpg
