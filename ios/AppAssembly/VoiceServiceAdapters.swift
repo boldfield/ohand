@@ -135,12 +135,46 @@ final class VoiceRecorderFanOut: VoiceRecordingControlling {
     }
 }
 
+/// Runs `beforeStart` immediately before the wrapped engine starts writing, so an open playback ends before the
+/// recorder takes the shared audio session. Every recording, new or continued from recovery, starts through the
+/// engine, so this one point covers both routes and runs only once the controller has decided to record.
+final class PlaybackEndingVoiceEngine: VoiceCaptureEngine {
+    private let wrapped: VoiceCaptureEngine
+    /// Set once the playback service exists; until then a start has nothing to end.
+    var beforeStart: () -> Void = {}
+
+    var onEvent: ((VoiceEngineEvent) -> Void)? {
+        get { wrapped.onEvent }
+        set { wrapped.onEvent = newValue }
+    }
+
+    init(wrapping wrapped: VoiceCaptureEngine) {
+        self.wrapped = wrapped
+    }
+
+    func start(writingTo destination: URL, maxDuration: TimeInterval) throws {
+        beforeStart()
+        try wrapped.start(writingTo: destination, maxDuration: maxDuration)
+    }
+
+    func stopAndClose() -> Bool {
+        wrapped.stopAndClose()
+    }
+}
+
 /// The voice recorder and its restart recovery, built over the root's durable recording path.
 final class VoiceCaptureServices {
     let controller: VoiceRecordingController
     let recovery: VoiceRecoveryCoordinator
     let recoveryModel: VoiceRecoveryModel
     let recorder: VoiceRecordingControlling
+    private let playbackEndingEngine: PlaybackEndingVoiceEngine
+
+    /// Runs before any recording, new or continued from recovery, starts writing.
+    var beforeRecordingStarts: () -> Void {
+        get { playbackEndingEngine.beforeStart }
+        set { playbackEndingEngine.beforeStart = newValue }
+    }
 
     init(
         root: ServiceCompositionRoot,
@@ -150,6 +184,8 @@ final class VoiceCaptureServices {
         notificationCenter: NotificationCenter = .default
     ) {
         let handoff = RootVoiceHandoff(root: root)
+        let engine = PlaybackEndingVoiceEngine(wrapping: engine)
+        playbackEndingEngine = engine
         let controller = VoiceRecordingController(
             inProgressDirectory: root.inProgressAudioDirectory,
             engine: engine,

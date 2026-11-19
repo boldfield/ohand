@@ -107,6 +107,11 @@ final class AppServices {
             lifecycle: lifecycle, notificationCenter: notificationCenter, sources: timeSources)
         let voice = voice ?? VoiceCaptureServices(root: root)
         self.voice = voice
+        // Playback and recording share one audio session: playback is refused while a recording is in progress, and a
+        // recording that starts ends any open playback first.
+        let recordingController = RecordingStateReader(controller: voice.controller)
+        root.playback.setRecordingProbe { recordingController.isActive }
+        voice.beforeRecordingStarts = { [playback = root.playback] in playback.recordingWillStart() }
 
         let access: () -> CaptureEntryAccess = { [weak root] in
             CaptureEntryAccess(
@@ -397,5 +402,18 @@ final class AppLauncher: ObservableObject {
         for url in heldURLs {
             built.receive(url: url)
         }
+    }
+}
+
+/// Reads the recorder's state for playback's probe. The controller is confined to the main queue but the probe is also
+/// called from `PlaybackService.open`, which runs off it, so a read from another thread hops to main first.
+private final class RecordingStateReader: @unchecked Sendable {
+    private let controller: VoiceRecordingController
+
+    init(controller: VoiceRecordingController) { self.controller = controller }
+
+    var isActive: Bool {
+        if Thread.isMainThread { return controller.state != .idle }
+        return DispatchQueue.main.sync { controller.state != .idle }
     }
 }

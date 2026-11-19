@@ -20,6 +20,8 @@ public enum PlaybackError: Error, Equatable, Sendable {
     case audioMissing
     /// The file is there but cannot be read or played, or whether it is there cannot be determined.
     case audioUnreadable
+    /// A recording is in progress; the recorder owns the audio session until it ends.
+    case recordingInProgress
     case core(CoreFailure)
 }
 
@@ -52,9 +54,11 @@ public final class PlaybackService: @unchecked Sendable {
     private let fileSystem: AudioRetentionFileSystem
     let fence: PlaybackFence
     private let playerFactory: PlaybackPlayerFactory
+    private let audioSession: PlaybackAudioSessionControlling
     private let lock = NSLock()
     private var observerToken: SessionScopeObserverToken?
     private var isShutDown = false
+    private var recordingProbe: (@Sendable () -> Bool)?
 
     init(
         core: RetentionControlCore,
@@ -62,6 +66,7 @@ public final class PlaybackService: @unchecked Sendable {
         layout: ProtectedStorageLayout,
         fence: PlaybackFence,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
+        audioSession: PlaybackAudioSessionControlling = NoPlaybackAudioSession(),
         playerFactory: @escaping PlaybackPlayerFactory
     ) {
         self.core = core
@@ -69,11 +74,32 @@ public final class PlaybackService: @unchecked Sendable {
         self.fileSystem = fileSystem
         self.fence = fence
         self.playerFactory = playerFactory
+        self.audioSession = audioSession
         staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
         let token = session.observeScope { [fence] transition in
             if transition.scope == .captureOnly { fence.endAll(reason: .relocked) }
         }
         observerToken = token
+    }
+
+    /// Tells playback whether a recording is in progress. While one is, an open is refused with
+    /// `recordingInProgress` and a session's `play()` returns false: the recorder owns the audio session then.
+    public func setRecordingProbe(_ probe: @escaping @Sendable () -> Bool) {
+        lock.lock()
+        recordingProbe = probe
+        lock.unlock()
+    }
+
+    /// Ends every open playback because a recording is about to start; the recorder sets its own category.
+    public func recordingWillStart() {
+        fence.endAll(reason: .closed)
+    }
+
+    private var isRecordingActive: Bool {
+        lock.lock()
+        let probe = recordingProbe
+        lock.unlock()
+        return probe?() ?? false
     }
 
     /// Opens the item's retained audio. The returned session must be closed when playback is done.
@@ -82,6 +108,7 @@ public final class PlaybackService: @unchecked Sendable {
         guard let authorization = session.currentAuthorization() else { throw PlaybackError.notAuthenticated }
         guard !itemID.isEmpty else { throw PlaybackError.invalidRequest }
         guard !hasShutDown else { throw PlaybackError.shutDown }
+        guard !isRecordingActive else { throw PlaybackError.recordingInProgress }
         let generation = fence.generation(of: itemID)
         let answer = try await readAudio(itemID: itemID)
         guard let reference = answer.audioReference else { throw PlaybackError.noAudio }
@@ -115,7 +142,10 @@ public final class PlaybackService: @unchecked Sendable {
             fence.release(leaseID)
             throw PlaybackError.audioUnreadable
         }
-        let opened = PlaybackSession(itemID: itemID, player: player, release: { [fence] in fence.release(leaseID) })
+        let opened = PlaybackSession(
+            itemID: itemID, player: player, audioSession: audioSession,
+            isRecordingActive: { [weak self] in self?.isRecordingActive ?? false },
+            release: { [fence] in fence.release(leaseID) })
         box.session = opened
         // A relock, deletion or shutdown between the lease and here found no session to end; end it now.
         if hasShutDown {
