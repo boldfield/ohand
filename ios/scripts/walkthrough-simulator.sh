@@ -22,14 +22,22 @@ mkdir -p "${output_dir}"
 "${script_dir}/prepare-simulator.sh" "${udid}" --erase --shutdown-after --label "walkthrough-${label}-first-boot"
 "${script_dir}/prepare-simulator.sh" "${udid}" --label "walkthrough-${label}"
 
-# Mark the keyboard's slide-to-type introduction as seen, as a person who has used the keyboard before would have.
-xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences DidShowGestureKeyboardIntroduction -bool true || true
-xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences KeyboardDidShowContinuousPathIntroduction -bool true || true
-
-# Enrol Face ID, then keep presenting a matching face until the test finishes. A match with no prompt on screen is ignored.
-xcrun simctl spawn "${udid}" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1
-xcrun simctl spawn "${udid}" notifyutil -p com.apple.BiometricKit.enrollmentChanged
-sleep 2
+# What the test expects of the device. A re-preparation after a launch fault (retry-simulator-step.sh) repeats it, with the
+# appearance of the run in progress.
+configure_simulator() {
+  # Mark the keyboard's slide-to-type introduction as seen, as a person who has used the keyboard before would have.
+  xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences DidShowGestureKeyboardIntroduction -bool true || true
+  xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences KeyboardDidShowContinuousPathIntroduction -bool true || true
+  # Enrol Face ID, then keep presenting a matching face until the test finishes. A match with no prompt on screen is ignored.
+  xcrun simctl spawn "${udid}" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1
+  xcrun simctl spawn "${udid}" notifyutil -p com.apple.BiometricKit.enrollmentChanged
+  sleep 2
+  if [ -n "${simulator_appearance:-}" ]; then xcrun simctl ui "${udid}" appearance "${simulator_appearance}"; fi
+}
+export -f configure_simulator
+export udid
+export OHAND_AFTER_REPREPARE=configure_simulator
+configure_simulator
 (
   while true; do
     xcrun simctl spawn "${udid}" notifyutil -p com.apple.BiometricKit_Sim.pearl.match >/dev/null 2>&1 || true
@@ -44,18 +52,21 @@ trap 'kill "${matcher_pid}" 2>/dev/null || true; xcrun simctl shutdown "${udid}"
 test_status=0
 : > "${evidence_dir}/${label}.log"
 for appearance in light dark; do
+  export simulator_appearance="${appearance}"
   xcrun simctl ui "${udid}" appearance "${appearance}"
   run_status=0
   (
     cd "${ios_dir}"
-    TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test-without-building \
+    # A launch or device fault before any assertion ran is retried once; retry-simulator-step.sh writes the per-run log.
+    "${script_dir}/retry-simulator-step.sh" "${udid}" "${evidence_dir}/${label}-${appearance}.run.log" -- \
+      env TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR="${output_dir}" TEST_RUNNER_WALKTHROUGH_APPEARANCE="${appearance}" xcodebuild test-without-building \
       -project OhAnd.xcodeproj \
       -scheme OhAndWalkthroughUITests \
       -configuration Debug \
       -sdk iphonesimulator \
       -destination "platform=iOS Simulator,id=${udid}" \
       -derivedDataPath .derived/Walkthrough \
-      -resultBundlePath "${evidence_dir}/${label}-${appearance}.xcresult" \
+      -resultBundlePath "${evidence_dir}/${label}-${appearance}%ATTEMPT_SUFFIX%.xcresult" \
       CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
   ) 2>&1 | tee -a "${evidence_dir}/${label}.log" || run_status=$?
   if [ "${run_status}" -ne 0 ]; then
