@@ -7,10 +7,35 @@ evidence record format for U10b. The device-results section belongs to U10b and 
 ## 1. Automated gate
 
 `ios/UITests/Accessibility/AccessibilityAuditUITests.swift` is the `OhAndAccessibilityUITests` target. The CI job
-`accessibility` in `.github/workflows/ios.yml` builds it, then `ios/scripts/accessibility-simulator.sh` runs it on one
-iPhone simulator twice: at the default content size and at the largest accessibility size
+`accessibility` in `.github/workflows/ios.yml` is a matrix of two jobs, `accessibility (group a)` and `accessibility (group b)`.
+Each builds the target, then `ios/scripts/accessibility-simulator.sh <udid> <evidence> <group>` runs that group's tests on its
+own iPhone simulator twice: at the default content size and then at the largest accessibility size
 (`UICTContentSizeCategoryAccessibilityXXXL`, set with the `-UIPreferredContentSizeCategoryName` launch argument). The
 fixtures are the synthetic ones the walkthrough uses (`ios/UITests/Fixtures`).
+
+**The groups.** `ios/scripts/accessibility-groups.txt` partitions the test methods of the scheme into groups `a` and `b`; the
+script turns a group's lines into `-only-testing` arguments, and `ios/scripts/test_accessibility_groups.py` (in `make check`)
+fails unless every test is in exactly one group and no group names a missing test, so a new test must be given a group. The
+sizes cannot be split between jobs: the largest-size run settles an element it could not bring clear of the glass from
+`settled-default.txt`, which the default-size run of the same job writes (`settleFromTheDefaultSize`). The cut is across the
+tests, and a group must be closed under that settlement: every `CLEAR-AT-DEFAULT` line of the largest size names a default-size
+screen whose test is in the same group as the test that owed the element. In run 44477039781 (one job, all tests) there were
+two such lines, each settled by the owing test itself:
+
+| `CLEAR-AT-DEFAULT` (audit-xxxl.log) | Owing test (group) | Settling screen's test (group) |
+| --- | --- | --- |
+| `||Oh And`: owed since `capture-text-entry`, settled at `capture-text-entry` | `testCaptureSilentTextEntry` (b) | `testCaptureSilentTextEntry` (b) |
+| `Action · , Remind me 2099-01-15 11:00:00 to call mom||Action`: owed since `home-populated`, settled at `home-populated` | `testHomePopulated` (a) | `testHomePopulated` (a) |
+
+Per-test durations of that run (default size plus largest size, seconds): `testSettingsScreens` 395.5, `testHomePopulated` 131.6,
+`testSourceDetailWithReminderAndControls` 131.3, `testDataSettingsEraseConfirmation` 119.7, `testSearchWithNoResults` 93.8,
+`testCaptureSilentTextEntry` 92.1, `testSearchWithResults` 87.1, `testStatusWithFailedNote` 82.1,
+`testStatusWithReminderNeedingATime` 80.8, `testSettingsPermissionsOnFirstRun` 74.5, `testHomeFramesMatchWhatIsDrawn` 72.2,
+`testCaptureVoiceRecording` 67.1, `testLockedScreen` 64.7, `testSavingACaptureShowsTheOutcomeLine` 63.5, `testHomeEmpty` 50.6,
+`testCaptureVoiceIdle` 46.8, `testReminderNeedingACorrectionIsAnnounced` 33.4, the eight `FixtureLaunchUITests` 260 in all, and
+the seventeen `GlassContrastLedgerTests` about 5. Group a (the first four, `testSearchWithNoResults`, `testHomeEmpty` and
+`testCaptureVoiceIdle`) is 969 s of audits; group b (everything else, with the fixture and ledger tests) is about 982 s. When
+tests change, rebalance from a new run's durations, keeping each test's closure as above.
 
 ### What is audited
 
@@ -34,10 +59,10 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 | Locked screen | `testLockedScreen` | locked |
 
 Any audit issue fails the test, and so does an audit that throws instead of running (the log says `ERROR`; the test
-fails, it never records a pass). The job log and the artifact `ios-accessibility` (retention 2 days, per the CI artifact
+fails, it never records a pass). The job log and the artifact `ios-accessibility-<group>` (one per job; retention 2 days, per the CI artifact
 budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
 uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
-failed tests' attachments as `ios-accessibility-failure` (retention 1 day, under 100 MB).
+failed tests' attachments as `ios-accessibility-<group>-failure` (retention 1 day, under 100 MB per job).
 
 The audit log has one line per decision:
 
@@ -222,7 +247,7 @@ fails the stop. When a first pass found something and is repeated, its issues ar
 repeat.
 
 **The end of the Home list.** The test swipes the list up until its last card stops moving and logs where that card ends
-against the clear band (`SCROLL-END`). On a failed job the default-size screenshots upload too (`ios-accessibility-failure`,
+against the clear band (`SCROLL-END`). On a failed job the default-size screenshots upload too (`ios-accessibility-<group>-failure`,
 compressed, within the failure budget), so where the last card stands is readable from the artifact.
 
 `GlassContrastLedgerTests` (in the same target, without the app) holds the negative cases: a screen-sized node that is a

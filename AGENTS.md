@@ -74,6 +74,8 @@ Native iOS checks run via `.github/workflows/ios.yml` on the standard, free GitH
 
 The `walkthrough` job is a matrix of two jobs, compact (iPhone) and regular (iPad), each with one cold boot; each uploads `ios-walkthrough-<width>` (retention 2 days, result bundles only as `ios-walkthrough-<width>-failure` after a failure) including `host-pressure.txt` (diagnostic only, not a gate): label, kind (cold-boot, warm-boot or clone), time to responsive, highest 1-minute load and lowest free memory per preparation.
 
+The `accessibility` job is a matrix of two jobs, `accessibility (group a)` and `accessibility (group b)` (75-minute limit each). Each runs `ios/scripts/accessibility-simulator.sh` for its half of the tests, listed in `ios/scripts/accessibility-groups.txt`, at the default and then the largest text size on its own simulator, and uploads `ios-accessibility-<group>` (routine evidence, `retention-days: 2`) and, on failure, `ios-accessibility-<group>-failure` (`retention-days: 1`). The two artifacts together stay inside the budget above: a green run's accessibility artifacts total under 10 MB, and the failure exports stay under 100 MB per run in total. See `docs/validation/accessibility.md`.
+
 Linux checks cover the native tooling that runs on any host: `make check` runs `ios-check` (`ios/scripts/check_project_config.py` plus the unit tests for it and for `select_simulator.py`). They do not prove that Swift compiles.
 
 Linux Odonian workers whose change touches native code (anything under `ios/`, or `.github/workflows/ios.yml`) must, for the exact submitted commit:
