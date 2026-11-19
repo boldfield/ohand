@@ -84,6 +84,9 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         case .failure(let failure):
             return Self.result(forReadFailure: failure)
         }
+        // Read before the audio is resolved, so a deletion requested from here on keeps the job from taking a removal
+        // lease. One that landed between the core's read and here is retired by the core when the result arrives.
+        let removalGeneration = audioFence.removalGeneration(of: source.itemID)
         guard let reference = source.audioReference else {
             return .permanentFailure(reason: "no_audio_reference")
         }
@@ -108,7 +111,10 @@ public final class TranscriptionJobHandler: JobCapabilityHandler, @unchecked Sen
         }
         // Keep a removal (retention sweep or the user's) from unlinking the file under the digest and the recognition;
         // it waits for the release. A file already removed is absent here, and the core settles that as kept.
-        guard let releaseAudio = audioFence.holdAgainstRemoval(itemID: source.itemID, at: audioURL) else {
+        guard
+            let releaseAudio = audioFence.holdAgainstRemoval(
+                itemID: source.itemID, at: audioURL, generation: removalGeneration)
+        else {
             return await apply(outcome)
         }
         defer { releaseAudio() }

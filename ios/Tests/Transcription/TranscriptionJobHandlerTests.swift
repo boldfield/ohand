@@ -503,5 +503,7 @@ private final class HeldAudioFence: TranscriptionAudioFencing, @unchecked Sendab
         return held.contains(url.standardizedFileURL.path)
     }
 
-    func holdAgainstRemoval(itemID: String, at url: URL) -> (@Sendable () -> Void)? { {} }
+    func removalGeneration(of itemID: String) -> UInt64 { 0 }
+
+    func holdAgainstRemoval(itemID: String, at url: URL, generation: UInt64) -> (@Sendable () -> Void)? { {} }
 }
