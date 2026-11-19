@@ -5242,3 +5242,32 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940. Depends on CI04 (shared `ios.yml`, the recoveries file and the warm re-preparation).
+
+### F72
+
+Accessibility audit: a Home card keeps one name however its age is worded
+
+`AccessibilityAuditUITests.testHomePopulated` failed in five hosted attempts across three unrelated pull requests between 2026-11-17 and 2026-11-19 (run 44161872581; 44187328566 attempt 1; 44475712809 attempts 2 and 4, and one earlier attempt of the same branch), each time with "'<card>||<element>' was excused under or on glass at home-populated… and never audited unobstructed", and passed on rerun. CI05 does not retry it, correctly: it is a failed assertion. F71b sat blocked on it for six hours.
+
+One cause is established from the code and the messages. The ledger names an element by its card, and `ScreenElement.cardName` (`ios/UITests/Accessibility/GlassContrast.swift:28-32`) removes the card's age only when it matches `[0-9]+ [A-Za-z]+\.? ago`. The caption's age comes from `RelativeDateTimeFormatter` with `dateTimeStyle = .named` (`app/home/HomeBodyView.swift:273-278`), which writes an age of zero as "now". A card first seen as "Action · now, Synthetic spoken action to water the ferns" is excused under that name; at the next stop it reads "Action · 4 sec. ago, …", its name becomes "Action · , …", no element carries the owed name any more, and `settleOwedElements` gives up on it (`AccessibilityAuditUITests.swift:884`, the `guard … else { break }`). Three of the five messages carry "· now," in the owed name.
+
+The other two messages name a card whose age was already removed ("Action · , Remind me 2099-01-15 11:00:00 to call mom", "Idea · , Synthetic spoken idea about a window box") and fail at `home-populated-settle-3`. Their cause is not established. Candidates the worker checks against the audit logs: the owed element was not on screen at its settle stop, the 12-stop or 6-drag limit ran out, or the element was unobstructed by the test's geometry but the audit at that stop did not record it.
+
+Scope:
+1. A card's name does not depend on its age in any wording the formatter produces: "now", "N sec. ago", "N min. ago", "yesterday", "in N sec." and the forms at the largest text size. The worker removes the age as a position in the caption (what stands between the type's separator and the comma), not as a list of phrases, and states in the PR which wordings it verified.
+2. The second cause is diagnosed from evidence, not guessed. The worker reads `audit-default.log` and `audit-xxxl.log` from a failing attempt (the `ios-accessibility` artifact is kept 2 days and the `-failure` one 1 day; if they have expired, reproduce on a hosted run or locally with the procedure in `docs/validation/accessibility.md`, erasing the simulator first) and states which candidate it was, with the log lines. The fix follows the diagnosis. If it cannot be reproduced or read, the PR says so, lands item 1 alone, and adds the logging that would identify it next time (the owed key, whether it was found at each drag, and the final frames).
+3. The standing rule is unchanged: an element is excused only where it is obstructed, every excuse is settled by an unobstructed audit or a measurement, and an unsettled excuse fails the test. No element joins the glass list, no audit type is dropped, no limit is raised to make the test pass, and nothing is retried.
+
+Owned paths: `ios/UITests/Accessibility/`, `docs/validation/accessibility.md` (a short note of the cause).
+
+Not owned: `app/home/` (the caption's wording is correct and stays), `ios.yml`, the CI04/CI05 scripts, any other UI test.
+
+Acceptance:
+1. `GlassContrastLedgerTests` asserts that one card yields the same name for each wording in item 1, at both text sizes' caption forms, and that two different cards of the same type still have different names.
+2. A ledger test reproduces the failure: an element excused on a card captioned "now" is settled by an unobstructed audit of the same card captioned "4 sec. ago". It fails on current main.
+3. The PR states the diagnosis for item 2 with quoted log lines, or states that it could not be established and shows the added logging.
+4. Exact-head `ios.yml` evidence with the accessibility job green, and the Linux checks.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 945: every native pull request runs this test. No dependencies; no task depends on it.

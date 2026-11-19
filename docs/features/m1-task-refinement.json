@@ -4888,6 +4888,26 @@
         "ios/scripts/smoke-capture-simulator.sh",
         "ios/scripts/prepare-simulator.sh"
       ]
+    },
+    {
+      "key": "F72",
+      "parent": null,
+      "title": "Accessibility audit: a Home card keeps one name however its age is worded",
+      "file_scope": [
+        "ios/UITests/Accessibility/",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Stop testHomePopulated failing when a card's caption age changes wording between audit stops, and diagnose the remaining unsettled-excuse failures from evidence.",
+      "acceptance": [
+        "See the F72 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/UITests/Accessibility/GlassContrast.swift",
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift",
+        "app/home/HomeBodyView.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5767,7 +5787,8 @@
     "CI04": [],
     "CI05": [
       "CI04"
-    ]
+    ],
+    "F72": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -6113,6 +6134,10 @@
     {
       "date": "2026-11-18",
       "change": "F70 amendment 1: F70 also owns additive edits to ios/AppAssembly/AppServices.swift and VoiceServiceAdapters.swift and new tests under ios/Tests/VoiceCapture/, which scope item 2 needs; criterion 3 requires a test that fails if the production assignment in AppServices.swift is removed. Requested by reviewers on PRs #410 and #414; the narrow original ownership was the coordinator's omission."
+    },
+    {
+      "date": "2026-11-19",
+      "change": "F72 added: testHomePopulated failed in five hosted attempts on three unrelated pull requests because a Home card's ledger name changes when its caption age goes from 'now' to 'N sec. ago'; a second, undiagnosed cause is to be established from the audit logs. The audit rule is unchanged and nothing is retried."
     }
   ]
 }
