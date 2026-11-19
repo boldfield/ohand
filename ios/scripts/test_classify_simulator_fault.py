@@ -90,6 +90,22 @@ class ClassifySimulatorFaultTests(unittest.TestCase):
                 self.assertEqual(classify(FAILED_TO_LAUNCH + unlisted)[0], "test-failure")
                 self.assertEqual(classify(NO_DEVICE + unlisted)[0], "test-failure")
 
+    def test_generic_no_device_header_without_the_shutdown_companion_is_a_test_failure(self):
+        header_only = (
+            "xcodebuild: error: Unable to find a device matching the provided destination specifier:\n"
+            "\t\t{ platform:iOS Simulator, name:No Such Phone }\n"
+        )
+        self.assertEqual(classify(header_only)[0], "test-failure")
+
+    def test_listed_signature_beside_a_non_swift_compile_error_is_a_test_failure(self):
+        for compile_error in (
+            "foo.c:7:2: error: use of undeclared identifier 'bar'\n",
+            "fatal error: module map file not found\n",
+        ):
+            with self.subTest(compile_error):
+                self.assertEqual(classify(NO_DEVICE + compile_error)[0], "test-failure")
+                self.assertEqual(classify(FAILED_TO_LAUNCH + compile_error)[0], "test-failure")
+
     def test_failed_test_case_without_a_listed_message_is_a_test_failure(self):
         log_text = NO_DEVICE + "Test Case '-[Tests.FooTests testFoo]' failed (0.1 seconds).\n"
         self.assertEqual(classify(log_text)[0], "test-failure")

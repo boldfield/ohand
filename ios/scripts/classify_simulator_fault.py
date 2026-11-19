@@ -17,16 +17,22 @@ INFRASTRUCTURE_SIGNATURES = [
     # Run 44148283529 attempt 2 (CaptureProbe handoff UI test): the runner never got the app to launch.
     ("failed-to-launch", re.compile(r"Failed to launch <XCUIApplicationImpl: .*Timed out while launching application via Xcode")),
     # Run 44145594127 attempt 2 (Tauri handoff UI tests): the simulator was not booted when xcodebuild looked for it.
+    # The header alone also describes a misconfigured destination, so it counts only with the companion line below.
     ("no-matching-device", re.compile(r"xcodebuild: error: Unable to find a device matching the provided destination specifier")),
     # Run 44145594127 attempt 1 (Tauri round-trip step): simctl could not reach the device's display.
     ("no-default-display-port", re.compile(r"Device does not have a 'default' display port")),
 ]
 
+# The companion that marks the no-matching-device header as a shut-down simulator (run 44145594127 attempt 2).
+NO_DEVICE_COMPANION = re.compile(r"Unable to lookup in current state: Shutdown")
+NO_DEVICE_SIGNATURE = "no-matching-device"
+
 # An XCTest failure line: `<file>:<line>: error: -[Class test] : <message>`. Its message must match a signature.
 TEST_FAILURE_LINE = re.compile(r"error: -\[[^\]]*\] : (?P<message>.*)")
 # Failures that are never infrastructure, wherever they appear.
 UNLISTED_FAILURE_PATTERNS = [
-    re.compile(r"\.swift:\d+(:\d+)?: error: (?!-\[)"),  # compile error
+    re.compile(r"\.\w+:\d+(:\d+)?: (fatal )?error: (?!-\[)"),  # compile error in any language
+    re.compile(r"^fatal error: "),
     re.compile(r"XCTAssert\w*"),
     re.compile(r"app never left the foreground"),
     re.compile(r"\*\* BUILD FAILED \*\*"),
@@ -35,8 +41,13 @@ UNLISTED_FAILURE_PATTERNS = [
 FAILED_TEST_CASE = re.compile(r"^Test Case '.*' failed \(")
 
 
-def matched_signature(line):
-    return any(pattern.search(line) for _, pattern in INFRASTRUCTURE_SIGNATURES)
+def matched_signature(line, has_no_device_companion=True):
+    for name, pattern in INFRASTRUCTURE_SIGNATURES:
+        if name == NO_DEVICE_SIGNATURE and not has_no_device_companion:
+            continue
+        if pattern.search(line):
+            return True
+    return False
 
 
 def classify(log_text):
@@ -45,14 +56,15 @@ def classify(log_text):
     failed_test_cases = 0
     signature_failed_tests = 0
     unlisted_failure = False
+    has_no_device_companion = bool(NO_DEVICE_COMPANION.search(log_text))
     for line in log_text.splitlines():
         stripped = line.strip()
-        is_signature = matched_signature(stripped)
+        is_signature = matched_signature(stripped, has_no_device_companion)
         if is_signature:
             matched_lines.append(stripped)
         test_failure = TEST_FAILURE_LINE.search(stripped)
         if test_failure:
-            if matched_signature(test_failure.group("message")):
+            if matched_signature(test_failure.group("message"), has_no_device_companion):
                 signature_failed_tests += 1
             else:
                 unlisted_failure = True
