@@ -46,7 +46,7 @@ if [ "${first_status}" -eq 0 ]; then
   exit 0
 fi
 
-classification="$("${OHAND_PYTHON:-python3}" "${script_dir}/classify_simulator_fault.py" "${log}")"
+classification="$("${OHAND_PYTHON:-python3}" "${script_dir}/classify_simulator_fault.py" "${log}" "${udid}")"
 if [ "$(echo "${classification}" | head -1)" != "infrastructure" ]; then
   exit "${first_status}"
 fi

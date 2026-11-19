@@ -19,7 +19,11 @@ FAILED_TO_LAUNCH = (
 NO_DEVICE = (
     "xcodebuild: error: Unable to find a device matching the provided destination specifier:\n"
     "\t\t{ platform:iOS Simulator, id:00000000-0000-0000-0000-000000000000 }\n"
-    "Unable to lookup in current state: Shutdown\n"
+    "\n"
+    "\tThe requested device could not be found because no available devices matched the request.\n"
+    "\n"
+    "\tDestinations compatible with the \"ProbeUITests\" scheme:\n"
+    "\t\t{ platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }\n"
 )
 NO_DISPLAY_PORT = (
     "Detected file type from extension: PNG\n"
@@ -52,16 +56,16 @@ AUDIT_FINDING = (
 )
 
 
-def classify(log_text):
+def classify(log_text, udid=None):
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, "step.log")
         with open(path, "w", encoding="utf-8") as log_file:
             log_file.write(log_text)
-        return run(path)
+        return run(path, udid)
 
 
-def run(path):
-    result = subprocess.run([sys.executable, SCRIPT, path], capture_output=True, text=True, check=True)
+def run(path, udid=None):
+    result = subprocess.run([sys.executable, SCRIPT, path] + ([udid] if udid else []), capture_output=True, text=True, check=True)
     return result.stdout.splitlines()
 
 
@@ -90,12 +94,18 @@ class ClassifySimulatorFaultTests(unittest.TestCase):
                 self.assertEqual(classify(FAILED_TO_LAUNCH + unlisted)[0], "test-failure")
                 self.assertEqual(classify(NO_DEVICE + unlisted)[0], "test-failure")
 
-    def test_generic_no_device_header_without_the_shutdown_companion_is_a_test_failure(self):
+    def test_no_device_header_for_a_named_destination_is_a_test_failure(self):
         header_only = (
             "xcodebuild: error: Unable to find a device matching the provided destination specifier:\n"
             "\t\t{ platform:iOS Simulator, name:No Such Phone }\n"
         )
         self.assertEqual(classify(header_only)[0], "test-failure")
+        named = header_only + "\n\tThe requested device could not be found because no available devices matched the request.\n"
+        self.assertEqual(classify(named)[0], "test-failure")
+
+    def test_no_device_by_id_is_bound_to_the_prepared_udid(self):
+        self.assertEqual(classify(NO_DEVICE, "00000000-0000-0000-0000-000000000000")[0], "infrastructure")
+        self.assertEqual(classify(NO_DEVICE, "11111111-1111-1111-1111-111111111111")[0], "test-failure")
 
     def test_listed_signature_beside_a_non_swift_compile_error_is_a_test_failure(self):
         for compile_error in (
