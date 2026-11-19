@@ -250,6 +250,31 @@ def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
     return errors
 
 
+XCODEBUILD_TEST_INVOCATION = re.compile(r"\bxcodebuild\s+test(-without-building)?\b")
+
+
+def simulator_test_files(root=IOS_ROOT):
+    return [IOS_WORKFLOW] + sorted((root / "scripts").glob("*-simulator.sh"))
+
+
+def check_simulator_test_retry(paths=None):
+    """Every xcodebuild test run in ios.yml and the *-simulator.sh scripts goes through retry-simulator-step.sh (CI05)."""
+    errors = []
+    for path in simulator_test_files() if paths is None else paths:
+        logical_line = ""
+        for number, line in enumerate(Path(path).read_text().splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            logical_line += line.rstrip("\\").strip() + " "
+            if line.rstrip().endswith("\\"):
+                continue
+            invocation = XCODEBUILD_TEST_INVOCATION.search(logical_line)
+            if invocation and "retry-simulator-step.sh" not in logical_line[: invocation.start()]:
+                errors.append(f"{Path(path).name}:{number} runs xcodebuild test outside retry-simulator-step.sh")
+            logical_line = ""
+    return errors
+
+
 def check_control_extensions(project, root=IOS_ROOT):
     errors = []
     targets = project["targets"]
@@ -427,7 +452,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":

@@ -13,18 +13,20 @@ fi
 udid="$1"
 evidence_dir="$2"
 mkdir -p "${evidence_dir}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
 
 for phase in write verify; do
   log="${evidence_dir}/credential-relaunch-${phase}.log"
   echo "=== Credential relaunch check: phase ${phase} ==="
-  TEST_RUNNER_OHAND_RELAUNCH_PHASE="${phase}" xcodebuild test-without-building \
+  # A launch or device fault before any assertion ran is retried once (retry-simulator-step.sh); it writes ${log}.
+  "${script_dir}/retry-simulator-step.sh" "${udid}" "${log}" -- env TEST_RUNNER_OHAND_RELAUNCH_PHASE="${phase}" xcodebuild test-without-building \
     -project OhAnd.xcodeproj \
     -scheme OhAndTests \
     -configuration Debug \
     -sdk iphonesimulator \
     -destination "platform=iOS Simulator,id=${udid}" \
     -derivedDataPath .derived \
-    -only-testing:OhAndTests/CredentialRelaunchTests 2>&1 | tee "${log}"
+    -only-testing:OhAndTests/CredentialRelaunchTests
 
   if ! grep -Eq "Test [Cc]ase .*CredentialRelaunchTests.*testRelaunchPhase.* passed" "${log}"; then
     echo "ERROR: relaunch phase ${phase} did not report a passing testRelaunchPhase (skipped or missing)" >&2

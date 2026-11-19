@@ -396,5 +396,28 @@ class FaceIdUsageChecks(unittest.TestCase):
             self.assertEqual(checks.check_face_id_usage(project, root), [])
 
 
+class SimulatorTestRetryChecks(unittest.TestCase):
+    def check(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x-simulator.sh"
+            path.write_text(text)
+            return checks.check_simulator_test_retry([path])
+
+    def test_committed_files_run_xcodebuild_tests_through_the_wrapper(self):
+        self.assertEqual(checks.check_simulator_test_retry(), [])
+
+    def test_wrapped_invocation_passes(self):
+        self.assertEqual(self.check('"${script_dir}/retry-simulator-step.sh" "${udid}" log -- env A=1 xcodebuild test-without-building \\\n  -scheme X\n'), [])
+
+    def test_bare_invocation_is_reported(self):
+        self.assertEqual(len(self.check("xcodebuild test-without-building \\\n  -scheme X 2>&1 | tee log\n")), 1)
+
+    def test_bare_invocation_with_environment_prefix_is_reported(self):
+        self.assertEqual(len(self.check("A=1 xcodebuild test-without-building -scheme X\n")), 1)
+
+    def test_comment_mentioning_the_command_is_ignored(self):
+        self.assertEqual(self.check("# runs xcodebuild test-without-building\n"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
