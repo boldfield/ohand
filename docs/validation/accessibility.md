@@ -54,6 +54,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 | Source detail with a reminder, the correction and item controls | `testSourceDetailWithReminderAndControls` | needs-correction |
 | Settings root; Daily prompt; Unfinished recordings; Processing (provider settings), its Add provider and Advanced screens; Privacy; Status; Audio; Export | `testSettingsScreens` | populated |
 | First-run permissions (Settings, Permissions) | `testSettingsPermissionsOnFirstRun` | empty-first-run |
+| Settings, Audio with a voice note to turn into text again (the section and its button; not the state while the replacement runs, which is over within a second of the tap) | `testSettingsAudioWithRecordingsToRedo` | redoable-recording |
 | Data settings: Erase everything and its confirmation (nothing is confirmed) | `testDataSettingsEraseConfirmation` | populated |
 | Status with a failed note; Status with a reminder that needs a time | `testStatusWithFailedNote`, `testStatusWithReminderNeedingATime` | failed-sorting, needs-correction |
 | Locked screen | `testLockedScreen` | locked |

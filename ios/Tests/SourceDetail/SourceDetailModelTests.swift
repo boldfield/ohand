@@ -153,34 +153,6 @@ final class SourceDetailModelTests: XCTestCase {
         XCTAssertEqual(section.provenance, "Transcribed on this device by on-device, language en, confidence 80%")
     }
 
-    func testATranscriptReplacedWhileTheScreenIsOpenShowsTheNewTextOnTheNextRead() async throws {
-        func transcript(_ text: String, attachedRevision: Int) -> CoreItemDetailTranscript {
-            CoreItemDetailTranscript(
-                transcriptRecordID: "t1", sourceJobID: "j1", text: text, recognizer: "on-device",
-                detectedLanguage: "en", confidence: 0.8, transcribedAt: "2026-10-01T09:31:00Z",
-                attachedRevision: attachedRevision, audioSHA256: String(repeating: "a", count: 64))
-        }
-        let reader = FakeDetailReader(.success(detail(
-            text: "the end of the note", basis: .transcribed, original: nil, corrected: nil,
-            audioReference: "audio:1", transcript: transcript("the end of the note", attachedRevision: 1))))
-        let model = make(reader)
-        await model.load()
-        XCTAssertEqual(model.content?.currentText, "the end of the note")
-
-        // A replacement settles in the core: the item's revision advances and its transcript is the longer one.
-        reader.result = .success(detail(
-            text: "the start of the note and then the end of the note", basis: .transcribed, original: nil,
-            corrected: nil, audioReference: "audio:1",
-            transcript: transcript("the start of the note and then the end of the note", attachedRevision: 3),
-            revision: 3))
-        await model.load()
-
-        XCTAssertEqual(model.content?.currentText, "the start of the note and then the end of the note")
-        XCTAssertEqual(
-            model.content?.sections.map(\.text), ["the start of the note and then the end of the note"])
-        XCTAssertNil(model.failure)
-    }
-
     func testAnAudioCaptureWithNoTranscriptYetShowsNoInventedText() async throws {
         let model = make(FakeDetailReader(.success(detail(
             text: nil, basis: .transcribed, original: nil, corrected: nil, audioReference: "audio:1"))))

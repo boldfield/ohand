@@ -14,6 +14,9 @@ enum UITestFixture: String, CaseIterable {
     case needsCorrection = "needs-correction"
     /// One note whose provider request was rejected.
     case failedSorting = "failed-sorting"
+    /// One voice note whose text came from an earlier recognizer generation, with its recording still kept, so Settings →
+    /// Audio offers to turn it into text again.
+    case redoable = "redoable-recording"
     /// The network is unavailable and saved notes wait for it.
     case offline
 

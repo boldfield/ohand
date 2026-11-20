@@ -9,6 +9,7 @@ enum OhAndFixture: String, CaseIterable {
     case needsCorrection = "needs-correction"
     case failedSorting = "failed-sorting"
     case offline
+    case redoable = "redoable-recording"
 }
 
 extension XCUIApplication {

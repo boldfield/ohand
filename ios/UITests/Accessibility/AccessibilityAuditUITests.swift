@@ -378,6 +378,18 @@ final class AccessibilityAuditUITests: XCTestCase {
         audit("permissions-first-run")
     }
 
+    /// Settings, Audio with a voice note whose text came from an earlier version: the section that offers to turn kept
+    /// recordings into text again is on screen, with its button. The state while the replacement runs is not audited: the
+    /// job drains within a second of the tap, so no stable frame of it exists to audit.
+    func testSettingsAudioWithRecordingsToRedo() {
+        guard launch(.redoable), openSettings(), openSettingsRow("Audio") else { return }
+        let button = app.element(identifier: "data-settings.retention.redo-button")
+        XCTAssertTrue(button.waitForExistence(timeout: screenTimeout), "the retention screen shows no redo button")
+        XCTAssertTrue(
+            app.element(identifier: "data-settings.retention.redo").exists, "the retention screen shows no redo summary")
+        audit("data-audio-redo")
+    }
+
     func testDataSettingsEraseConfirmation() {
         guard launch(.populated), openSettings() else { return }
         let erase = app.element(identifier: "management.settings.erase")
