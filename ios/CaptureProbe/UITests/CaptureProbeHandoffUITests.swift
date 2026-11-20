@@ -74,7 +74,7 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         }
         let promptShowing = springboard.buttons["Open"].exists
         return "foreground application: \(foregroundIdentifier ?? "none of the known applications"); "
-            + "\"Open\" prompt: \(promptShowing ? "showing" : "not showing"); states: \(states.joined(separator: ", "))"
+            + "\"Open\" prompt: \(promptShowing ? "showing" : "not showing"); home screen: \(homeScreenShowing ? "showing" : "not showing"); states: \(states.joined(separator: ", "))"
     }
 
     private func stateName(_ state: XCUIApplication.State) -> String {
@@ -109,7 +109,7 @@ final class CaptureProbeHandoffUITests: XCTestCase {
 
     /// Fails with what is in front, and a screenshot of the screen, unless the app reaches the foreground within `timeout`.
     private func requireForeground(_ message: String, timeout: TimeInterval) {
-        if waitUntil(timeout: timeout, { app.state == .runningForeground }) { return }
+        if waitUntil(timeout: timeout, { appInFront }) { return }
         attachScreenshotOfTheScreen(named: "not-foreground-\(message)")
         XCTFail("app not foreground: \(message); \(describeWhatIsInFront())")
     }
@@ -119,7 +119,7 @@ final class CaptureProbeHandoffUITests: XCTestCase {
     /// open the URL a second time, which would be a second handoff.
     @available(iOS 16.4, *)
     private func openShortcutURL(phase: String) {
-        let wasForeground = app.state == .runningForeground
+        let wasForeground = appInFront
         XCUIDevice.shared.system.open(shortcutURL)
         let openedAt = Date()
         var promptAccepted = false
@@ -133,7 +133,7 @@ final class CaptureProbeHandoffUITests: XCTestCase {
                 promptAccepted = true
                 return false
             }
-            guard app.state == .runningForeground else { return false }
+            guard appInFront else { return false }
             return !wasForeground || promptAccepted || Date().timeIntervalSince(openedAt) >= promptWindowForForegroundApp
         }
         if !handedOff {
@@ -142,11 +142,18 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         }
     }
 
+    /// True when SpringBoard's home screen is in front (its dock shows Safari). `app.state` can keep reporting
+    /// `runningForeground` for a long time after Home was pressed (hosted run 44691024441 attempt 3: the screenshot showed
+    /// the home screen while four polls of the state still said foreground), so the home screen is the evidence of record.
+    private var homeScreenShowing: Bool { springboard.icons["Safari"].exists }
+
+    private var appInFront: Bool { app.state == .runningForeground && !homeScreenShowing }
+
     /// Presses Home until the app has left the foreground; a press that is lost on a loaded runner is pressed again.
     private func sendAppToBackground() {
         for _ in 1...4 {
             XCUIDevice.shared.press(.home)
-            if waitUntil(timeout: 6, { app.state != .runningForeground }) { return }
+            if waitUntil(timeout: 6, { !appInFront }) { return }
         }
         attachScreenshotOfTheScreen(named: "never-left-the-foreground")
         XCTFail("app never left the foreground; \(describeWhatIsInFront())")
