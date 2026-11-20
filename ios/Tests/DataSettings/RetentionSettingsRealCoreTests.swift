@@ -130,6 +130,8 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
         let longer = "the start of the note and then water the ferns"
         let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: longer, confidence: 0.8))
         let model = try await makeModel(recognizer: recognizer)
+        // The job runner drains only while the app is in the foreground.
+        root.start(isActive: true)
 
         await model.refresh()
         XCTAssertTrue(model.showsRetranscription)
