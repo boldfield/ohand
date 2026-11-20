@@ -189,7 +189,9 @@ final class UITestFixtureSeeder {
             let transcript = "Synthetic spoken note about the old recording"
             try await saveVoice(
                 transcript: transcript, expecting: .processed, reply: .proposal(try Self.proposal(text: transcript, itemType: "note")))
-            // The note is stored; from here the recognizer is the current generation, so the note is out of date.
+            // The transcript is attached by a job after the save, so the note must settle at the earlier generation
+            // before the recognizer moves on; from then the note is out of date.
+            try await settleNotes()
             recognizer.advanceToCurrentGeneration()
         case .needsCorrection:
             try await configureProvider()
