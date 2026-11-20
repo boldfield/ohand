@@ -13,6 +13,54 @@ class ProjectConfigChecks(unittest.TestCase):
     def test_committed_configuration_passes(self):
         self.assertEqual(checks.run_all_checks(), [])
 
+    def split_workflow(self):
+        return yaml.safe_load(checks.IOS_WORKFLOW.read_text())
+
+    def write_split_workflow(self, workflow):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "ios.yml"
+        path.write_text(yaml.safe_dump(workflow))
+        return path
+
+    def test_simulator_split_passes_as_committed(self):
+        self.assertEqual(checks.check_simulator_job_split(), [])
+
+    def test_simulator_split_reports_a_step_missing_from_all_three_jobs(self):
+        workflow = self.split_workflow()
+        step_name = "Launch OhAndApp smoke test"
+        jobs = workflow["jobs"]
+        jobs["simulator"]["steps"] = [s for s in jobs["simulator"]["steps"] if s.get("name") != step_name]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(step_name, errors[0])
+
+    def test_simulator_split_reports_a_step_in_two_jobs(self):
+        workflow = self.split_workflow()
+        step_name = "Build CaptureProbe"
+        jobs = workflow["jobs"]
+        step = next(s for s in jobs["capture-probe"]["steps"] if s.get("name") == step_name)
+        jobs["simulator"]["steps"].append(copy.deepcopy(step))
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(step_name, errors[0])
+
+    def test_simulator_split_reports_a_shared_step_missing_from_a_job(self):
+        workflow = self.split_workflow()
+        jobs = workflow["jobs"]
+        jobs["capture-probe"]["steps"] = [s for s in jobs["capture-probe"]["steps"] if s.get("name") != "Select simulator"]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("capture-probe", errors[0])
+
+    def test_simulator_split_reports_a_missing_job_and_a_long_timeout(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["timeout-minutes"] = 90
+        del workflow["jobs"]["notification-probe"]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertTrue(any("notification-probe" in e for e in errors))
+        self.assertTrue(any("timeout-minutes" in e for e in errors))
+
     def test_transitive_framework_must_be_embedded_in_app(self):
         project = checks.load_project()
         app = project["targets"]["OhAndApp"]
@@ -286,7 +334,7 @@ class ProjectConfigChecks(unittest.TestCase):
         project = copy.deepcopy(checks.load_project())
         project["options"]["xcodeVersion"] = "27.0.1"
         errors = checks.check_workflow_xcode_pin(project)
-        self.assertEqual(len([e for e in errors if "'27.0.1'" in e]), 4, errors)
+        self.assertEqual(len([e for e in errors if "'27.0.1'" in e]), 6, errors)
 
     def test_pin_27_2_on_macos_26_runner_is_reported(self):
         project = checks.load_project()

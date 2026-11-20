@@ -250,6 +250,75 @@ def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
     return errors
 
 
+# CI07: the former single `simulator` job is three parallel jobs. Each step of the old job is in exactly one of them, except
+# the shared setup, teardown and upload steps, which every one of the three has. The lists are kept here so a step cannot be
+# dropped or run twice by an edit to one job.
+SPLIT_SIMULATOR_JOBS = ("simulator", "notification-probe", "capture-probe")
+SHARED_SIMULATOR_STEPS = (
+    "actions/checkout@v4",
+    "Stop unneeded host work",
+    "Select pinned Xcode",
+    "Install XcodeGen launcher",
+    "Record toolchain versions",
+    "Select simulator",
+    "Generate Xcode project",
+    "Stop the build service before the first boot",
+    "Delete simulator template",
+    "Upload evidence",
+    "Upload evidence (export failure diagnostics)",
+    "Upload evidence (failure diagnostics, failure only)",
+)
+PARTITIONED_SIMULATOR_STEPS = (
+    "Build OhAndTests (no simulator booted yet)",
+    "Build NotificationProbe UI tests (no simulator booted yet)",
+    "Build CaptureProbe UI tests (no simulator booted yet)",
+    "Build BridgeProbe",
+    "Build CredentialProbe",
+    "Build OhAndApp",
+    "Build CaptureProbe",
+    "Build AudioProbe",
+    "Build TranscriptionProbe",
+    "Settle simulator (single cold boot) and keep an empty template",
+    "Run OhAndTests on simulator",
+    "Run credential cross-process relaunch check",
+    "Run NotificationProbe UI tests (allow and deny permission decisions)",
+    "Run CredentialProbe Keychain self-test",
+    "Launch smoke test",
+    "Launch CredentialProbe smoke test",
+    "Launch OhAndApp smoke test",
+    "Verify OhAndApp embedded frameworks",
+    "Launch TranscriptionProbe smoke test",
+    "CaptureProbe handoff UI test and ingress smoke test",
+)
+SPLIT_JOB_TIMEOUT_CEILING_MINUTES = 60
+
+
+def check_simulator_job_split(workflow_path=IOS_WORKFLOW):
+    """Every step of the old simulator job runs in exactly one of the three jobs (shared steps in all three)."""
+    jobs = yaml.safe_load(workflow_path.read_text()).get("jobs", {})
+    errors = []
+    names = {}
+    for job_name in SPLIT_SIMULATOR_JOBS:
+        if job_name not in jobs:
+            errors.append(f"ios.yml has no {job_name} job")
+            continue
+        steps = jobs[job_name].get("steps", [])
+        names[job_name] = [step.get("name", step.get("uses")) for step in steps]
+        timeout = jobs[job_name].get("timeout-minutes")
+        if not isinstance(timeout, int) or timeout > SPLIT_JOB_TIMEOUT_CEILING_MINUTES:
+            errors.append(f"ios.yml job {job_name} timeout-minutes must be at most {SPLIT_JOB_TIMEOUT_CEILING_MINUTES}, found {timeout!r}")
+    for step_name in PARTITIONED_SIMULATOR_STEPS:
+        holders = [job_name for job_name, job_steps in names.items() if job_steps.count(step_name) > 0]
+        copies = sum(job_steps.count(step_name) for job_steps in names.values())
+        if len(names) == len(SPLIT_SIMULATOR_JOBS) and (len(holders) != 1 or copies != 1):
+            errors.append(f"ios.yml step {step_name!r} must run in exactly one of {SPLIT_SIMULATOR_JOBS}, found in {holders} ({copies} times)")
+    for step_name in SHARED_SIMULATOR_STEPS:
+        for job_name, job_steps in names.items():
+            if job_steps.count(step_name) != 1:
+                errors.append(f"ios.yml job {job_name} must have step {step_name!r} exactly once")
+    return errors
+
+
 XCODEBUILD_TEST_INVOCATION = re.compile(r"\bxcodebuild\s+test(-without-building)?\b")
 
 
@@ -452,7 +521,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":
