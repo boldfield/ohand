@@ -13,7 +13,8 @@ final class TranscriptionWireFormatTests: XCTestCase {
         let outcome = TranscriptionOutcomeRequest(
             jobID: "job-1", leaseAttempt: 2, audioReference: "FinalizedAudio/clip-1.m4a",
             result: .transcript(RecognizedTranscriptRequest(
-                text: "hello", confidence: 0.5, detectedLanguage: nil, recognizer: "r/1", audioSHA256: "ab")),
+                text: "hello", confidence: 0.5, detectedLanguage: nil, recognizer: "r/1", audioSHA256: "ab",
+                transcriptGeneration: 2)),
             interpretation: InterpretationJobRequest(jobID: "job-2", profileVersion: nil, requestVersion: "v1"))
 
         let fields = try json(outcome)
@@ -27,6 +28,7 @@ final class TranscriptionWireFormatTests: XCTestCase {
         XCTAssertEqual(transcript["confidence"] as? Double, 0.5)
         XCTAssertEqual(transcript["recognizer"] as? String, "r/1")
         XCTAssertEqual(transcript["audio_sha256"] as? String, "ab")
+        XCTAssertEqual(transcript["transcript_generation"] as? Int, 2)
         XCTAssertNil(transcript["detected_language"])
         let interpretation = try XCTUnwrap(fields["interpretation"] as? [String: Any])
         XCTAssertEqual(interpretation["job_id"] as? String, "job-2")
@@ -45,7 +47,7 @@ final class TranscriptionWireFormatTests: XCTestCase {
     }
 
     func testAnAcknowledgmentDecodesEveryDisposition() throws {
-        for disposition in ["attached", "already_attached", "pending", "discarded"] {
+        for disposition in ["attached", "already_attached", "pending", "discarded", "replaced", "unchanged", "kept"] {
             let body = """
                 {"operation_id":7,"item_id":"i","job_id":"j","disposition":"\(disposition)","revision":1,\
                 "transcription_state":"transcribed","discard_reason":null,\

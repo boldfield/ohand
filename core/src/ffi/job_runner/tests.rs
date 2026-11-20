@@ -1249,6 +1249,7 @@ mod voice_capture_transcription {
                     confidence: Some(0.9),
                     detected_language: Some("en-US".to_string()),
                     recognizer: "fake-recognizer/1".to_string(),
+                    transcript_generation: 1,
                     audio_sha256:
                         "0b5f1b0f6c2a4d0d9e8d6f6e0f7b8a1c2d3e4f5061728394a5b6c7d8e9f00112"
                             .to_string(),

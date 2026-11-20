@@ -38,8 +38,15 @@ public struct RecognizedTranscriptRequest: Encodable, Equatable, Sendable {
     public let recognizer: String
     /// Lowercase hex SHA-256 of the audio file the recognizer read.
     public let audioSHA256: String
+    /// Which recognizer behaviour produced the text (the core's `transcript_generation`); 2 keeps every recognized
+    /// segment. Required and never defaulted: the core refuses an outcome that does not say.
+    public let transcriptGeneration: Int
 
-    public init(text: String, confidence: Double?, detectedLanguage: String?, recognizer: String, audioSHA256: String) {
+    public init(
+        text: String, confidence: Double?, detectedLanguage: String?, recognizer: String, audioSHA256: String,
+        transcriptGeneration: Int
+    ) {
+        self.transcriptGeneration = transcriptGeneration
         self.text = text
         self.confidence = confidence
         self.detectedLanguage = detectedLanguage
@@ -53,6 +60,7 @@ public struct RecognizedTranscriptRequest: Encodable, Equatable, Sendable {
         case detectedLanguage = "detected_language"
         case recognizer
         case audioSHA256 = "audio_sha256"
+        case transcriptGeneration = "transcript_generation"
     }
 }
 
@@ -145,6 +153,12 @@ public struct TranscriptionApplyAcknowledgment: Decodable, Equatable, Sendable {
         case pending
         /// The outcome was refused against current durable state and the job retired; nothing about the item changed.
         case discarded
+        /// A replacement transcript is now the item's text; the superseded one is kept as history.
+        case replaced
+        /// The replacement transcript has the same text as the stored one; nothing about the item changed.
+        case unchanged
+        /// Recognition of a replacement did not produce text; the existing transcript stays. `discardReason` says why.
+        case kept
     }
 
     public struct Interpretation: Decodable, Equatable, Sendable {
