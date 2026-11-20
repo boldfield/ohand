@@ -26,7 +26,7 @@ final class UITestFixtureTests: XCTestCase {
     func testEveryNamedFixtureIsListed() {
         XCTAssertEqual(
             Set(UITestFixture.allCases.map(\.rawValue)),
-            ["empty-first-run", "locked", "populated", "needs-correction", "failed-sorting", "offline"])
+            ["empty-first-run", "locked", "populated", "needs-correction", "failed-sorting", "offline", "redoable-recording"])
     }
 
     func testAnUnknownFixtureNameIsRefused() {
@@ -100,6 +100,13 @@ final class UITestFixtureTests: XCTestCase {
         for note in notes {
             XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "unprocessed")
         }
+    }
+
+    func testRedoableHoldsOneSpokenNoteSettledAtTheEarlierGeneration() throws {
+        let (_, notes) = try seededFixture("redoable-recording")
+        let note = try XCTUnwrap(notes.first)
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertEqual(try XCTUnwrap(note.settledStatus).processingState, "processed")
     }
 
     func testNeedsCorrectionHoldsAReminderThatIsNotScheduled() throws {

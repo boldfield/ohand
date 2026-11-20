@@ -89,10 +89,11 @@ final class SourceDetailModelTests: XCTestCase {
     private func detail(
         text: String? = "the corrected words", basis: CoreRetrievalTextBasis = .corrected,
         original: String? = "the original words", corrected: String? = "the corrected words",
-        audioReference: String? = nil, transcript: CoreItemDetailTranscript? = nil, lifecycle: String = "active"
+        audioReference: String? = nil, transcript: CoreItemDetailTranscript? = nil, lifecycle: String = "active",
+        revision: Int = 2
     ) -> CoreItemDetail {
         CoreItemDetail(
-            itemID: Self.itemID, captureID: "capture-1", revision: 2, itemType: "task", scope: "personal",
+            itemID: Self.itemID, captureID: "capture-1", revision: revision, itemType: "task", scope: "personal",
             sessionTopic: "kitchen", lifecycleState: lifecycle, capturedAt: "2026-10-01T09:30:00Z", text: text,
             textBasis: basis, originalText: original, correctedText: corrected, audioReference: audioReference,
             transcript: transcript,

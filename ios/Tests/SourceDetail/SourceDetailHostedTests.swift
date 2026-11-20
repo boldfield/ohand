@@ -199,6 +199,37 @@ final class SourceDetailHostedTests: XCTestCase {
         XCTAssertFalse(onScreen.contains(SourceDetailView.currentTextIdentifier))
     }
 
+    /// F71c: a replacement of an item's text is published as an item change like any other. A detail screen shown in the
+    /// search screen's item pane reads the item again for it. The change here is a correction, which the root publishes
+    /// through the same signal the replacement job's drain does.
+    func testAnItemChangePublishedWhileTheScreenIsInTheItemPaneShowsTheNewText() throws {
+        let (itemID, _) = try saveCapture()
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        host(AnyView(NavigationStack { SourceDetailView(model: model) }.environment(\.isInItemPane, true)))
+        settle("the first read is shown") { model.content?.currentText == "synthetic capture to play" }
+        // Let the screen's change subscription attach before the change is published.
+        pauseRunLoop()
+
+        try correctText(itemID: itemID, to: "synthetic replaced words")
+
+        settle("the screen read the item again after the published change") {
+            model.content?.currentText == "synthetic replaced words"
+        }
+        XCTAssertEqual(model.content?.currentText, "synthetic replaced words")
+    }
+
+    /// A detail screen opened after the replacement reads the new text. (A screen pushed from Home or Status that was
+    /// already open keeps the old text until it is opened again: only the item pane reads again on a change.)
+    func testADetailScreenOpenedAfterTheTextChangedShowsTheNewText() throws {
+        let (itemID, _) = try saveCapture()
+        try correctText(itemID: itemID, to: "synthetic replaced words")
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        host(AnyView(NavigationStack { SourceDetailView(model: model) }))
+
+        settle("the screen shows the item") { model.content != nil }
+        XCTAssertEqual(model.content?.currentText, "synthetic replaced words")
+    }
+
     func testTheScreenFitsCompactAndRegularWidthInBothAppearancesAndAtTheLargestText() throws {
         let (itemID, captureID) = try saveCapture()
         try correctText(itemID: itemID, to: "synthetic corrected words")

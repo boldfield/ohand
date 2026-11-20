@@ -1,3 +1,5 @@
+import CryptoKit
+import SQLite3
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -44,7 +46,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
 
     /// Builds the root off the main thread, as the other real-core suites do: its route provisioning blocks until the
     /// core answers.
-    private func makeModel() async throws -> RetentionSettingsModel {
+    private func makeModel(recognizer: OnDeviceRecognizing? = nil) async throws -> RetentionSettingsModel {
         let layoutPath = world.layout.rootDirectory.path
         let readSession = session!
         let built = try await Task.detached { () -> BuiltRoot in
@@ -56,7 +58,8 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
                     timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
                 adapters: .injectedForTests(
                     sender: UnreachableSettingsProviderSender(), readSession: readSession,
-                    notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)),
+                    notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true),
+                    recognizer: recognizer),
                 modules: [coordinator])
             try coordinator.connect(to: root)
             return BuiltRoot(root: root, coordinator: coordinator)
@@ -104,6 +107,49 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
         world.clearJobs(itemID: sole.itemID)
         await model.retryTranscription(itemID: sole.itemID)
         XCTAssertEqual(model.actions[sole.itemID], .queued)
+    }
+
+    /// Records the identity of the seeded audio in the stored transcript, as a real transcription would have, so a
+    /// replacement of the same recording is accepted.
+    private func recordAudioIdentity(itemID: String, audioBytes: Data) throws {
+        let digest = SHA256.hash(data: audioBytes).map { String(format: "%02x", $0) }.joined()
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(world.databasePath, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5_000)
+        XCTAssertEqual(
+            sqlite3_exec(
+                database, "UPDATE transcript_attachments SET audio_sha256 = '\(digest)' WHERE item_id = '\(itemID)'",
+                nil, nil, nil), SQLITE_OK)
+    }
+
+    func testOneEarlierTranscriptIsReplacedThroughTheButtonAndTheSectionGoesAway() async throws {
+        let seeded = try await world.seedVoice(captureID: "cap-earlier", transcribedDaysAgo: 1)
+        world.clearJobs(itemID: seeded.itemID)
+        try recordAudioIdentity(itemID: seeded.itemID, audioBytes: Data("synthetic audio".utf8))
+        let longer = "the start of the note and then water the ferns"
+        let recognizer = FakeOnDeviceRecognizer(outcome: .transcript(text: longer, confidence: 0.8))
+        let model = try await makeModel(recognizer: recognizer)
+        // The job runner drains only while the app is in the foreground.
+        root.start(isActive: true)
+
+        await model.refresh()
+        XCTAssertTrue(model.showsRetranscription)
+        XCTAssertEqual(model.retranscription?.redoableCount, 1)
+        XCTAssertEqual(recognizer.callCount, 0, "nothing runs until the button is pressed")
+
+        await model.retranscribeAll()
+
+        let deadline = Date().addingTimeInterval(30)
+        while model.showsRetranscription, Date() < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            await model.refresh()
+        }
+        XCTAssertFalse(model.showsRetranscription, "the section is gone once the replacement has settled")
+        XCTAssertEqual(recognizer.callCount, 1)
+        let detail = SourceDetailModel.assembled(itemID: seeded.itemID, root: root)
+        await detail.load()
+        XCTAssertEqual(detail.content?.currentText, longer, "the item's text is the replacement")
     }
 
     func testARelockedSessionShowsNothingFromTheCore() async throws {
