@@ -24,22 +24,22 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         expectIdle(phase: "plain-cold")
 
         app.terminate()
-        openShortcutURL(phase: "url-cold")
+        openShortcutURL(phase: "url-cold", previousIds: [])
         let firstColdId = expectSavedEntry(kind: "cold", phase: "url-cold", previousIds: [])
 
         app.terminate()
-        openShortcutURL(phase: "url-cold-after-restart")
+        openShortcutURL(phase: "url-cold-after-restart", previousIds: [firstColdId])
         let secondColdId = expectSavedEntry(kind: "cold", phase: "url-cold-after-restart", previousIds: [firstColdId])
 
         sendAppToBackground()
-        openShortcutURL(phase: "url-warm")
+        openShortcutURL(phase: "url-warm", previousIds: [firstColdId, secondColdId])
         let warmId = expectSavedEntry(kind: "warm", phase: "url-warm", previousIds: [firstColdId, secondColdId])
 
         sendAppToBackground()
         app.activate()
         expectIdle(phase: "plain-warm")
 
-        openShortcutURL(phase: "url-foreground")
+        openShortcutURL(phase: "url-foreground", previousIds: [firstColdId, secondColdId, warmId])
         _ = expectSavedEntry(kind: "warm", phase: "url-foreground", previousIds: [firstColdId, secondColdId, warmId])
     }
 
@@ -59,22 +59,43 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         attachScreenshotOfTheScreen(named: "not-foreground-diagnosis-example")
     }
 
+    /// The stale-state case: the app was sent Home, so SpringBoard's home screen is in front whatever `app.state` still
+    /// reports. The diagnosis must name SpringBoard and must not name the probe.
+    func testTheDiagnosisNamesSpringBoardWhenTheHomeScreenShowsAfterTheAppWasSentHome() {
+        app.launch()
+        XCTAssertTrue(waitUntil(timeout: 20, { app.state == .runningForeground }), "the app should be in front: \(describeWhatIsInFront())")
+        for _ in 1...4 {
+            XCUIDevice.shared.press(.home)
+            if waitUntil(timeout: 6, { homeScreenShowing }) { break }
+        }
+        XCTAssertTrue(homeScreenShowing, "the home screen should be showing")
+        let diagnosis = describeWhatIsInFront()
+        print("CAPTURE-DIAGNOSIS \(diagnosis)")
+        XCTAssertTrue(diagnosis.contains("foreground application: com.apple.springboard"), diagnosis)
+        XCTAssertTrue(diagnosis.contains("home screen: showing"), diagnosis)
+        XCTAssertFalse(diagnosis.contains("foreground application: \(probeBundleIdentifier)"), diagnosis)
+        attachScreenshotOfTheScreen(named: "home-screen-diagnosis-example")
+    }
+
     /// The diagnosis the failure messages carry: which of the applications that can be in front is, whether SpringBoard's
     /// "Open" prompt is showing, and every candidate's state.
     private func describeWhatIsInFront() -> String {
         let candidates = [probeBundleIdentifier, "com.apple.springboard", "com.apple.mobilesafari", "com.apple.Preferences", "com.apple.shortcuts"]
-        var foregroundIdentifier: String?
+        // A showing home screen outranks every reported state: `XCUIApplication.state` can keep saying
+        // `runningForeground` for an app that Home has already sent away (see `homeScreenShowing`).
+        let homeScreenIsShowing = homeScreenShowing
+        var foregroundIdentifier: String? = homeScreenIsShowing ? "com.apple.springboard" : nil
         var states: [String] = []
         for identifier in candidates {
             let state = XCUIApplication(bundleIdentifier: identifier).state
             states.append("\(identifier)=\(stateName(state))")
-            if state == .runningForeground && foregroundIdentifier == nil {
+            if !homeScreenIsShowing && state == .runningForeground && foregroundIdentifier == nil {
                 foregroundIdentifier = identifier
             }
         }
         let promptShowing = springboard.buttons["Open"].exists
         return "foreground application: \(foregroundIdentifier ?? "none of the known applications"); "
-            + "\"Open\" prompt: \(promptShowing ? "showing" : "not showing"); home screen: \(homeScreenShowing ? "showing" : "not showing"); states: \(states.joined(separator: ", "))"
+            + "\"Open\" prompt: \(promptShowing ? "showing" : "not showing"); home screen: \(homeScreenIsShowing ? "showing" : "not showing"); states: \(states.joined(separator: ", "))"
     }
 
     private func stateName(_ state: XCUIApplication.State) -> String {
@@ -116,16 +137,14 @@ final class CaptureProbeHandoffUITests: XCTestCase {
 
     /// Opens the shortcut URL and drives the handoff to a known state: the "Open" prompt accepted (or known absent) and
     /// the app in the foreground. It waits on those conditions, accepting the prompt whenever it appears, and does not
-    /// open the URL a second time, which would be a second handoff.
+    /// open the URL a second time, which would be a second handoff. An app that was already in front is in the
+    /// foreground before the system asks anything, so for it the handoff is complete only when the new entry (an ID not in
+    /// `previousIds`) is rendered or the prompt has been accepted; no fixed window decides that a prompt is absent.
     @available(iOS 16.4, *)
-    private func openShortcutURL(phase: String) {
+    private func openShortcutURL(phase: String, previousIds: [String]) {
         let wasForeground = appInFront
         XCUIDevice.shared.system.open(shortcutURL)
-        let openedAt = Date()
         var promptAccepted = false
-        // An app that was already in front is in the foreground before the system asks anything, so the prompt gets a
-        // fixed window there; otherwise the app only comes forward after the prompt (if any) has been accepted.
-        let promptWindowForForegroundApp: TimeInterval = 5
         let handedOff = waitUntil(timeout: 45) {
             let openButton = springboard.buttons["Open"]
             if openButton.exists {
@@ -134,7 +153,9 @@ final class CaptureProbeHandoffUITests: XCTestCase {
                 return false
             }
             guard appInFront else { return false }
-            return !wasForeground || promptAccepted || Date().timeIntervalSince(openedAt) >= promptWindowForForegroundApp
+            if !wasForeground || promptAccepted { return true }
+            let shown = detailLabel.exists ? detailLabel.label : ""
+            return shown.contains("Capture ID: ") && !previousIds.contains { shown.contains($0) }
         }
         if !handedOff {
             attachScreenshotOfTheScreen(named: "not-foreground-\(phase)-handoff")
