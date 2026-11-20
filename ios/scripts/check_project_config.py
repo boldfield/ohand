@@ -328,6 +328,27 @@ def check_simulator_job_split(workflow_path=IOS_WORKFLOW):
     return errors
 
 
+# CI08: the closed list of paths whose change alone does not start ios.yml. Only a later task adds to it.
+IOS_WORKFLOW_IGNORED_PATHS = ["docs/**", "*.md"]
+CORE_WORKFLOW = IOS_ROOT.parent / ".github" / "workflows" / "core.yml"
+
+
+def check_documents_only_skip(ios_workflow_path=IOS_WORKFLOW, core_workflow_path=CORE_WORKFLOW):
+    """ios.yml ignores exactly docs/** and root *.md (and has no positive path filter); core.yml has no path filter."""
+    errors = []
+    # PyYAML reads the bare key `on` as the boolean True.
+    ios_trigger = yaml.safe_load(ios_workflow_path.read_text()).get(True, {}).get("pull_request", {})
+    if ios_trigger.get("paths-ignore") != IOS_WORKFLOW_IGNORED_PATHS:
+        errors.append(f"ios.yml pull_request paths-ignore must be exactly {IOS_WORKFLOW_IGNORED_PATHS}, found {ios_trigger.get('paths-ignore')!r}")
+    if "paths" in ios_trigger:
+        errors.append("ios.yml pull_request must not have a paths filter (it cannot be combined with paths-ignore)")
+    core_triggers = yaml.safe_load(core_workflow_path.read_text()).get(True, {})
+    for event_name, event in (core_triggers.items() if isinstance(core_triggers, dict) else []):
+        if isinstance(event, dict) and any(key in event for key in ("paths", "paths-ignore")):
+            errors.append(f"core.yml {event_name} must not have a path filter")
+    return errors
+
+
 XCODEBUILD_TEST_INVOCATION = re.compile(r"\bxcodebuild\s+test(-without-building)?\b")
 
 
@@ -530,7 +551,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_documents_only_skip() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":
