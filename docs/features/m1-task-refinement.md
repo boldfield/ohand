@@ -5179,6 +5179,16 @@ Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
 
+#### F71c amendment 1 (2026-11-20, coordinator): the audited state needs a fixture, and the pushed detail screen does not refresh
+
+Both reviewers refused PR #423 on two points that are the coordinator's errors in the text above. Where this amendment and that text disagree, the amendment governs.
+
+1. **Criterion 3 cannot be met inside the owned paths.** The retention screen is audited as `data-audio` in `AccessibilityAuditUITests.testSettingsScreens` with the `.populated` fixture, whose recognizer reports generation 2, so the fixture has no candidate and the section never renders. F71c additionally owns: `ios/AppAssembly/UITestFixtures/` (a fixture state, or an addition to an existing one, with at least one voice note stored at generation 1 whose synthetic recording is present, so the section shows with its button; nothing else about the existing fixtures changes), `ios/UITests/Accessibility/` (one audited stop of the retention screen with the section shown, at both text sizes, following the glass ledger rules; the progress state as well if it can be held still, and the PR says so if it cannot), `ios/scripts/accessibility-groups.txt` (a line for any new test method) and `docs/validation/accessibility.md` if it lists audited screens. Criterion 3 is met only by an audit that ran with the section on screen, shown by the run's screenshot.
+
+2. **The premise of the detail-screen sentence was false.** `SourceDetailView.readAgainAfterChange()` begins `guard isInItemPane else { return }` (`app/source-detail/SourceDetailView.swift:167`), and only the search screen's pane sets it. A detail screen pushed from Home or Status does not re-read when an item changes; that was already so before this feature, for every kind of change. F71c still does not change the detail screen. Criterion 4 becomes two tests in `ios/Tests/SourceDetail/`, neither of which calls `model.load()` itself to produce the result it asserts: (a) with the screen in the item pane, a published item change (the notification the job drain publishes) leads to the replaced text being shown; (b) a detail screen opened after the replacement reads the new text. The PR states plainly that a pushed detail screen that is already open keeps the old text until it is opened again. Whether a pushed screen should refresh live is a separate decision and is not part of F71c.
+
+3. The PR body carries the exact-head `ios.yml` URL and the evidence confirmation, as AGENTS.md step 4 requires.
+
 ### CI04
 
 Recover once when a simulator never becomes responsive
@@ -5383,3 +5393,30 @@ Acceptance:
 Validation: `make check`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 930.
+
+### F74
+
+**Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails**
+
+Filed 2026-11-20. Unit tests that build a real composition root end with `CoreLeakBaseline.check()` (`ios/Tests/Support/CoreLeakBaseline.swift`), which compares the process-wide live core handle and result buffer counts with the values `capture()` took in `setUp`. In run 44645076106 (F71b, head 6f58776f) four of six attempts failed one such test with "no result buffer leaks", off by one, a different test each time: `LifecycleCoordinatorRealCoreTests.testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground` (1 against 0), `AppServicesTests.testEveryLaunchStartsLockedSoNothingStoredIsReadable` twice (0 against 1) and `CompositionRootTests.testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration` (1 against 0). The F71b worker reports the first of these also failed on run 44224383184 attempt 1, a head without F71b's changes. The coordinator first attributed these to F71b; that was wrong.
+
+The worker's reading, which the task verifies before acting on it: the failing tests ended in 1.6 s and 2.5 s, so `check()` did not wait out its 10 s. Its loop ended when the counts matched, and a buffer was live when `XCTAssertEqual` read the count again a moment later. In the other direction, `capture()` stops on two equal reads 10 ms apart and can record a buffer that is still in flight, which the test then "loses". Both are a short-lived buffer in flight when the counts are read, from a core read that another queue started.
+
+Scope:
+1. Verify the reading from the failed logs (the test durations, and what the neighbouring tests left running) and state it in the PR. If a test is found that returns while work it started is still issuing core reads, say which; fixing that test is in scope only if it is under `ios/Tests/Support/`, otherwise it is reported.
+2. `check()` asserts on the counts it waited for, and requires them to hold at the baseline for a short settle interval before it passes, so a read that starts just after a match is waited for and not asserted against. `capture()` does not record a buffer that is in flight when a later read shows it freed.
+3. A real leak still fails: a buffer or handle that is still live after the wait fails the test at the caller's line, with equality and not "at most", as the type's comments say today.
+
+Owned paths: `ios/Tests/Support/CoreLeakBaseline.swift`, a new test file for it under `ios/Tests/Support/` (the counts are injected so the test controls them), `ios/scripts/check_test_leak_baseline.py` and its tests if the rule it enforces needs to name the new entry point.
+
+Not owned: `ios/OhAndCoreBridge/` (the counters), any other test file, any timeout elsewhere.
+
+Acceptance:
+1. Deterministic tests with injected counts, no real core and no sleeping for luck: a buffer that appears just after the counts match and is freed within the settle interval passes; a buffer that is never freed fails; a handle that is never closed fails; a buffer in flight during `capture()` that is then freed gives a baseline without it; a buffer that stays live through `capture()`'s wait stays in the baseline, as today.
+2. The total wait is still bounded, and the PR states the longest time a passing `check()` and a failing `check()` can take.
+3. No test file other than the new one changes, and `check_test_leak_baseline` still passes.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 938.
