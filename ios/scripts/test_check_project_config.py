@@ -53,6 +53,15 @@ class ProjectConfigChecks(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("capture-probe", errors[0])
 
+    def test_simulator_split_reports_failure_diagnostics_caps_above_the_old_single_job_allowance(self):
+        workflow = self.split_workflow()
+        for job_name in checks.SPLIT_SIMULATOR_JOBS:
+            export_step = next(s for s in workflow["jobs"][job_name]["steps"] if "export-failure-diagnostics.sh" in s.get("run", ""))
+            export_step["env"]["CAP_BYTES"] = "24000000"
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("CAP_BYTES", errors[0])
+
     def test_simulator_split_reports_a_missing_job_and_a_long_timeout(self):
         workflow = self.split_workflow()
         workflow["jobs"]["simulator"]["timeout-minutes"] = 90

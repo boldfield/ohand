@@ -291,6 +291,8 @@ PARTITIONED_SIMULATOR_STEPS = (
     "CaptureProbe handoff UI test and ingress smoke test",
 )
 SPLIT_JOB_TIMEOUT_CEILING_MINUTES = 60
+# The failure-diagnostics allowance the single simulator job had; the three jobs that replaced it share it (CAP_BYTES each).
+SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES = 24000000
 
 
 def check_simulator_job_split(workflow_path=IOS_WORKFLOW):
@@ -307,6 +309,13 @@ def check_simulator_job_split(workflow_path=IOS_WORKFLOW):
         timeout = jobs[job_name].get("timeout-minutes")
         if not isinstance(timeout, int) or timeout > SPLIT_JOB_TIMEOUT_CEILING_MINUTES:
             errors.append(f"ios.yml job {job_name} timeout-minutes must be at most {SPLIT_JOB_TIMEOUT_CEILING_MINUTES}, found {timeout!r}")
+    cap_total = 0
+    for job_name in names:
+        for step in jobs[job_name].get("steps", []):
+            if "export-failure-diagnostics.sh" in str(step.get("run", "")):
+                cap_total += int(step.get("env", {}).get("CAP_BYTES", 104857600))
+    if cap_total > SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES:
+        errors.append(f"ios.yml failure-diagnostics CAP_BYTES of {SPLIT_SIMULATOR_JOBS} total {cap_total}, above the {SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES} the single simulator job had")
     for step_name in PARTITIONED_SIMULATOR_STEPS:
         holders = [job_name for job_name, job_steps in names.items() if job_steps.count(step_name) > 0]
         copies = sum(job_steps.count(step_name) for job_steps in names.values())
