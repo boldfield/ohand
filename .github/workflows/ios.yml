@@ -23,10 +23,12 @@ jobs:
     runs-on: xcode-27
     # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
     # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
-    # Measured on the exact head of PR 422 (run 44737774976): project generation and builds about 11 minutes, cold boot and settle
-    # 16.3, OhAndTests 11.7, CredentialProbe smoke 6.6, OhAndApp smoke 5.1, the remaining relaunch check, Keychain self-test and
-    # smokes about 4: about 49 minutes (attempt 2 took 49m12s). The previous 55 was cancelled in attempt 1 during the
-    # TranscriptionProbe smoke, so 60, the ceiling for these jobs, is the most that is allowed and still ends a hung step.
+    # Every smoke script shuts the device down when it ends, so each smoke after the first pays a warm boot of about 4.5 minutes.
+    # Measured in run 44771939106, where this job took 54m20s: setup and generation 4.6 minutes, builds 4.7, cold boot 14.7
+    # (16.3 in run 44737774976), OhAndTests 12.9, relaunch check, Keychain self-test and BridgeProbe smoke 1.2, CredentialProbe
+    # smoke 5.4, OhAndApp smoke 4.5, TranscriptionProbe smoke 4.6. The OhAndApp and TranscriptionProbe builds and smokes and the
+    # embedded-framework check (about 11 minutes) moved to `capture-probe`, which leaves about 44 minutes here; 60, the ceiling
+    # for these jobs, leaves room for a slow cold boot and still ends a hung step.
     timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
@@ -108,26 +110,12 @@ jobs:
           cd ios
           OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
 
-      - name: Build OhAndApp
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
-
       - name: Build AudioProbe
         shell: bash
         run: |
           set -euo pipefail
           cd ios
           ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
-
-      - name: Build TranscriptionProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
 
       - name: Stop the build service before the first boot
         shell: bash
@@ -221,62 +209,6 @@ jobs:
             .evidence \
             "credentialprobe-launch.png"
 
-      - name: Launch OhAndApp smoke test
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
-          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
-        run: |
-          set -euo pipefail
-          echo "OhAndApp smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
-          cd ios
-          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/ohandapp-smoke.log -- ./scripts/smoke-simulator.sh \
-            "${SIMULATOR_UDID}" \
-            .derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app \
-            com.boldfield.ohand.app \
-            .evidence \
-            "ohandapp-launch.png"
-
-      - name: Verify OhAndApp embedded frameworks
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          app_path=.derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app
-          {
-            find "${app_path}/Frameworks" "${app_path}/PlugIns" -maxdepth 2
-            for framework in OhAndServices OhAndCoreBridge; do
-              test -f "${app_path}/Frameworks/${framework}.framework/${framework}"
-            done
-            test -d "${app_path}/PlugIns/OhAndCaptureControl.appex"
-            test ! -d "${app_path}/PlugIns/OhAndCaptureControl.appex/Frameworks"
-            # A production bundle carries no test-host injection (OhAndTests uses OhAnd.app as TEST_HOST).
-            test_host_files="$(find "${app_path}" \( -iname 'XC*' -o -iname 'Testing.framework' -o -iname 'libXCTest*' -o -name '*.xctest' \) -print)"
-            if [ -n "${test_host_files}" ]; then
-              echo "OhAnd.app contains test-host files:" >&2
-              echo "${test_host_files}" >&2
-              exit 1
-            fi
-          } 2>&1 | tee .evidence/OhAndApp-bundle.txt
-
-      - name: Launch TranscriptionProbe smoke test
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
-          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
-        run: |
-          set -euo pipefail
-          echo "TranscriptionProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
-          cd ios
-          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/transcription-smoke.log -- ./scripts/smoke-simulator.sh \
-            "${SIMULATOR_UDID}" \
-            .derived/Build/Products/Debug-iphonesimulator/TranscriptionProbe.app \
-            com.boldfield.ohand.probes.transcription \
-            .evidence \
-            "transcriptionprobe-launch.png"
-
       - name: Delete simulator template
         if: always()
         shell: bash
@@ -333,8 +265,10 @@ jobs:
     runs-on: xcode-27
     # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
     # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
-    # Medians of the former job's passing runs: generation, the UI-test build and tooling about 4 minutes, cold boot, template and
-    # second boot 18.6, the two suites 16.8: about 40 minutes. 60 is the ceiling CI07 allows and still ends a hung step.
+    # Measured in run 44771939106, where this job took 53m16s: setup and generation 2.6 minutes, the UI-test build 0.3, settle 30.8
+    # (a cold boot that needed its one recovery, the clone, and a 3.6-minute warm boot of the source device, which no step here
+    # used and which is now gone), the two suites on their clones 19.4. That is about 50 minutes with a recovered cold boot and
+    # about 35 without one; 60, the ceiling for these jobs, still ends a hung step.
     timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
@@ -423,8 +357,9 @@ jobs:
           echo "Cloned settled simulator ${SIMULATOR_UDID} into template ${template_udid}"
           echo "${template_udid}" > .evidence/template-udid.txt
           echo "TEMPLATE_UDID=${template_udid}" >> "$GITHUB_ENV"
-          # Bring the device back up and wait until it is responsive, so OhAndTests does not start on a booting host.
-          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --label ohandtests-device 2>&1 | tee -a .evidence/prepare-settle.log
+          # The source device stays shut down: OhAndTests, which the former single job booted it back up for, runs in the
+          # `simulator` job behind its own cold-boot gate, and no step here uses it, so a booted copy would only take memory
+          # from the suite clones.
 
       - name: Run NotificationProbe UI tests (allow and deny permission decisions)
         shell: bash
@@ -517,9 +452,12 @@ jobs:
     runs-on: xcode-27
     # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
     # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
-    # Medians of the former job's passing runs: generation, the UI-test and app builds about 4 minutes, cold boot about 10, the
-    # handoff UI test and ingress smoke 6.4: about 21 minutes. 45 leaves room for a slow host and still ends a hung step.
-    timeout-minutes: 45
+    # Measured in run 44771939106, where this job took 33m28s: setup and generation 3.3 minutes, the CaptureProbe builds 1.2, cold
+    # boot 26.7 (it needed its one recovery), the handoff UI test and ingress smoke 2.2. The OhAndApp and TranscriptionProbe
+    # builds (1.7 in the `simulator` job, which had compiled their shared frameworks already) and their smokes moved here from
+    # `simulator`; each smoke pays a warm boot of about 4.5 minutes because the step before it shut the device down. That is
+    # about 45 minutes with a recovered cold boot and about 30 without one; 60, the ceiling for these jobs, still ends a hung step.
+    timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
@@ -591,6 +529,20 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
 
+      - name: Build OhAndApp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
+
+      - name: Build TranscriptionProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
+
       - name: Stop the build service before the first boot
         shell: bash
         run: |
@@ -623,6 +575,62 @@ jobs:
             "${SIMULATOR_UDID}" \
             com.boldfield.ohand.probes.capture \
             .evidence 2>&1 | tee .evidence/capture-smoke.log
+
+      - name: Launch OhAndApp smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "OhAndApp smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/ohandapp-smoke.log -- ./scripts/smoke-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app \
+            com.boldfield.ohand.app \
+            .evidence \
+            "ohandapp-launch.png"
+
+      - name: Verify OhAndApp embedded frameworks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          app_path=.derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app
+          {
+            find "${app_path}/Frameworks" "${app_path}/PlugIns" -maxdepth 2
+            for framework in OhAndServices OhAndCoreBridge; do
+              test -f "${app_path}/Frameworks/${framework}.framework/${framework}"
+            done
+            test -d "${app_path}/PlugIns/OhAndCaptureControl.appex"
+            test ! -d "${app_path}/PlugIns/OhAndCaptureControl.appex/Frameworks"
+            # A production bundle carries no test-host injection (OhAndTests uses OhAnd.app as TEST_HOST).
+            test_host_files="$(find "${app_path}" \( -iname 'XC*' -o -iname 'Testing.framework' -o -iname 'libXCTest*' -o -name '*.xctest' \) -print)"
+            if [ -n "${test_host_files}" ]; then
+              echo "OhAnd.app contains test-host files:" >&2
+              echo "${test_host_files}" >&2
+              exit 1
+            fi
+          } 2>&1 | tee .evidence/OhAndApp-bundle.txt
+
+      - name: Launch TranscriptionProbe smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "TranscriptionProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/transcription-smoke.log -- ./scripts/smoke-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/TranscriptionProbe.app \
+            com.boldfield.ohand.probes.transcription \
+            .evidence \
+            "transcriptionprobe-launch.png"
 
       - name: Delete simulator template
         if: always()

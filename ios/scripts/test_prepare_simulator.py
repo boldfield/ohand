@@ -36,7 +36,7 @@ class PrepareSimulatorTests(unittest.TestCase):
     def test_pressure_file_records_swap_and_compressor(self):
         self.assertIn("swapins swapouts compressor_pages", self.script)
 
-    def test_quiet_host_runs_first_in_both_simulator_jobs_and_spares_the_essentials(self):
+    def test_quiet_host_runs_first_in_every_simulator_job_and_spares_the_essentials(self):
         self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 5)
         quiet = (SCRIPTS / "quiet-host.sh").read_text()
         for essential in ("CoreSimulator", "Xcode", "Runner.Listener", "provjobd"):

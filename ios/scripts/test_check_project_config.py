@@ -30,7 +30,8 @@ class ProjectConfigChecks(unittest.TestCase):
         workflow = self.split_workflow()
         step_name = "Launch OhAndApp smoke test"
         jobs = workflow["jobs"]
-        jobs["simulator"]["steps"] = [s for s in jobs["simulator"]["steps"] if s.get("name") != step_name]
+        for job_name in checks.SPLIT_SIMULATOR_JOBS:
+            jobs[job_name]["steps"] = [s for s in jobs[job_name]["steps"] if s.get("name") != step_name]
         errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
         self.assertEqual(len(errors), 1)
         self.assertIn(step_name, errors[0])
