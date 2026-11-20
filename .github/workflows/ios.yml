@@ -23,10 +23,11 @@ jobs:
     runs-on: xcode-27
     # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
     # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
-    # Medians of the former job's passing runs: project generation and builds of this job about 7 minutes, cold boot and settle
-    # about 10, OhAndTests 10, relaunch check, Keychain self-test and the four launch smokes about 10: about 37 minutes. 55 leaves
-    # room for the host slowdown seen in run 40201105544 (OhAndTests 22 minutes instead of 10) and still ends a hung step.
-    timeout-minutes: 55
+    # Measured on the exact head of PR 422 (run 44737774976): project generation and builds about 11 minutes, cold boot and settle
+    # 16.3, OhAndTests 11.7, CredentialProbe smoke 6.6, OhAndApp smoke 5.1, the remaining relaunch check, Keychain self-test and
+    # smokes about 4: about 49 minutes (attempt 2 took 49m12s). The previous 55 was cancelled in attempt 1 during the
+    # TranscriptionProbe smoke, so 60, the ceiling for these jobs, is the most that is allowed and still ends a hung step.
+    timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
