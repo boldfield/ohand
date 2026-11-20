@@ -4822,7 +4822,10 @@
         "app/data-settings/RetentionSettingsView.swift",
         "app/data-settings/RetentionSettingsText.swift",
         "ios/Tests/DataSettings/",
-        "ios/Tests/SourceDetail/ (refresh test only)"
+        "ios/Tests/SourceDetail/ (refresh test only)",
+        "ios/AppAssembly/UITestFixtures/ (amendment 1)",
+        "ios/UITests/Accessibility/ (amendment 1)",
+        "ios/scripts/accessibility-groups.txt (amendment 1)"
       ],
       "intent": "Offer one explicit action on the retention screen that re-transcribes the kept recordings of notes transcribed before F69, with a plain account of what it does and does not touch.",
       "acceptance": [
@@ -5000,6 +5003,27 @@
         ".github/workflows/ios.yml",
         "ios/scripts/check_project_config.py",
         "AGENTS.md"
+      ]
+    },
+    {
+      "key": "F74",
+      "parent": null,
+      "title": "Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails",
+      "file_scope": [
+        "ios/Tests/Support/CoreLeakBaseline.swift",
+        "ios/Tests/Support/ (new test file)",
+        "ios/scripts/check_test_leak_baseline.py and its tests"
+      ],
+      "intent": "Stop real-root unit tests failing on a result buffer that is briefly in flight when the leak counts are read, without letting a real leak pass.",
+      "acceptance": [
+        "See the F74 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/Support/CoreLeakBaseline.swift",
+        "ios/OhAndCoreBridge/CoreHandle.swift",
+        "ios/scripts/check_test_leak_baseline.py"
       ]
     }
   ],
@@ -5887,7 +5911,8 @@
     "CI07": [],
     "CI08": [
       "CI07"
-    ]
+    ],
+    "F74": []
   },
   "retained_dependency_overrides": {
     "V06": [
