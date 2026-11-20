@@ -83,3 +83,18 @@ Artifacts uploaded in `ios-evidence`: `capture-smoke.log`, `capture-uitests.log`
 - Keep the intent in a `Shared/` directory that is a member of both the app and the control extension (checked by `ios/scripts/check_project_config.py`). It must be an `OpenIntent`, not `openAppWhenRun`.
 - Mint the capture ID at the handoff and commit only that ID. Committing on every foreground entry forces the app to guess which foreground entry a later `perform()` belongs to.
 - Pass protected-data state in from the app; `UIApplication` is unavailable to the extension target that also compiles the shared sources.
+
+## Handoff test flake diagnosis (F73)
+
+`CaptureProbeHandoffUITests.testEachShortcutHandoffRendersOneNewEntryAndPlainLaunchesRenderNone` failed in four hosted attempts (run 44587576418 attempts 1 and 2, run 44645076106 attempts 4 and 6). The logs of all four were read; the exported diagnostics (`ios-evidence-failure`, kept one day) had expired, so what was on screen is known only from the test log's step trace, not from screenshots.
+
+| Attempt | Last phase that passed | Where it failed | What the trace shows |
+| --- | --- | --- | --- |
+| 44587576418 / 1 | `url-cold` | `app.terminate()` before `url-cold-after-restart` | `Failed to terminate ...` after about 65 s; no URL had been opened for that phase. |
+| 44587576418 / 2 | `url-warm` | `sendAppToBackground()` after `url-warm` | One Home press; the app was still `runningForeground` after 15 s. |
+| 44645076106 / 4 | `url-warm` | `sendAppToBackground()` after `url-warm` | Same as attempt 2. |
+| 44645076106 / 6 | `url-cold` | wait for foreground after opening the URL for `url-cold-after-restart` | The preceding terminate took 13 s; "Open" was polled for 5 s and not found; the app did not reach the foreground within 20 s. |
+
+The filed candidate (an "Open" prompt appearing after the 5 s wait and never accepted) is consistent with attempt 6 only; it cannot be confirmed because the screenshot and SpringBoard hierarchy were gone, and it does not explain attempts 1, 2 and 4, which never reach the URL open. The common factor is a lifecycle action taken once, with no condition-driven retry, on a loaded runner (slow terminate, a Home press that did not register, a prompt that is late).
+
+The fix: `sendAppToBackground()` presses Home again (up to four times, six seconds each) until the app has left the foreground; `openShortcutURL(phase:)` polls for the "Open" prompt and taps it whenever it shows, until the app is in the foreground (45 s), without opening the URL a second time. A failure to reach the foreground now names the foreground application's bundle identifier, whether the "Open" prompt is showing and each candidate's state, and attaches a screenshot of the screen (`testTheNotInForegroundDiagnosisNamesWhatIsInFrontAndAttachesAScreenshot` exercises the diagnosis and attachment). A `Failed to terminate` raised inside `XCUIApplication.terminate()` (attempt 1) is recorded by XCTest itself and cannot be caught by the test; if it recurs it is a runner fault to diagnose from the next failure's evidence.
