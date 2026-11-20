@@ -5301,3 +5301,31 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 942. No dependencies. A run then has six macOS jobs against the plan's five concurrent; one queues briefly.
+
+### F73
+
+**Capture probe handoff test: a shortcut handoff after a restart reaches the foreground or says why not**
+
+Filed 2026-11-20. `CaptureProbeHandoffUITests.testEachShortcutHandoffRendersOneNewEntryAndPlainLaunchesRenderNone` (`ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift`) failed the `simulator` job's "CaptureProbe handoff UI test and ingress smoke test" step in four hosted attempts on two unrelated pull requests in two days: run 44587576418 attempts 1 and 2 (F72's branch) and run 44645076106 attempts 4 and 6 (F71b's branch). Neither branch touches `ios/CaptureProbe/`. The attempt 6 message is `XCTAssertTrue failed - app not foreground: url-cold-after-restart should render a new entry` (line 69); the messages of the other three attempts were not read when this was filed and the task reads them first. It is a failed assertion, so CI05 rightly does not retry it.
+
+Not diagnosed. One candidate, from the code only: `openShortcutURL()` waits 5 s for SpringBoard's "Open" prompt and carries on if it has not appeared, and the next wait gives the app 20 s to reach the foreground. A prompt that appears after 5 s on a slow runner is never accepted, and the app never comes forward. The task confirms or rejects this from evidence before changing anything.
+
+Scope:
+1. Diagnose from hosted evidence: the failed attempts' exported diagnostics (`ios-evidence-failure`, kept one day; if expired, reproduce by rerunning the step) and their logs. State what was on screen when the wait expired (the prompt, SpringBoard, the app still launching, or the probe in the background), for each failed attempt that can still be read.
+2. Fix the cause in the test, or in the probe if the probe is at fault. The handoff must be driven to a known state (prompt accepted or known absent, app in the foreground) by waiting on the condition, not by a fixed sleep and not by only lengthening a timeout.
+3. When the app is not in the foreground at the end of the wait, the failure message names what is in front (the foreground application's bundle identifier and whether the "Open" prompt is showing) and attaches a screenshot, so the next failure diagnoses itself.
+
+Owned paths: `ios/CaptureProbe/UITests/`, `ios/CaptureProbe/` (only if the probe is at fault, stated in the PR), `ios/scripts/smoke-capture-simulator.sh` (only for evidence it prints), `docs/validation/` (a short note of the diagnosis).
+
+Not owned: `ios/scripts/classify_simulator_fault.py` and `retry-simulator-step.sh` (the closed signature list is not widened for this), `.github/workflows/ios.yml`.
+
+Acceptance:
+1. The PR states the diagnosis with the evidence it rests on, per failed attempt read, and says plainly if the candidate above was wrong.
+2. No assertion is removed or weakened: every phase still asserts the foreground, the rendered entry, the saved status and the distinct capture ID, and `smoke-capture-simulator.sh` still checks the persisted files against every `CAPTURE-PHASE` line.
+3. The not-in-foreground failure message and screenshot of scope item 3 exist, shown by a test or by a deliberately failed local run described in the PR.
+4. Exact-head macOS CI evidence, and the `simulator` job of that same head passes this step in three consecutive attempts (the first run and two reruns of the job, all linked). A failure in any of them is investigated, not rerun past.
+5. The Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run with its two reruns.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940.

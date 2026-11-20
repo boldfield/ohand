@@ -4934,6 +4934,28 @@
         "ios/scripts/accessibility-simulator.sh",
         "ios/UITests/Accessibility/AccessibilityAuditUITests.swift"
       ]
+    },
+    {
+      "key": "F73",
+      "parent": null,
+      "title": "Capture probe handoff test: a shortcut handoff after a restart reaches the foreground or says why not",
+      "file_scope": [
+        "ios/CaptureProbe/UITests/",
+        "ios/CaptureProbe/ (only if the probe is at fault)",
+        "ios/scripts/smoke-capture-simulator.sh (evidence output only)",
+        "docs/validation/"
+      ],
+      "intent": "Diagnose and fix the hosted flake in CaptureProbeHandoffUITests where the app is not in the foreground after a shortcut handoff, and make the failure name what is in front.",
+      "acceptance": [
+        "See the F73 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift",
+        "ios/scripts/smoke-capture-simulator.sh",
+        ".github/workflows/ios.yml"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5815,7 +5837,8 @@
       "CI04"
     ],
     "F72": [],
-    "CI06": []
+    "CI06": [],
+    "F73": []
   },
   "retained_dependency_overrides": {
     "V06": [
