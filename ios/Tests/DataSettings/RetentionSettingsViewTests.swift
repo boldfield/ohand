@@ -90,6 +90,34 @@ final class RetentionSettingsViewTests: XCTestCase {
         XCTAssertTrue(stored.isEmpty, "nothing stored is shown: \(stored)", file: file, line: line)
     }
 
+    func testTheRedoSectionShowsItsWordsAndButtonThenProgressWithoutTheButton() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(
+            RetranscriptionStatus(redoableCount: 2, recordingGoneCount: 1, moreCandidates: false, inFlightCount: 0))
+        controls.redoableResult = .success(["item-a", "item-b"])
+        controls.retranscribeResult = .success(RetranscriptionReceipt(queued: 2, deferred: 0, skipped: [:]))
+        await withScreen(controls) { model in
+            XCTAssertEqual(text(RetentionSettingsView.redoIdentifier), RetentionSettingsText.redoCount(2))
+            assertTappable(RetentionSettingsView.redoButtonIdentifier)
+            XCTAssertNil(rendered[RetentionSettingsView.redoProgressIdentifier])
+
+            controls.redoStatus = .success(
+                RetranscriptionStatus(redoableCount: 0, recordingGoneCount: 1, moreCandidates: false, inFlightCount: 2))
+            await model.retranscribeAll()
+            await settle()
+
+            XCTAssertEqual(text(RetentionSettingsView.redoProgressIdentifier), RetentionSettingsText.redoRemaining(2))
+            XCTAssertNil(rendered[RetentionSettingsView.redoButtonIdentifier])
+        }
+    }
+
+    func testTheRedoSectionIsNotShownWithoutCandidates() async {
+        await withScreen(FakeRetentionControls(status: Self.status())) { _ in
+            XCTAssertNil(rendered[RetentionSettingsView.redoIdentifier])
+            XCTAssertNil(rendered[RetentionSettingsView.redoButtonIdentifier])
+        }
+    }
+
     func testTheDefaultPolicySoleSourceRuleAndTheCoresChoicesAreShown() async {
         await withScreen(FakeRetentionControls(status: Self.status())) { _ in
             XCTAssertEqual(text(RetentionSettingsView.policyIdentifier), "7 days (default)")

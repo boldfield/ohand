@@ -89,10 +89,11 @@ final class SourceDetailModelTests: XCTestCase {
     private func detail(
         text: String? = "the corrected words", basis: CoreRetrievalTextBasis = .corrected,
         original: String? = "the original words", corrected: String? = "the corrected words",
-        audioReference: String? = nil, transcript: CoreItemDetailTranscript? = nil, lifecycle: String = "active"
+        audioReference: String? = nil, transcript: CoreItemDetailTranscript? = nil, lifecycle: String = "active",
+        revision: Int = 2
     ) -> CoreItemDetail {
         CoreItemDetail(
-            itemID: Self.itemID, captureID: "capture-1", revision: 2, itemType: "task", scope: "personal",
+            itemID: Self.itemID, captureID: "capture-1", revision: revision, itemType: "task", scope: "personal",
             sessionTopic: "kitchen", lifecycleState: lifecycle, capturedAt: "2026-10-01T09:30:00Z", text: text,
             textBasis: basis, originalText: original, correctedText: corrected, audioReference: audioReference,
             transcript: transcript,
@@ -150,6 +151,34 @@ final class SourceDetailModelTests: XCTestCase {
         XCTAssertEqual(section.kind, .transcript)
         XCTAssertEqual(section.text, "machine words")
         XCTAssertEqual(section.provenance, "Transcribed on this device by on-device, language en, confidence 80%")
+    }
+
+    func testATranscriptReplacedWhileTheScreenIsOpenShowsTheNewTextOnTheNextRead() async throws {
+        func transcript(_ text: String, attachedRevision: Int) -> CoreItemDetailTranscript {
+            CoreItemDetailTranscript(
+                transcriptRecordID: "t1", sourceJobID: "j1", text: text, recognizer: "on-device",
+                detectedLanguage: "en", confidence: 0.8, transcribedAt: "2026-10-01T09:31:00Z",
+                attachedRevision: attachedRevision, audioSHA256: String(repeating: "a", count: 64))
+        }
+        let reader = FakeDetailReader(.success(detail(
+            text: "the end of the note", basis: .transcribed, original: nil, corrected: nil,
+            audioReference: "audio:1", transcript: transcript("the end of the note", attachedRevision: 1))))
+        let model = make(reader)
+        await model.load()
+        XCTAssertEqual(model.content?.currentText, "the end of the note")
+
+        // A replacement settles in the core: the item's revision advances and its transcript is the longer one.
+        reader.result = .success(detail(
+            text: "the start of the note and then the end of the note", basis: .transcribed, original: nil,
+            corrected: nil, audioReference: "audio:1",
+            transcript: transcript("the start of the note and then the end of the note", attachedRevision: 3),
+            revision: 3))
+        await model.load()
+
+        XCTAssertEqual(model.content?.currentText, "the start of the note and then the end of the note")
+        XCTAssertEqual(
+            model.content?.sections.map(\.text), ["the start of the note and then the end of the note"])
+        XCTAssertNil(model.failure)
     }
 
     func testAnAudioCaptureWithNoTranscriptYetShowsNoInventedText() async throws {

@@ -10,6 +10,9 @@ protocol RetentionControlling: AnyObject {
     func setPeriod(seconds: Int64) async throws -> RetentionPolicySetting
     func retryTranscription(itemID: String) async throws -> String
     func deleteAudio(itemID: String) async throws -> AudioDeletionReceipt
+    func retranscriptionStatus() async throws -> RetranscriptionStatus
+    func redoableItemIDs() async throws -> [String]
+    func retranscribe(itemIDs: [String]) async throws -> RetranscriptionReceipt
 }
 
 extension RetentionControlService: RetentionControlling {}
@@ -59,6 +62,10 @@ final class RetentionSettingsModel: ObservableObject {
     @Published private(set) var status: RetentionStatus?
     @Published private(set) var periodState: RetentionActionState?
     @Published private(set) var actions: [String: RetentionActionState] = [:]
+    /// What can be turned into text again; nil until a read has answered.
+    @Published private(set) var retranscription: RetranscriptionStatus?
+    /// What the last press of the "turn into text again" button reported; a failure leaves the button usable.
+    @Published private(set) var retranscriptionState: RetentionActionState?
 
     /// The period the user is choosing, in whole days. Applied by `applyPeriod()`.
     @Published var chosenDays: Int = RetentionSettingsModel.defaultDays
@@ -92,6 +99,19 @@ final class RetentionSettingsModel: ObservableObject {
 
     var isApplyingPeriod: Bool { periodState == .working }
 
+    /// The replacement section shows only while something can be redone or is being redone.
+    var showsRetranscription: Bool {
+        guard let retranscription else { return false }
+        return retranscription.redoableCount > 0 || retranscription.inFlightCount > 0
+    }
+
+    /// While replacements are queued or running the section shows the count remaining and no button.
+    var canStartRetranscription: Bool {
+        guard let retranscription else { return false }
+        return retranscription.inFlightCount == 0 && retranscription.redoableCount > 0
+            && retranscriptionState != .working
+    }
+
     /// Reads the policy, pressure and unresolved recordings again.
     func refresh() async {
         guard readScope() == .authenticated else {
@@ -104,9 +124,11 @@ final class RetentionSettingsModel: ObservableObject {
         if isFirstLoad { phase = .loading }
         do {
             let fresh = try await controls.status()
+            let redo = try await controls.retranscriptionStatus()
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
             status = fresh
+            retranscription = redo
             let storedDays = max(Self.minimumDays, min(Self.maximumDays, Int(fresh.policy.periodSeconds / 86_400)))
             // An unsaved stepper value survives a refresh; only an untouched one follows the stored period.
             if isFirstLoad || chosenDays == lastStoredDays { chosenDays = storedDays }
@@ -157,6 +179,27 @@ final class RetentionSettingsModel: ObservableObject {
         }
     }
 
+    /// Asks for every recording that is still on the phone to be turned into text again. Runs only when the button is
+    /// pressed; nothing calls it at launch or upgrade.
+    func retranscribeAll() async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard canStartRetranscription else { return }
+        let thisSession = session
+        retranscriptionState = .working
+        do {
+            let itemIDs = try await controls.redoableItemIDs()
+            if !itemIDs.isEmpty { _ = try await controls.retranscribe(itemIDs: itemIDs) }
+            guard thisSession == session else { return }
+            guard readScope() == .authenticated else { lock(); return }
+            retranscriptionState = nil
+        } catch {
+            guard thisSession == session else { return }
+            if case RetentionControlError.notAuthenticated = error { lock(); return }
+            retranscriptionState = .failed(RetentionSettingsText.failure(error))
+        }
+        await refresh()
+    }
+
     func deleteAudio(itemID: String) async {
         await act(itemID: itemID, success: .removed) { [controls] in
             _ = try await controls.deleteAudio(itemID: itemID)
@@ -168,6 +211,8 @@ final class RetentionSettingsModel: ObservableObject {
         generation += 1
         session += 1
         status = nil
+        retranscription = nil
+        retranscriptionState = nil
         actions = [:]
         periodState = nil
         phase = .idle
