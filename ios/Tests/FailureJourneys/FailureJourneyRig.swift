@@ -435,6 +435,7 @@ class FailureJourneyTestCase: XCTestCase {
 /// when the job runner cancels the work, as the speech framework's task does.
 final class FailureJourneyRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     let recognizerName = "failure-journey-recognizer/1.0"
+    let transcriptGeneration = 2
     private let lock = NSLock()
     private var scripted: OnDeviceRecognitionOutcome?
     private var calls = 0

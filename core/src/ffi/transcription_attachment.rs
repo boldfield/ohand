@@ -187,6 +187,8 @@ struct TranscriptWire {
     detected_language: Option<String>,
     recognizer: String,
     audio_sha256: String,
+    /// Required: an outcome that does not say which recognizer generation produced it is refused.
+    transcript_generation: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +228,7 @@ impl ApplyRequest {
                     detected_language: transcript.detected_language,
                     recognizer: transcript.recognizer,
                     audio_sha256: transcript.audio_sha256,
+                    transcript_generation: transcript.transcript_generation,
                 })
             }
             (ResultKind::Unsupported, None) => RecognizerResult::Unsupported,
@@ -445,7 +448,8 @@ pub unsafe extern "C" fn ohand_core_start_read_transcription_job(
 /// Queues the guarded attachment of the recognizer outcome described by the `request_len` JSON
 /// bytes at `request`: `{"job_id","lease_attempt","audio_reference","result","transcript",
 /// "interpretation"}` where `result` is `transcript`, `unsupported` or `failed`, `transcript`
-/// (`text`, `confidence`, `detected_language`, `recognizer`, `audio_sha256`) is present exactly
+/// (`text`, `confidence`, `detected_language`, `recognizer`, `audio_sha256`,
+/// `transcript_generation`, which is required and never defaulted) is present exactly
 /// for `transcript`, and `interpretation` (`job_id`, `profile_version`, `request_version`) is
 /// optional: when omitted the core queues the interpretation job itself with the profile pin it
 /// chooses, and a request whose `profile_version` is not that pin is refused. Unknown fields are rejected. The outcome event for `operation_id` is success only
