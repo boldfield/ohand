@@ -33,7 +33,7 @@ Per-test durations of that run (default size plus largest size, seconds): `testS
 `testStatusWithReminderNeedingATime` 80.8, `testSettingsPermissionsOnFirstRun` 74.5, `testHomeFramesMatchWhatIsDrawn` 72.2,
 `testCaptureVoiceRecording` 67.1, `testLockedScreen` 64.7, `testSavingACaptureShowsTheOutcomeLine` 63.5, `testHomeEmpty` 50.6,
 `testCaptureVoiceIdle` 46.8, `testReminderNeedingACorrectionIsAnnounced` 33.4, the eight `FixtureLaunchUITests` 260 in all, and
-the seventeen `GlassContrastLedgerTests` about 5. Group a (the first four, `testSearchWithNoResults`, `testHomeEmpty` and
+the nineteen `GlassContrastLedgerTests` about 5. Group a (the first four, `testSearchWithNoResults`, `testHomeEmpty` and
 `testCaptureVoiceIdle`) is 969 s of audits; group b (everything else, with the fixture and ledger tests) is about 982 s. When
 tests change, rebalance from a new run's durations, keeping each test's closure as above.
 

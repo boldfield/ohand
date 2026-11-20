@@ -242,6 +242,20 @@ impl Session {
         )
     }
 
+    fn retranscription_status(&mut self, scopes: &[&str]) -> Value {
+        self.body(
+            Export::Read,
+            &json!({"command": "retranscription_status", "read_scopes": scopes}),
+        )
+    }
+
+    fn retranscribe(&mut self, item_ids: &[&str]) -> Value {
+        self.body(
+            Export::Control,
+            &json!({"command": "retranscribe", "item_ids": item_ids}),
+        )
+    }
+
     fn sweep(&mut self) -> Value {
         self.body(
             Export::AudioRetention,
@@ -314,6 +328,111 @@ fn status_reports_the_default_policy_and_the_unresolved_sole_audio() {
     assert_eq!(
         unresolved[0]["options"],
         json!(["retry_transcription", "delete_audio"])
+    );
+}
+
+#[test]
+fn retranscription_status_lists_candidates_in_the_read_scopes_only() {
+    let _guard = serial();
+    let store = store("retranscription-status", "personal");
+    let mut session = Session::over(&store.path);
+
+    let status = session.retranscription_status(&["personal"]);
+    assert_eq!(
+        status["candidates"],
+        json!([{"item_id": store.transcribed, "audio_reference": TRANSCRIBED_AUDIO}])
+    );
+    assert_eq!(status["more_candidates"], false);
+    assert_eq!(status["replacements_in_flight"], 0);
+
+    let outside = session.retranscription_status(&["work"]);
+    assert_eq!(outside["candidates"], json!([]));
+
+    session.retranscribe(&[&store.transcribed]);
+    let queued = session.retranscription_status(&["personal"]);
+    assert_eq!(
+        queued["candidates"],
+        json!([]),
+        "a job in flight is not a candidate"
+    );
+    assert_eq!(queued["replacements_in_flight"], 1);
+    assert_eq!(
+        session.retranscription_status(&["work"])["replacements_in_flight"],
+        0
+    );
+}
+
+#[test]
+fn retranscription_status_without_a_read_scope_is_refused() {
+    let _guard = serial();
+    let store = store("retranscription-unscoped", "personal");
+    let mut session = Session::over(&store.path);
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": []}),
+    );
+    session.refuse(Export::Read, &json!({"command": "retranscription_status"}));
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"], "extra": 1}),
+    );
+}
+
+#[test]
+fn retranscribe_queues_candidates_and_reports_skips_by_reason() {
+    let _guard = serial();
+    let store = store("retranscribe", "personal");
+    let mut session = Session::over(&store.path);
+
+    let outcome = session.retranscribe(&[&store.transcribed, &store.sole_source, "missing-item"]);
+    assert_eq!(outcome["outcome"], "queued");
+    assert_eq!(outcome["queued"], 1);
+    assert_eq!(outcome["deferred"], 0);
+    assert_eq!(
+        outcome["skipped"],
+        json!({"not_transcribed": 1, "item_not_found": 1})
+    );
+    let text = outcome.to_string();
+    assert!(!text.contains(&store.transcribed) && !text.contains("missing-item"));
+
+    let repeated = session.retranscribe(&[&store.transcribed]);
+    assert_eq!(repeated["queued"], 0);
+    assert_eq!(repeated["skipped"], json!({"job_in_flight": 1}));
+}
+
+#[test]
+fn retranscribe_is_bounded_and_malformed_requests_queue_nothing() {
+    let _guard = serial();
+    let store = store("retranscribe-bound", "personal");
+    let mut session = Session::over(&store.path);
+
+    let many: Vec<String> = (0..MAX_RETRANSCRIPTION_BATCH + 5)
+        .map(|index| format!("missing-{index}"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let outcome = session.retranscribe(&many);
+    assert_eq!(outcome["deferred"], 5);
+    assert_eq!(
+        outcome["skipped"]["item_not_found"],
+        MAX_RETRANSCRIPTION_BATCH
+    );
+
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": []}),
+    );
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": [""]}),
+    );
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": ["x".repeat(513)]}),
+    );
+    session.refuse(Export::Control, &json!({"command": "retranscribe"}));
+    session.refuse(
+        Export::Control,
+        &json!({"command": "retranscribe", "item_ids": ["a"], "all": true}),
     );
 }
 
@@ -527,5 +646,75 @@ fn retry_transcription_requeues_through_the_core_and_reports_refusals() {
     session.refuse(
         Export::Control,
         &json!({"command": "retry_transcription", "item_id": ""}),
+    );
+}
+
+#[test]
+fn retranscription_status_pages_past_a_window_of_candidates_with_a_cursor() {
+    let _guard = serial();
+    let store = store("retranscription-paging", "personal");
+    let mut database = Database::open(&store.path, Arc::new(SystemClock)).unwrap();
+    let total_extra = MAX_RETRANSCRIPTION_BATCH + 5;
+    for index in 0..total_extra {
+        let audio = format!("FinalizedAudio/extra-{index}.m4a");
+        let item_id = import_voice(
+            &mut database,
+            &format!("capture-extra-{index}"),
+            &audio,
+            "personal",
+            "2026-10-01T08:00:00Z",
+        );
+        transcribe(
+            &database,
+            &item_id,
+            &audio,
+            Utc::now() - chrono::Duration::days(10),
+        );
+    }
+    drop(database);
+    let mut session = Session::over(&store.path);
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut request = json!({"command": "retranscription_status", "read_scopes": ["personal"]});
+        if let Some(cursor) = &after {
+            request["after_item_id"] = json!(cursor);
+        }
+        let status = session.body(Export::Read, &request);
+        let page = status["candidates"].as_array().unwrap();
+        assert!(page.len() <= MAX_RETRANSCRIPTION_BATCH);
+        seen.extend(
+            page.iter()
+                .map(|c| c["item_id"].as_str().unwrap().to_string()),
+        );
+        pages += 1;
+        if status["more_candidates"] != true {
+            break;
+        }
+        after = seen.last().cloned();
+    }
+    assert_eq!(pages, 2, "a bounded page, then the rest after the cursor");
+    assert_eq!(seen.len(), total_extra + 1);
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, seen, "pages are in item id order without repeats");
+}
+
+#[test]
+fn retranscription_status_refuses_an_empty_or_oversized_cursor() {
+    let _guard = serial();
+    let store = store("retranscription-cursor", "personal");
+    let mut session = Session::over(&store.path);
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"], "after_item_id": ""}),
+    );
+    session.refuse(
+        Export::Read,
+        &json!({"command": "retranscription_status", "read_scopes": ["personal"],
+                "after_item_id": "x".repeat(MAX_IDENTIFIER_BYTES + 1)}),
     );
 }

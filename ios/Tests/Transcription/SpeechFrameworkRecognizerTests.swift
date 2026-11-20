@@ -22,6 +22,10 @@ private final class FakeRecognitionTask: RecognitionCancelling, @unchecked Senda
 /// The recognizer's pure decisions, and the session that resumes a recognition exactly once. The speech framework
 /// itself cannot be made to produce speech in a simulator test; whether it recognizes offline is device evidence.
 final class SpeechFrameworkRecognizerTests: XCTestCase {
+    func testTheSpeechFrameworkRecognizerIsGenerationTwoBecauseItKeepsEverySegment() {
+        XCTAssertEqual(SpeechFrameworkRecognizer().transcriptGeneration, 2)
+    }
+
     // MARK: error mapping
 
     func testNoSpeechDetectedIsAnEmptyTranscript() {

@@ -53,6 +53,107 @@ public struct RetentionStatus: Equatable, Sendable {
     }
 }
 
+/// What the retention settings can offer to redo: the notes whose transcript an earlier recognizer made and whose
+/// recording is still on the phone, and those whose recording is already gone. Content-free counts only.
+public struct RetranscriptionStatus: Equatable, Sendable {
+    /// The notes that can be transcribed again now.
+    public let redoableCount: Int
+    /// The notes that cannot, because their recording was already removed or is not there.
+    public let recordingGoneCount: Int
+    /// True when the core knows of more candidates than one status lists; a count is then a lower bound.
+    public let moreCandidates: Bool
+    /// Replacement transcriptions queued or running.
+    public let inFlightCount: Int
+
+    public init(redoableCount: Int, recordingGoneCount: Int, moreCandidates: Bool, inFlightCount: Int) {
+        self.redoableCount = redoableCount
+        self.recordingGoneCount = recordingGoneCount
+        self.moreCandidates = moreCandidates
+        self.inFlightCount = inFlightCount
+    }
+}
+
+/// What a `retranscribe` request did: how many replacement jobs were queued and how many named items were left out,
+/// by the core's content-free reason.
+public struct RetranscriptionReceipt: Equatable, Sendable {
+    public let queued: Int
+    /// Items beyond the core's batch bound that were not looked at; ask again for them.
+    public let deferred: Int
+    public let skipped: [String: Int]
+
+    public init(queued: Int, deferred: Int, skipped: [String: Int]) {
+        self.queued = queued
+        self.deferred = deferred
+        self.skipped = skipped
+    }
+}
+
+/// Which candidates' recordings are still on the phone. Decided natively, with the file-system seam and the retention
+/// ledger `AudioRetentionService` uses, because the core never opens an audio file.
+protocol RecordingPresenceChecking: Sendable {
+    /// The candidates whose file exists at the layout's path for their reference and that the ledger does not record
+    /// as removed, in order.
+    func presentRecordings(among candidates: [RetranscriptionCandidateAnswer]) -> [RetranscriptionCandidateAnswer]
+}
+
+/// Presence from the finalized audio store and the retention ledger.
+struct StoredRecordingPresence: RecordingPresenceChecking, @unchecked Sendable {
+    private let layout: ProtectedStorageLayout
+    private let fileSystem: AudioRetentionFileSystem
+
+    init(
+        layout: ProtectedStorageLayout,
+        fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem()
+    ) {
+        self.layout = layout
+        self.fileSystem = fileSystem
+    }
+
+    func presentRecordings(among candidates: [RetranscriptionCandidateAnswer]) -> [RetranscriptionCandidateAnswer] {
+        let staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
+        let ledger = AudioRetentionLedger(layout: layout, fileSystem: fileSystem)
+        // A ledger that cannot be read decides nothing: the file itself is still checked.
+        let ledgerIsReadable = (try? ledger.refresh()) != nil
+        return candidates.filter { candidate in
+            guard let reference = candidate.audioReference, let url = staging.finalizedAudioURL(forReference: reference)
+            else { return false }
+            if ledgerIsReadable,
+                let entry = try? ledger.entry(itemID: candidate.itemID, audioReference: reference),
+                entry.state == .removed
+            {
+                return false
+            }
+            return (try? fileSystem.isPresent(at: url)) ?? false
+        }
+    }
+}
+
+/// Asks the job runner to drain, once it exists. The service is built before the runner, so the root binds this after
+/// attaching the runner; until then a request does nothing (the jobs wait for the next drain).
+final class LateBoundDrainRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: (@Sendable () -> Void)?
+
+    func bind(_ request: @escaping @Sendable () -> Void) {
+        lock.lock()
+        self.request = request
+        lock.unlock()
+    }
+
+    func unbind() {
+        lock.lock()
+        request = nil
+        lock.unlock()
+    }
+
+    func callAsFunction() {
+        lock.lock()
+        let current = request
+        lock.unlock()
+        current?()
+    }
+}
+
 /// How an explicit audio deletion ended: the file is verified absent and the completion is recorded.
 public enum AudioDeletionReceipt: Equatable, Sendable {
     case removed
@@ -121,17 +222,25 @@ public final class RetentionControlService: @unchecked Sendable {
     private let session: ReadAuthenticationSession
     private let pressureProbe: AudioStoragePressureProbing
     private let removerProvider: () -> UserAudioRemoving?
+    private let recordings: RecordingPresenceChecking
+    private let requestDrain: @Sendable () -> Void
 
+    /// `recordings` decides which transcript-replacement candidates still have their recording; `requestDrain` starts
+    /// the job runner after replacements are queued, so they run without waiting for the next capture.
     init(
         core: RetentionControlCore,
         session: ReadAuthenticationSession,
         pressureProbe: AudioStoragePressureProbing,
-        removerProvider: @escaping () -> UserAudioRemoving?
+        removerProvider: @escaping () -> UserAudioRemoving?,
+        recordings: RecordingPresenceChecking,
+        requestDrain: @escaping @Sendable () -> Void
     ) {
         self.core = core
         self.session = session
         self.pressureProbe = pressureProbe
         self.removerProvider = removerProvider
+        self.recordings = recordings
+        self.requestDrain = requestDrain
     }
 
     /// The stored policy, the storage pressure and the unresolved sole-audio cases.
@@ -193,6 +302,69 @@ public final class RetentionControlService: @unchecked Sendable {
         }
     }
 
+    /// How many notes can be transcribed again now (their transcript came from an earlier recognizer and their recording
+    /// is on the phone) and how many cannot because the recording is gone. Read through the private read gate, one
+    /// bounded page after another; past `maximumRetranscriptionPages` pages the counts are a lower bound and
+    /// `moreCandidates` is true.
+    public func retranscriptionStatus() async throws -> RetranscriptionStatus {
+        let scan = try await scanRetranscriptionCandidates(stopAfterPresent: nil)
+        return RetranscriptionStatus(
+            redoableCount: scan.present.count, recordingGoneCount: scan.goneCount, moreCandidates: scan.hasMore,
+            inFlightCount: scan.inFlightCount)
+    }
+
+    /// The items whose recording is on the phone, for `retranscribe`: the same decision `retranscriptionStatus` counts,
+    /// at most `RetranscriptionAnswer.maximumBatch` of them. Pages past candidates whose recording is gone, so a long
+    /// history of removed recordings never hides a present one.
+    public func redoableItemIDs() async throws -> [String] {
+        let scan = try await scanRetranscriptionCandidates(stopAfterPresent: RetranscriptionAnswer.maximumBatch)
+        return Array(scan.present.prefix(RetranscriptionAnswer.maximumBatch)).map(\.itemID)
+    }
+
+    /// The most pages one status or redo scan reads: each page is at most `RetranscriptionAnswer.maximumBatch`
+    /// candidates, so a scan is bounded however long the history is.
+    static let maximumRetranscriptionPages = 50
+
+    private func scanRetranscriptionCandidates(
+        stopAfterPresent limit: Int?
+    ) async throws -> (present: [RetranscriptionCandidateAnswer], goneCount: Int, inFlightCount: Int, hasMore: Bool) {
+        var present: [RetranscriptionCandidateAnswer] = []
+        var goneCount = 0
+        var inFlightCount = 0
+        var cursor: String?
+        for _ in 0..<Self.maximumRetranscriptionPages {
+            let answer = try await readRetranscriptionStatus(after: cursor)
+            inFlightCount = answer.replacementsInFlight
+            let found = recordings.presentRecordings(among: answer.candidates)
+            present.append(contentsOf: found)
+            goneCount += answer.candidates.count - found.count
+            guard answer.moreCandidates, let last = answer.candidates.last else {
+                return (present, goneCount, inFlightCount, false)
+            }
+            if let limit, present.count >= limit {
+                return (present, goneCount, inFlightCount, true)
+            }
+            cursor = last.itemID
+        }
+        return (present, goneCount, inFlightCount, true)
+    }
+
+    /// Asks the core to transcribe these notes again from their retained audio, and asks the job runner to drain so the
+    /// jobs run now. At most `RetranscriptionAnswer.maximumBatch` items go in one call; pass only items whose recording
+    /// is present (`redoableItemIDs()` decides that). The items stay readable and searchable while the jobs run.
+    @discardableResult
+    public func retranscribe(itemIDs: [String]) async throws -> RetranscriptionReceipt {
+        guard session.currentAuthorization() != nil else { throw RetentionControlError.notAuthenticated }
+        guard !itemIDs.isEmpty, !itemIDs.contains(where: \.isEmpty) else { throw RetentionControlError.invalidRequest }
+        let sent = Array(itemIDs.prefix(RetranscriptionAnswer.maximumBatch))
+        let answer = try await send(.retranscribe(itemIDs: sent))
+        guard answer.outcome == "queued", let queued = answer.queued else { throw RetentionControlError.unreadable }
+        if queued > 0 { requestDrain() }
+        return RetranscriptionReceipt(
+            queued: queued, deferred: (answer.deferred ?? 0) + (itemIDs.count - sent.count),
+            skipped: answer.skipped ?? [:])
+    }
+
     /// Removes the item's audio file, keeping the item and its text. Refused when the audio is the item's only source.
     public func deleteAudio(itemID: String) async throws -> AudioDeletionReceipt {
         guard session.currentAuthorization() != nil else { throw RetentionControlError.notAuthenticated }
@@ -226,6 +398,14 @@ public final class RetentionControlService: @unchecked Sendable {
         let result = await withCheckedContinuation {
             (continuation: CheckedContinuation<Result<RetentionStatusAnswer, CoreFailure>, Never>) in
             core.readStatus { continuation.resume(returning: $0) }
+        }
+        return try Self.value(of: result)
+    }
+
+    private func readRetranscriptionStatus(after cursor: String?) async throws -> RetranscriptionStatusAnswer {
+        let result = await withCheckedContinuation {
+            (continuation: CheckedContinuation<Result<RetranscriptionStatusAnswer, CoreFailure>, Never>) in
+            core.readRetranscriptionStatus(after: cursor) { continuation.resume(returning: $0) }
         }
         return try Self.value(of: result)
     }

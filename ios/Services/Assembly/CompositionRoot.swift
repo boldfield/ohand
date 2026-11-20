@@ -2143,12 +2143,17 @@ public final class ServiceCompositionRoot {
             let retentionControlClient = CoreRetentionControlClient(core: core, gate: readGate)
             router.register { retentionControlClient.handle($0) }
             undo.append { retentionControlClient.shutDown() }
+            let replacementDrain = LateBoundDrainRequest()
+            undo.append { replacementDrain.unbind() }
             let retentionControls = RetentionControlService(
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
-                removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+                removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first },
+                recordings: StoredRecordingPresence(layout: layout),
+                requestDrain: { replacementDrain() })
+            let playbackFence = PlaybackFence()
             let playback = PlaybackService(
-                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
+                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: playbackFence,
                 audioSession: adapters.playbackAudioSession, playerFactory: avPlaybackPlayerFactory)
             undo.append { playback.shutDown() }
             itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
@@ -2199,10 +2204,12 @@ public final class ServiceCompositionRoot {
             let foreground = ForegroundState()
             let transcription: TranscriptionCapability
             if let recognizer = adapters.recognizer {
-                transcription = TranscriptionCapability.make(core: core, layout: layout, recognizer: recognizer)
+                transcription = TranscriptionCapability.make(
+                    core: core, layout: layout, recognizer: recognizer, audioFence: playbackFence)
             } else {
                 transcription = TranscriptionCapability.make(
-                    core: core, layout: layout, mayPromptForPermission: { foreground.isActive })
+                    core: core, layout: layout, mayPromptForPermission: { foreground.isActive },
+                    audioFence: playbackFence)
             }
             undo.append { transcription.shutDown() }
             router.register { transcription.handle($0) }
@@ -2230,6 +2237,7 @@ public final class ServiceCompositionRoot {
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
                 retryDelay: configuration.jobRetryDelaySeconds, metrics: metrics)
             undo.append { jobRunner.shutDown() }
+            replacementDrain.bind { jobRunner.requestDrain() }
             // Each drain's end is checked as it happens, not only the last one of a re-run chain: a drain that
             // applied results and was followed at once by an empty or failed drain must still refresh the lists.
             router.register { event in

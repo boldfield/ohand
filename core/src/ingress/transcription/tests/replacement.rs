@@ -25,6 +25,19 @@ fn settle_time() -> DateTime<Utc> {
     later() + Duration::hours(2)
 }
 
+/// What the current recognizer produces: the generation a replacement carries.
+fn current_recognized(text: &str) -> RecognizerResult {
+    match recognized(text) {
+        RecognizerResult::Transcript(transcript) => {
+            RecognizerResult::Transcript(RecognizedTranscript {
+                transcript_generation: CURRENT_TRANSCRIPT_GENERATION,
+                ..transcript
+            })
+        }
+        other => other,
+    }
+}
+
 /// A store whose voice note was transcribed by a pre-F69 recognizer (generation 1).
 fn store_with_transcript() -> Store {
     let store = Store::with_voice_capture();
@@ -397,7 +410,7 @@ fn a_different_transcript_replaces_the_text_and_keeps_the_old_one_as_history() {
     let before = provenance(&store);
     let retention_before = retention(&store);
     let job = requested_and_claimed(&store);
-    let mut request = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let mut request = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     request.interpretation = Some(InterpretationRequest {
         job_id: "interpret-2".to_string(),
         profile_version: None,
@@ -484,7 +497,7 @@ fn an_identical_transcript_is_unchanged_and_writes_no_event_or_revision() {
     let before = provenance(&store);
     let interpretation_jobs = store.interpretation_jobs().len();
     let job = requested_and_claimed(&store);
-    let mut request = outcome(&job, recognized(&format!("  {TRANSCRIPT}\n")));
+    let mut request = outcome(&job, current_recognized(&format!("  {TRANSCRIPT}\n")));
     if let RecognizerResult::Transcript(transcript) = &mut request.result {
         transcript.recognizer = "on-device-recognizer/2".to_string();
     }
@@ -519,7 +532,7 @@ fn unsupported_failed_and_empty_outcomes_keep_the_transcript() {
     let cases = [
         (RecognizerResult::Unsupported, UNSUPPORTED_REASON),
         (RecognizerResult::Failed, FAILED_REASON),
-        (recognized("   "), NO_SPEECH_REASON),
+        (current_recognized("   "), NO_SPEECH_REASON),
     ];
     for (result, reason) in cases {
         let store = store_with_transcript();
@@ -564,7 +577,7 @@ fn unsupported_failed_and_empty_outcomes_keep_the_transcript() {
         assert_eq!(store.count("events"), 1);
 
         // A different outcome for the settled job is a conflict.
-        let conflicting = outcome(&job, recognized(LONG_TRANSCRIPT));
+        let conflicting = outcome(&job, current_recognized(LONG_TRANSCRIPT));
         let error = apply_transcription_outcome(&mut store.open(), &conflicting, settle_time())
             .unwrap_err();
         assert!(matches!(
@@ -583,7 +596,7 @@ fn a_user_correction_between_request_and_outcome_wins() {
 
         let acknowledgment = apply_transcription_outcome(
             &mut store.open(),
-            &outcome(&job, recognized(LONG_TRANSCRIPT)),
+            &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
             settle_time(),
         )
         .unwrap();
@@ -621,7 +634,7 @@ fn deletion_between_request_and_outcome_attaches_nothing_and_removes_the_rows() 
     // Deletion cancelled the job, so the late outcome finds no lease and changes nothing.
     let error = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap_err();
@@ -645,7 +658,7 @@ fn an_item_deleted_while_its_job_still_runs_discards_the_outcome() {
 
     let acknowledgment = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();
@@ -662,7 +675,7 @@ fn an_outcome_from_other_or_missing_audio_is_discarded() {
     // A digest that differs from the attachment's.
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    let mut mismatched = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let mut mismatched = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     if let RecognizerResult::Transcript(transcript) = &mut mismatched.result {
         transcript.audio_sha256 = "f".repeat(64);
     }
@@ -678,7 +691,7 @@ fn an_outcome_from_other_or_missing_audio_is_discarded() {
     // A different audio reference.
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    let mut other_file = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let mut other_file = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     other_file.audio_reference = "staging/other.m4a".to_string();
     let acknowledgment =
         apply_transcription_outcome(&mut store.open(), &other_file, settle_time()).unwrap();
@@ -697,7 +710,7 @@ fn an_outcome_from_other_or_missing_audio_is_discarded() {
         .unwrap();
     let acknowledgment = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();
@@ -727,7 +740,7 @@ fn a_replacement_made_stale_by_another_replacement_is_discarded() {
         .unwrap();
     let acknowledgment = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&first, recognized(LONG_TRANSCRIPT)),
+        &outcome(&first, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();
@@ -741,7 +754,7 @@ fn a_replacement_made_stale_by_another_replacement_is_discarded() {
 fn redelivery_of_a_replacement_returns_the_result_and_a_different_outcome_conflicts() {
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    let request = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let request = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     let first = apply_transcription_outcome(&mut store.open(), &request, settle_time()).unwrap();
     assert!(matches!(
         first.disposition,
@@ -757,7 +770,7 @@ fn redelivery_of_a_replacement_returns_the_result_and_a_different_outcome_confli
     assert_eq!(store.count("superseded_transcripts"), 1);
     assert_eq!(store.item_row().3, 2);
 
-    let different = outcome(&job, recognized("something else entirely"));
+    let different = outcome(&job, current_recognized("something else entirely"));
     let error =
         apply_transcription_outcome(&mut store.open(), &different, settle_time()).unwrap_err();
     assert!(matches!(
@@ -784,7 +797,7 @@ fn redelivery_of_a_replacement_returns_the_result_and_a_different_outcome_confli
 fn a_stale_lease_cannot_settle_a_replacement() {
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    let mut stale = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let mut stale = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     stale.lease_attempt = job.attempt_count + 1;
     let error = apply_transcription_outcome(&mut store.open(), &stale, settle_time()).unwrap_err();
     assert!(matches!(
@@ -806,8 +819,10 @@ fn a_failure_at_each_fault_point_rolls_back_and_the_retry_succeeds() {
         let before = provenance(&store);
         let interpretation_jobs = store.interpretation_jobs().len();
         let job = requested_and_claimed(&store);
-        let request =
-            with_interpretation(outcome(&job, recognized(LONG_TRANSCRIPT)), "interpret-2");
+        let request = with_interpretation(
+            outcome(&job, current_recognized(LONG_TRANSCRIPT)),
+            "interpret-2",
+        );
 
         let error =
             apply_with_fault_points(&mut store.open(), &request, settle_time(), &mut |stage| {
@@ -867,7 +882,7 @@ fn a_failure_at_each_fault_point_rolls_back_and_the_retry_succeeds() {
 fn a_lost_acknowledgment_reports_committed_and_the_retry_is_idempotent() {
     let store = store_with_transcript();
     let job = requested_and_claimed(&store);
-    let request = outcome(&job, recognized(LONG_TRANSCRIPT));
+    let request = outcome(&job, current_recognized(LONG_TRANSCRIPT));
     let error = apply_with_fault_points(&mut store.open(), &request, settle_time(), &mut |stage| {
         if stage == TranscriptionStage::Committed {
             Err(anyhow!("process interrupted after commit"))
@@ -897,7 +912,7 @@ fn the_first_job_redelivered_after_a_replacement_still_finds_its_own_result() {
     let job = requested_and_claimed(&store);
     apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();
@@ -916,7 +931,7 @@ fn a_second_replacement_keeps_both_earlier_transcripts_as_history() {
     let first = requested_and_claimed(&store);
     apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&first, recognized(LONG_TRANSCRIPT)),
+        &outcome(&first, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();
@@ -932,7 +947,10 @@ fn a_second_replacement_keeps_both_earlier_transcripts_as_history() {
     let second = requested_and_claimed(&store);
     apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&second, recognized("the whole recording, third reading")),
+        &outcome(
+            &second,
+            current_recognized("the whole recording, third reading"),
+        ),
         settle_time(),
     )
     .unwrap();
@@ -991,7 +1009,7 @@ fn a_replacement_leaves_the_scheduled_reminder_alone_and_queues_interpretation_a
     let job = requested_and_claimed(&store);
     let acknowledgment = apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(&replaced_text)),
+        &outcome(&job, current_recognized(&replaced_text)),
         settle_time(),
     )
     .unwrap();
@@ -1065,7 +1083,7 @@ fn deletion_leaves_no_superseded_transcript_and_no_request_for_the_item() {
     let job = requested_and_claimed(&store);
     apply_transcription_outcome(
         &mut store.open(),
-        &outcome(&job, recognized(LONG_TRANSCRIPT)),
+        &outcome(&job, current_recognized(LONG_TRANSCRIPT)),
         settle_time(),
     )
     .unwrap();

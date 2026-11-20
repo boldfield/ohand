@@ -157,14 +157,26 @@ pub fn retranscription_candidates(
     connection: &Connection,
     limit: usize,
 ) -> anyhow::Result<Vec<String>> {
+    retranscription_candidates_after(connection, None, limit)
+}
+
+/// The ids of up to `limit` candidates whose id sorts after `after_item_id` (all of them when it is `None`), in item
+/// id order. Paging with the last id of one page as the next `after_item_id` visits every candidate once.
+pub fn retranscription_candidates_after(
+    connection: &Connection,
+    after_item_id: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
     let mut statement = connection.prepare(&format!(
-        "SELECT i.item_id {CANDIDATE_FROM} WHERE {CANDIDATE_WHERE} ORDER BY i.item_id LIMIT ?3"
+        "SELECT i.item_id {CANDIDATE_FROM} WHERE {CANDIDATE_WHERE} AND i.item_id > ?3
+          ORDER BY i.item_id LIMIT ?4"
     ))?;
     let rows = statement
         .query_map(
             rusqlite::params![
                 CURRENT_TRANSCRIPT_GENERATION,
                 JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+                after_item_id.unwrap_or(""),
                 i64::try_from(limit)?
             ],
             |row| row.get::<_, String>(0),
@@ -537,7 +549,7 @@ pub(super) fn settle(
                 "UPDATE transcript_attachments SET transcript_generation = ?, recognizer = ?
                   WHERE item_id = ?",
                 rusqlite::params![
-                    CURRENT_TRANSCRIPT_GENERATION,
+                    transcript.transcript_generation,
                     transcript.recognizer,
                     job.item_id
                 ],
@@ -762,7 +774,7 @@ fn replace_transcript(
             transcript.recognizer,
             transcript.detected_language,
             transcript.confidence,
-            CURRENT_TRANSCRIPT_GENERATION,
+            transcript.transcript_generation,
             happened_at,
             job.item_id,
             current.record_id,

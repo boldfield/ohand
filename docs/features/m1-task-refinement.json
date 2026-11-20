@@ -4956,6 +4956,51 @@
         "ios/scripts/smoke-capture-simulator.sh",
         ".github/workflows/ios.yml"
       ]
+    },
+    {
+      "key": "CI07",
+      "parent": null,
+      "title": "Split the simulator job into three parallel jobs",
+      "file_scope": [
+        ".github/workflows/ios.yml (simulator job and two new jobs)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (macOS checks passage)",
+        "docs/features/ci-artifact-budget.md"
+      ],
+      "intent": "Run the simulator job's steps as three parallel jobs so the slowest job of a run drops from about 72 minutes to under 50 and a flaky failure reruns a third of the work.",
+      "acceptance": [
+        "See the CI07 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "key": "CI08",
+      "parent": null,
+      "title": "Do not start the macOS jobs for a pull request that changes only documents",
+      "file_scope": [
+        ".github/workflows/ios.yml (trigger)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (macOS checks passage)"
+      ],
+      "intent": "Skip ios.yml for pull requests whose every changed file is under docs/ or a root Markdown file.",
+      "acceptance": [
+        "See the CI08 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI07"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5838,7 +5883,11 @@
     ],
     "F72": [],
     "CI06": [],
-    "F73": []
+    "F73": [],
+    "CI07": [],
+    "CI08": [
+      "CI07"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [

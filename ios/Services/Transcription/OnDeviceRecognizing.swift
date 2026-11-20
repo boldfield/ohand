@@ -24,6 +24,11 @@ public enum OnDeviceRecognitionOutcome: Equatable, Sendable {
 public protocol OnDeviceRecognizing: AnyObject, Sendable {
     /// Name and version recorded with every transcript it produces; at most 128 bytes.
     var recognizerName: String { get }
+    /// Which behaviour of this recognizer produced a transcript, sent with every transcript and stored by the core so
+    /// a later, better recognizer can replace the text of notes an earlier one made. 1 is the recognizer that kept
+    /// only the last segment it was given; 2 keeps every recognized segment. Raise it when the recognizer changes in a
+    /// way that can change the text of audio it has already read.
+    var transcriptGeneration: Int { get }
     /// Recognizes the audio file in `audioURL`, spoken in `localeIdentifier` (such as `en_US`). Honors task
     /// cancellation by returning `.cancelled` promptly.
     func recognize(audioURL: URL, localeIdentifier: String) async -> OnDeviceRecognitionOutcome
