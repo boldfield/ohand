@@ -5329,3 +5329,57 @@ Acceptance:
 Validation: `make check`, and the exact-head `ios.yml` run with its two reruns.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940.
+
+### CI07
+
+**Split the simulator job into three parallel jobs**
+
+Filed 2026-11-20 from a measurement of 400 job executions in the last 40 `ios.yml` runs (2026-11-10 to 2026-11-20). The `simulator` job is the slowest job of every run (median 72 minutes against a 90 minute limit) and the least reliable (53% of executions passed). It is one serial chain, so a failure near its end repeats everything before it: the capture probe step, the last test step, caused 17 of its 32 failures, and each rerun repeated about an hour of work that had passed. Workers hold a slot while they wait on this job, which starves other work on the fleet.
+
+Median minutes of its long steps in passing executions: settle (cold boot and template) 18.6, NotificationProbe suites 16.8, OhAndTests 10.1, capture probe 6.4, the launch smokes and Keychain self-test about 10 together, project generation and builds about 9.
+
+Scope: replace the one job with three jobs that run in parallel, each on its own runner with its own single cold boot, each compiling only what it runs before its first boot (the "compiler and a booted simulator never run together" rule is kept):
+1. `simulator` (name unchanged, so its evidence artifact stays `ios-evidence`): OhAndTests, the credential relaunch check, the CredentialProbe Keychain self-test, the launch smokes (BridgeProbe, CredentialProbe, OhAndApp, TranscriptionProbe), the embedded-framework check, and the builds those need (including AudioProbe, which is built and not run today).
+2. `notification-probe`: the settle-and-template step and the two NotificationProbe suites on clones of the template, as today. Evidence artifact `ios-evidence-notification`.
+3. `capture-probe`: the CaptureProbe UI test build, the CaptureProbe build and the handoff UI test with its ingress smoke. Evidence artifact `ios-evidence-capture`.
+
+Every step that exists today runs in exactly one of the three jobs, with the same command, the same gates and the same retry wrapper. Each job records the toolchain and the selected simulator, writes `host-pressure.txt` and `simulator-recoveries.txt`, and uploads its failure diagnostics under its artifact name with the `-failure` suffix, under the artifact budget (a green run of the whole workflow stays under 25 MB, any run under 125 MB). Each job gets a time limit justified from the measured step times in a comment, and none is above 60 minutes.
+
+Owned paths: `.github/workflows/ios.yml` (the `simulator` job and the two new jobs only), `ios/scripts/check_project_config.py` and its tests (a check that every step name of the old job appears in exactly one of the three, from a list kept beside the check), `AGENTS.md` (the "Required checks for macOS workers" passage: the three jobs, their artifacts, and which artifact holds which log), `docs/features/ci-artifact-budget.md` if it lists jobs.
+
+Not owned: the other jobs of `ios.yml`, `ios/scripts/*-simulator.sh`, `prepare-simulator.sh`, `retry-simulator-step.sh`, `classify_simulator_fault.py`, any test or probe source.
+
+Acceptance:
+1. A test in `ios-check` fails if a step of the old job is missing from the three jobs or appears in two of them. No test step, smoke, gate or assertion is dropped or loosened, and no step gains `continue-on-error` that did not have it.
+2. In the exact-head run all three jobs pass, and the PR states each job's duration and the workflow's longest job. The longest of the three is under 50 minutes in that run; if it is not, the PR says which step took the time and the task is not done.
+3. `OhAndTests.log` with `** TEST EXECUTE SUCCEEDED **` and `smoke.log` ending `Smoke test passed` are still in `ios-evidence`, so the worker instructions in `AGENTS.md` step 4 stay true; `AGENTS.md` names the two new artifacts and what they hold.
+4. The artifact budget holds: the PR states the total artifact size of the green run.
+5. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 944.
+
+### CI08
+
+**Do not start the macOS jobs for a pull request that changes only documents**
+
+Filed 2026-11-20 with CI07. Depends on CI07 (both edit `ios.yml` and the same `AGENTS.md` passage). `ios.yml` starts on every pull request to `main`, whatever it changes, and one attempt costs about four runner-hours across six jobs and holds a worker for over an hour. A pull request that changes only documents cannot change what those jobs build or test.
+
+Scope: `ios.yml` does not start for a pull request whose every changed file is under `docs/` or is a Markdown file at the repository root (`*.md`), using the trigger's path filter. Anything else starts it as today: `core/` (the core is linked into the app), `ios/`, `app/`, `tools/`, `.github/`, `Makefile`, bindings, configuration, and any Markdown or other file under those directories. The list of ignored paths is closed and short; a path is added to it only by a later task.
+
+A pull request that changes `AGENTS.md` only is included in the skip: it is a root Markdown file and no job reads it.
+
+Owned paths: `.github/workflows/ios.yml` (the trigger only), `ios/scripts/check_project_config.py` and its tests (the ignored-path list is exactly the two patterns above), `AGENTS.md` (one sentence in "Required checks for macOS workers" saying when the workflow does not start, and that a documents-only task needs no macOS run).
+
+Not owned: the jobs of `ios.yml`, `core.yml`, `upgrade.yml`.
+
+Acceptance:
+1. A test in `ios-check` fails if the ignored-path list differs from `docs/**` and root `*.md`, or if a path filter is added to `core.yml`.
+2. The PR shows, with links, one pull request or commit range that changes only a file under `docs/` and started no `ios.yml` run, and that this task's own pull request (which changes the workflow) started one.
+3. Nothing that affects the app is skipped: the PR lists every top-level directory of the repository and says for each whether a change there starts the workflow.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 930.
