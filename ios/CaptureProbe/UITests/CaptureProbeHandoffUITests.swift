@@ -59,11 +59,14 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         attachScreenshotOfTheScreen(named: "not-foreground-diagnosis-example")
     }
 
-    /// The stale-state case: the app was sent Home, so SpringBoard's home screen is in front whatever `app.state` still
-    /// reports. The diagnosis must name SpringBoard and must not name the probe.
-    func testTheDiagnosisNamesSpringBoardWhenTheHomeScreenShowsAfterTheAppWasSentHome() {
-        app.launch()
-        XCTAssertTrue(waitUntil(timeout: 20, { app.state == .runningForeground }), "the app should be in front: \(describeWhatIsInFront())")
+    /// The stale-state case: an application was sent Home, so SpringBoard's home screen is in front whatever that
+    /// application's `state` still reports. The diagnosis must name SpringBoard and must not name the application. Settings
+    /// stands in for the probe: launching the probe would rewrite the presented-state file that
+    /// smoke-capture-simulator.sh checks against the `CAPTURE-PHASE` lines after the whole run.
+    func testTheDiagnosisNamesSpringBoardWhenTheHomeScreenShowsAfterAnApplicationWasSentHome() {
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.launch()
+        XCTAssertTrue(waitUntil(timeout: 20, { settings.state == .runningForeground }), "Settings should be in front: \(describeWhatIsInFront())")
         for _ in 1...4 {
             XCUIDevice.shared.press(.home)
             if waitUntil(timeout: 6, { homeScreenShowing }) { break }
@@ -73,7 +76,7 @@ final class CaptureProbeHandoffUITests: XCTestCase {
         print("CAPTURE-DIAGNOSIS \(diagnosis)")
         XCTAssertTrue(diagnosis.contains("foreground application: com.apple.springboard"), diagnosis)
         XCTAssertTrue(diagnosis.contains("home screen: showing"), diagnosis)
-        XCTAssertFalse(diagnosis.contains("foreground application: \(probeBundleIdentifier)"), diagnosis)
+        XCTAssertFalse(diagnosis.contains("foreground application: com.apple.Preferences"), diagnosis)
         attachScreenshotOfTheScreen(named: "home-screen-diagnosis-example")
     }
 
