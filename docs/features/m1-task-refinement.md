@@ -5421,6 +5421,33 @@ Validation: `make check`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 938.
 
+### F75
+
+**Home recents tests: the scripted source is touched from two threads and crashes the test process**
+
+Filed 2026-11-21. In run 44829485816 attempt 2 (CI08, head 8b2e3077, a change to the workflow and its checker only) the unit-test job failed because the test process crashed in `HomeRecentsModelTests.testANewSaveLeadsTheListAsSortingUntilInterpreted`: `EXC_BAD_ACCESS` in `swift_release` under `Array.append`, at `FakeHomeRecentsSource.readPage(cursor:)` (`ios/Tests/HomeRecents/HomeRecentsModelTests.swift:27`), on a cooperative-pool thread, called from `HomeRecentsModel.readPage(cursor:)` (`app/home/HomeRecentsModel.swift:277`). The crash report is in that run's `ios-evidence-failure` artifact (kept one day).
+
+The coordinator's reading, which the task verifies before acting on it: `HomeRecentsSource.readPage` and `interpretationIsFinished` are nonisolated `async`, so they run off the main actor, and the fake appends to `readCursors`, `statusReadItemIDs` and `heldReads` and reads `pages`, `failure`, `holdsReads` and `heldSnapshotReads` there with no synchronization, while the test, on the main actor, reads and writes the same properties. The same frame shows `HomeRecentsModel.readPage(cursor:)` itself on the pool thread, where it changes `readsInFlight`; the type's comment says it is confined to the main queue.
+
+Scope:
+1. Confirm from the code which of the fake's state and the model's state is reached from both the main actor and another executor, and state it in the PR.
+2. Make `FakeHomeRecentsSource` safe to call from any thread (a lock around its state, or main-actor isolation of its methods if the protocol allows it without changing production callers), keeping what each test asserts.
+3. If `HomeRecentsModel` does change `readsInFlight`, or anything else, off the main actor, make those two private read methods run on the main actor; no other behaviour of the model changes. If it does not, say why the frame is on the pool thread and leave the model alone.
+
+Owned paths: `ios/Tests/HomeRecents/HomeRecentsModelTests.swift`, `app/home/HomeRecentsModel.swift` (the isolation of the private read methods and their counter only).
+
+Not owned: the `HomeRecentsSource` conformance in the app, any other test file, any timeout.
+
+Acceptance:
+1. The PR states, per property, which executor reads and writes it before and after the change.
+2. No assertion in the test file is removed or weakened, and no wait is lengthened to pass.
+3. The `HomeRecents` unit tests pass on the exact head in three consecutive attempts of the `simulator` job (the crash is intermittent, so one pass proves little); the attempts are linked.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 937.
+
 ### CI09
 
 **Install the pinned project generator from a verified release file, not by cloning and compiling it in every job**

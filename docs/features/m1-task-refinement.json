@@ -5052,6 +5052,25 @@
         ".github/workflows/ios.yml",
         ".github/workflows/upgrade.yml"
       ]
+    },
+    {
+      "key": "F75",
+      "parent": null,
+      "title": "Home recents tests: the scripted source is touched from two threads and crashes the test process",
+      "file_scope": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift (isolation of the private read methods only)"
+      ],
+      "intent": "Stop the unit-test process crashing intermittently on a data race in the scripted home recents source, and close the same race in the model's read counter if it is real.",
+      "acceptance": [
+        "See the F75 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5942,7 +5961,8 @@
     "F74": [],
     "CI09": [
       "CI08"
-    ]
+    ],
+    "F75": []
   },
   "retained_dependency_overrides": {
     "V06": [
