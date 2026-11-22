@@ -5394,6 +5394,16 @@ Validation: `make check`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 930.
 
+
+#### CI08 amendment 1
+
+Filed 2026-11-22. Criterion 2 as written cannot be met before the change is on `main`, and that was the coordinator's error: a pull request to `main` that carries this change also changes `ios.yml`, so it is never documents-only, and the path filter applies to other pull requests only once it has merged. Both round-1 reviewers rejected on this point alone and verified everything else. A fork or scratch repository would spend macOS runner time on the shared account to imitate what the real repository shows for free one merge later.
+
+Criterion 2 becomes:
+2. The PR shows, with a link, that this task's own pull request (which changes the workflow) started an `ios.yml` run. The PR body no longer claims or promises the documents-only half.
+
+The documents-only half is not dropped; it moves to the coordinator, after the merge: the coordinator opens a pull request to `main` that changes one file under `docs/` only, confirms that `core.yml` started and `ios.yml` did not, and records both links under this heading. If `ios.yml` starts, the coordinator files a repair task the same day. Reviewers do not ask this task for that evidence.
+
 ### F74
 
 **Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails**
