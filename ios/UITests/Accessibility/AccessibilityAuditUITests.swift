@@ -385,8 +385,21 @@ final class AccessibilityAuditUITests: XCTestCase {
         guard launch(.redoable), openSettings(), openSettingsRow("Audio") else { return }
         let button = app.element(identifier: "data-settings.retention.redo-button")
         XCTAssertTrue(button.waitForExistence(timeout: screenTimeout), "the retention screen shows no redo button")
+        let summary = app.element(identifier: "data-settings.retention.redo")
+        XCTAssertTrue(summary.exists, "the retention screen shows no redo summary")
+        // The section follows the period choices, so at large text sizes it starts below the fold. An element that merely
+        // exists can be off screen: scroll until the button can be tapped, then require the section to be inside the
+        // visible band, so the screenshot and the audit are of the section on screen.
+        XCTAssertTrue(scrollUntilHittable(button), "the redo button cannot be reached")
+        for _ in 0..<3 where button.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
+        let band = currentClearBand()
+        XCTAssertTrue(button.isHittable, "the redo button is not on screen")
         XCTAssertTrue(
-            app.element(identifier: "data-settings.retention.redo").exists, "the retention screen shows no redo summary")
+            button.frame.minY >= band.lowerBound && button.frame.maxY <= band.upperBound,
+            "the redo button is not inside the visible band")
+        XCTAssertTrue(
+            summary.frame.intersects(app.windows.firstMatch.frame) && summary.frame.maxY > band.lowerBound,
+            "the redo summary is not on screen")
         audit("data-audio-redo")
     }
 
