@@ -21,10 +21,15 @@ jobs:
     # image is re-measured in host-pressure.txt. The build service is stopped before the first boot so the memory the build
     # held is returned.
     runs-on: xcode-27
-    # Run 40201105544 (head 6d7d6d7) was cancelled at 60 minutes with no test failing: the host reached load average 637
-    # (cold boot 322 s, free memory 92 MB), the settle step took 14 minutes and OhAndTests 22 minutes, where an earlier
-    # run of the same layout finished in 38 minutes. 90 leaves room for that slowdown; a hung step still ends the job.
-    timeout-minutes: 90
+    # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
+    # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
+    # Every smoke script shuts the device down when it ends, so each smoke after the first pays a warm boot of about 4.5 minutes.
+    # Measured in run 44771939106, where this job took 54m20s: setup and generation 4.6 minutes, builds 4.7, cold boot 14.7
+    # (16.3 in run 44737774976), OhAndTests 12.9, relaunch check, Keychain self-test and BridgeProbe smoke 1.2, CredentialProbe
+    # smoke 5.4, OhAndApp smoke 4.5, TranscriptionProbe smoke 4.6. The OhAndApp and TranscriptionProbe builds and smokes and the
+    # embedded-framework check (about 11 minutes) moved to `capture-probe`, which leaves about 44 minutes here; 60, the ceiling
+    # for these jobs, leaves room for a slow cold boot and still ends a hung step.
+    timeout-minutes: 60
     env:
       OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
     steps:
@@ -91,39 +96,6 @@ jobs:
             -derivedDataPath .derived \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests-build.log
 
-      # Everything is compiled here, before the first simulator boot: the compiler and a booted simulator never run together.
-      - name: Build NotificationProbe UI tests (no simulator booted yet)
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-        run: |
-          set -euo pipefail
-          cd ios
-          xcodebuild build-for-testing \
-            -project OhAnd.xcodeproj \
-            -scheme NotificationProbeUITests \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-            -derivedDataPath .derived \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/NotificationProbeUITests-build.log
-
-      - name: Build CaptureProbe UI tests (no simulator booted yet)
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-        run: |
-          set -euo pipefail
-          cd ios
-          xcodebuild build-for-testing \
-            -project OhAnd.xcodeproj \
-            -scheme CaptureProbeUITests \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-            -derivedDataPath .derived \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/CaptureProbeUITests-build.log
-
       - name: Build BridgeProbe
         shell: bash
         run: |
@@ -138,33 +110,12 @@ jobs:
           cd ios
           OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
 
-      - name: Build OhAndApp
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
-
-      - name: Build CaptureProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
-
       - name: Build AudioProbe
         shell: bash
         run: |
           set -euo pipefail
           cd ios
           ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
-
-      - name: Build TranscriptionProbe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios
-          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
 
       - name: Stop the build service before the first boot
         shell: bash
@@ -173,23 +124,16 @@ jobs:
           pkill -x SourceKitService || true
           vm_stat | head -4
 
-      # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
-      # that the NotificationProbe suites clone again, so none of them pays for a first boot.
-      - name: Settle simulator (single cold boot) and keep an empty template
+      # This job's one cold boot: the device is erased, booted and settled (30 probes in a row) once, and stays booted for the
+      # steps below. The compile steps above ran before it.
+      - name: Cold boot simulator (single cold boot)
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -euo pipefail
           cd ios
-          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase --shutdown-after --label settle-device 2>&1 | tee .evidence/prepare-settle.log
-          template_name="ohand-template-$$"
-          template_udid="$(xcrun simctl clone "${SIMULATOR_UDID}" "${template_name}")"
-          echo "Cloned settled simulator ${SIMULATOR_UDID} into template ${template_udid}"
-          echo "${template_udid}" > .evidence/template-udid.txt
-          echo "TEMPLATE_UDID=${template_udid}" >> "$GITHUB_ENV"
-          # Bring the device back up and wait until it is responsive, so OhAndTests does not start on a booting host.
-          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --label ohandtests-device 2>&1 | tee -a .evidence/prepare-settle.log
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase --label cold-boot-device 2>&1 | tee .evidence/prepare-cold-boot.log
 
       # Ad-hoc signed so the hosted test bundle carries the app's Keychain entitlement (V04 real-Keychain tests).
       - name: Run OhAndTests on simulator
@@ -218,41 +162,6 @@ jobs:
           set -euo pipefail
           cd ios
           ./scripts/credential-relaunch-simulator.sh "${SIMULATOR_UDID}" .evidence 2>&1 | tee .evidence/credential-relaunch.log
-
-      - name: Run NotificationProbe UI tests (allow and deny permission decisions)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Each suite runs on its own clone of the empty template, which never ran NotificationProbe: uninstalling the app
-          # does not clear a recorded notification decision, and the permission prompt only appears while the decision is
-          # undetermined. The clone is fully booted and responsive before the suite starts and deleted after it.
-          evidence_dir="$(pwd)/ios/.evidence/notification-probe"
-          mkdir -p "${evidence_dir}"
-          cd ios
-          overall_status=0
-          for suite in NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests; do
-            ./scripts/prepare-simulator.sh --clone "${TEMPLATE_UDID}" --udid-file .evidence/suite-udid.txt --label "${suite}"
-            suite_udid="$(cat .evidence/suite-udid.txt)"
-            rm -rf "${evidence_dir}/${suite}"*.xcresult
-            suite_status=0
-            ./scripts/retry-simulator-step.sh "${suite_udid}" "${evidence_dir}/${suite}.log" -- xcodebuild test-without-building \
-              -project OhAnd.xcodeproj \
-              -scheme NotificationProbeUITests \
-              -configuration Debug \
-              -sdk iphonesimulator \
-              -destination "platform=iOS Simulator,id=${suite_udid}" \
-              -derivedDataPath .derived \
-              -resultBundlePath "${evidence_dir}/${suite}%ATTEMPT_SUFFIX%.xcresult" \
-              -only-testing:"NotificationProbeUITests/${suite}" \
-              CODE_SIGNING_ALLOWED=NO || suite_status=$?
-            if [ "${suite_status}" -ne 0 ]; then
-              overall_status="${suite_status}"
-            fi
-            echo "Shutting down and deleting ${suite_udid}"
-            xcrun simctl shutdown "${suite_udid}" || true
-            xcrun simctl delete "${suite_udid}" || true
-          done
-          exit "${overall_status}"
 
       - name: Run CredentialProbe Keychain self-test
         shell: bash
@@ -299,6 +208,373 @@ jobs:
             com.boldfield.ohand.probes.credential \
             .evidence \
             "credentialprobe-launch.png"
+
+      - name: Delete simulator template
+        if: always()
+        shell: bash
+        run: |
+          xcrun simctl shutdown all || true
+          if [ -n "${TEMPLATE_UDID:-}" ]; then xcrun simctl delete "${TEMPLATE_UDID}" || true; fi
+          echo "=== host-pressure.txt ===" && cat ios/.evidence/host-pressure.txt || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-evidence
+          path: |
+            ios/.evidence
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload evidence (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "8000000"
+        run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
+
+      - name: Upload evidence (failure diagnostics, failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-evidence-failure
+          path: |
+            ios/.evidence/failure-diagnostics
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 1
+
+  notification-probe:
+    name: NotificationProbe UI tests
+    # F68: runs on GitHub's xcode-27 image (arm64, macOS 27.0.1, Xcode 27.2 / 27.1 / 27.0), because the iPhone Duo only runs
+    # an app full-screen when it is built with Xcode 27.1 or later. Earlier measurements on macos-26 (arm64, 7 GB: cold boots
+    # 177-336 s, peak load 387-540) and macos-26-intel (cold boots 376-535 s, failed settle) are history; boot timing on this
+    # image is re-measured in host-pressure.txt. The build service is stopped before the first boot so the memory the build
+    # held is returned.
+    runs-on: xcode-27
+    # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
+    # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
+    # Measured in run 44771939106, where this job took 53m16s: setup and generation 2.6 minutes, the UI-test build 0.3, settle 30.8
+    # (a cold boot that needed its one recovery, the clone, and a 3.6-minute warm boot of the source device, which no step here
+    # used and which is now gone), the two suites on their clones 19.4. That is about 50 minutes with a recovered cold boot and
+    # about 35 without one; 60, the ceiling for these jobs, still ends a hung step.
+    timeout-minutes: 60
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop unneeded host work
+        shell: bash
+        run: ios/scripts/quiet-host.sh
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          xcode-version: '27.2'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios/.evidence
+          {
+            echo "=== Runner ===" && sw_vers
+            echo "=== Xcode ===" && xcodebuild -version
+            echo "=== Swift ===" && swift --version
+            echo "=== Simulator SDK ===" && xcrun --sdk iphonesimulator --show-sdk-version
+            echo "=== Available iOS simulators ===" && xcrun simctl list devices available iOS
+          } 2>&1 | tee ios/.evidence/toolchain.txt
+
+      - name: Select simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
+          python3 ios/scripts/select_simulator.py \
+            --input ios/.evidence/simctl-devices.json \
+            --max-runtime "${sdk_version}" | tee ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          echo "Selected simulator (SDK ${sdk_version}):"
+          cat ios/.evidence/simulator.txt
+
+      - name: Generate Xcode project
+        run: cd ios && ./scripts/generate.sh
+
+      # Everything is compiled here, before the first simulator boot: the compiler and a booted simulator never run together.
+      - name: Build NotificationProbe UI tests (no simulator booted yet)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme NotificationProbeUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/NotificationProbeUITests-build.log
+
+      - name: Stop the build service before the first boot
+        shell: bash
+        run: |
+          pkill -x XCBBuildService || true
+          pkill -x SourceKitService || true
+          vm_stat | head -4
+
+      # The one first boot of this job's device type. The device is then shut down and cloned (still empty) into a template
+      # that the NotificationProbe suites clone again, so none of them pays for a first boot.
+      - name: Settle simulator (single cold boot) and keep an empty template
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase --shutdown-after --label settle-device 2>&1 | tee .evidence/prepare-settle.log
+          template_name="ohand-template-$$"
+          template_udid="$(xcrun simctl clone "${SIMULATOR_UDID}" "${template_name}")"
+          echo "Cloned settled simulator ${SIMULATOR_UDID} into template ${template_udid}"
+          echo "${template_udid}" > .evidence/template-udid.txt
+          echo "TEMPLATE_UDID=${template_udid}" >> "$GITHUB_ENV"
+          # The source device stays shut down: OhAndTests, which the former single job booted it back up for, runs in the
+          # `simulator` job behind its own cold-boot gate, and no step here uses it, so a booted copy would only take memory
+          # from the suite clones.
+
+      - name: Run NotificationProbe UI tests (allow and deny permission decisions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each suite runs on its own clone of the empty template, which never ran NotificationProbe: uninstalling the app
+          # does not clear a recorded notification decision, and the permission prompt only appears while the decision is
+          # undetermined. The clone is fully booted and responsive before the suite starts and deleted after it.
+          evidence_dir="$(pwd)/ios/.evidence/notification-probe"
+          mkdir -p "${evidence_dir}"
+          cd ios
+          overall_status=0
+          for suite in NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests; do
+            ./scripts/prepare-simulator.sh --clone "${TEMPLATE_UDID}" --udid-file .evidence/suite-udid.txt --label "${suite}"
+            suite_udid="$(cat .evidence/suite-udid.txt)"
+            rm -rf "${evidence_dir}/${suite}"*.xcresult
+            suite_status=0
+            ./scripts/retry-simulator-step.sh "${suite_udid}" "${evidence_dir}/${suite}.log" -- xcodebuild test-without-building \
+              -project OhAnd.xcodeproj \
+              -scheme NotificationProbeUITests \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,id=${suite_udid}" \
+              -derivedDataPath .derived \
+              -resultBundlePath "${evidence_dir}/${suite}%ATTEMPT_SUFFIX%.xcresult" \
+              -only-testing:"NotificationProbeUITests/${suite}" \
+              CODE_SIGNING_ALLOWED=NO || suite_status=$?
+            if [ "${suite_status}" -ne 0 ]; then
+              overall_status="${suite_status}"
+            fi
+            echo "Shutting down and deleting ${suite_udid}"
+            xcrun simctl shutdown "${suite_udid}" || true
+            xcrun simctl delete "${suite_udid}" || true
+          done
+          exit "${overall_status}"
+
+      - name: Delete simulator template
+        if: always()
+        shell: bash
+        run: |
+          xcrun simctl shutdown all || true
+          if [ -n "${TEMPLATE_UDID:-}" ]; then xcrun simctl delete "${TEMPLATE_UDID}" || true; fi
+          echo "=== host-pressure.txt ===" && cat ios/.evidence/host-pressure.txt || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-evidence-notification
+          path: |
+            ios/.evidence
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+      # Result bundles never upload (docs/features/ci-artifact-budget.md): a failed job exports its test summary, test list and
+      # the failed tests' attachments, under 100 MB.
+      - name: Upload evidence (export failure diagnostics)
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        env:
+          CAP_BYTES: "8000000"
+        run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
+
+      - name: Upload evidence (failure diagnostics, failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-evidence-notification-failure
+          path: |
+            ios/.evidence/failure-diagnostics
+            !ios/.evidence/**/*.xcresult
+            !ios/.evidence/**/*.xcresult/**
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 1
+
+  capture-probe:
+    name: CaptureProbe handoff UI test and ingress smoke test
+    # F68: runs on GitHub's xcode-27 image (arm64, macOS 27.0.1, Xcode 27.2 / 27.1 / 27.0), because the iPhone Duo only runs
+    # an app full-screen when it is built with Xcode 27.1 or later. Earlier measurements on macos-26 (arm64, 7 GB: cold boots
+    # 177-336 s, peak load 387-540) and macos-26-intel (cold boots 376-535 s, failed settle) are history; boot timing on this
+    # image is re-measured in host-pressure.txt. The build service is stopped before the first boot so the memory the build
+    # held is returned.
+    runs-on: xcode-27
+    # CI07 split the former single `simulator` job (median 72 minutes of one serial chain) into `simulator`, `notification-probe` and
+    # `capture-probe`, which run in parallel on their own runners. Each compiles only what it runs, then boots once.
+    # Measured in run 44771939106, where this job took 33m28s: setup and generation 3.3 minutes, the CaptureProbe builds 1.2, cold
+    # boot 26.7 (it needed its one recovery), the handoff UI test and ingress smoke 2.2. The OhAndApp and TranscriptionProbe
+    # builds (1.7 in the `simulator` job, which had compiled their shared frameworks already) and their smokes moved here from
+    # `simulator`; each smoke pays a warm boot of about 4.5 minutes because the step before it shut the device down. That is
+    # about 45 minutes with a recovered cold boot and about 30 without one; 60, the ceiling for these jobs, still ends a hung step.
+    timeout-minutes: 60
+    env:
+      OHAND_HOST_PRESSURE_FILE: ${{ github.workspace }}/ios/.evidence/host-pressure.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop unneeded host work
+        shell: bash
+        run: ios/scripts/quiet-host.sh
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          xcode-version: '27.2'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios/.evidence
+          {
+            echo "=== Runner ===" && sw_vers
+            echo "=== Xcode ===" && xcodebuild -version
+            echo "=== Swift ===" && swift --version
+            echo "=== Simulator SDK ===" && xcrun --sdk iphonesimulator --show-sdk-version
+            echo "=== Available iOS simulators ===" && xcrun simctl list devices available iOS
+          } 2>&1 | tee ios/.evidence/toolchain.txt
+
+      - name: Select simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
+          python3 ios/scripts/select_simulator.py \
+            --input ios/.evidence/simctl-devices.json \
+            --max-runtime "${sdk_version}" | tee ios/.evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          echo "Selected simulator (SDK ${sdk_version}):"
+          cat ios/.evidence/simulator.txt
+
+      - name: Generate Xcode project
+        run: cd ios && ./scripts/generate.sh
+
+      - name: Build CaptureProbe UI tests (no simulator booted yet)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild build-for-testing \
+            -project OhAnd.xcodeproj \
+            -scheme CaptureProbeUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/CaptureProbeUITests-build.log
+
+      - name: Build CaptureProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
+
+      - name: Build OhAndApp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
+
+      - name: Build TranscriptionProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
+
+      - name: Stop the build service before the first boot
+        shell: bash
+        run: |
+          pkill -x XCBBuildService || true
+          pkill -x SourceKitService || true
+          vm_stat | head -4
+
+      # This job's one cold boot: the device is erased, booted and settled (30 probes in a row) once, and stays booted for the
+      # steps below. The compile steps above ran before it.
+      - name: Cold boot simulator (single cold boot)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase --label cold-boot-device 2>&1 | tee .evidence/prepare-cold-boot.log
+
+      - name: CaptureProbe handoff UI test and ingress smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "Capture smoke device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/smoke-capture-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            com.boldfield.ohand.probes.capture \
+            .evidence 2>&1 | tee .evidence/capture-smoke.log
 
       - name: Launch OhAndApp smoke test
         shell: bash
@@ -356,21 +632,6 @@ jobs:
             .evidence \
             "transcriptionprobe-launch.png"
 
-      - name: CaptureProbe handoff UI test and ingress smoke test
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
-          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
-        run: |
-          set -euo pipefail
-          echo "Capture smoke device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
-          cd ios
-          ./scripts/smoke-capture-simulator.sh \
-            "${SIMULATOR_UDID}" \
-            com.boldfield.ohand.probes.capture \
-            .evidence 2>&1 | tee .evidence/capture-smoke.log
-
       - name: Delete simulator template
         if: always()
         shell: bash
@@ -384,7 +645,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: ios-evidence
+          name: ios-evidence-capture
           path: |
             ios/.evidence
             !ios/.evidence/**/*.xcresult
@@ -400,7 +661,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          CAP_BYTES: "24000000"
+          CAP_BYTES: "8000000"
         run: ios/scripts/export-failure-diagnostics.sh ios/.evidence/failure-diagnostics $(find ios/.evidence -name '*.xcresult' -prune)
 
       - name: Upload evidence (failure diagnostics, failure only)
@@ -408,7 +669,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: ios-evidence-failure
+          name: ios-evidence-capture-failure
           path: |
             ios/.evidence/failure-diagnostics
             !ios/.evidence/**/*.xcresult
