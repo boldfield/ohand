@@ -97,6 +97,11 @@ final class AccessibilityAuditUITests: XCTestCase {
         (identifier: "", label: "Remind me soon to call the plumber about the leaking tap", placement: .scrollsUnderGlass),
         (identifier: "", label: "What you wrote", placement: .scrollsUnderGlass),
         (identifier: "", label: "Type", placement: .scrollsUnderGlass),
+        // Settings, Audio with a recording to redo, at the largest size: the screen title scrolls up under the status bar's
+        // edge effect, and the "None" line lies below the screen while the redo section is shown. The audit scrolls to
+        // reach both and samples them there (run 45056680973).
+        (identifier: "", label: "Audio", placement: .scrollsUnderGlass),
+        (identifier: "data-settings.retention.none-unresolved", label: "", placement: .scrollsUnderGlass),
     ]
 
     override func setUpWithError() throws {
