@@ -82,4 +82,59 @@ final class CoreLeakBaselineTests: XCTestCase {
         _ = CoreLeakBaseline.capture(source: counters.source)
         XCTAssertLessThan(counters.time, CoreLeakBaseline.settleInterval + 0.05)
     }
+
+    func testCaptureDoesNotRecordABufferThatIsInFlightLongerThanTheSettleIntervalButFreedWithinTheTimeout() {
+        let counters = VirtualCounters { time in time < 3 ? Counts(handles: 0, buffers: 1) : Counts(handles: 0, buffers: 0) }
+        let baseline = CoreLeakBaseline.capture(source: counters.source)
+        XCTAssertEqual(baseline.buffers, 0)
+    }
+
+    // MARK: check() itself
+
+    /// Runs `body`, which must record failures, and returns the file, line and message of each.
+    private func recordedFailures(_ body: () -> Void) -> [(file: String, line: Int, message: String)] {
+        var failures: [(file: String, line: Int, message: String)] = []
+        let options = XCTExpectedFailure.Options()
+        options.issueMatcher = { issue in
+            failures.append((
+                issue.sourceCodeContext.location?.fileURL.path ?? "",
+                issue.sourceCodeContext.location?.lineNumber ?? 0,
+                issue.compactDescription))
+            return true
+        }
+        XCTExpectFailure("check() is expected to fail", options: options, failingBlock: body)
+        return failures
+    }
+
+    func testCheckFailsAtTheCallersLineForABufferThatIsNeverFreed() {
+        let counters = VirtualCounters { _ in Counts(handles: 0, buffers: 1) }
+        let expectedLine = #line + 2
+        let failures = recordedFailures {
+            CoreLeakBaseline.empty.check(source: counters.source, file: #filePath, line: UInt(expectedLine))
+        }
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first?.line, expectedLine)
+        XCTAssertEqual(failures.first.map { URL(fileURLWithPath: $0.file).lastPathComponent }, "CoreLeakBaselineTests.swift")
+        XCTAssertTrue(failures.first?.message.contains("no result buffer leaks") ?? false)
+        XCTAssertLessThanOrEqual(counters.time, 10 + CoreLeakBaseline.pollInterval + 0.001)
+    }
+
+    func testCheckFailsForAHandleThatIsNeverClosed() {
+        let counters = VirtualCounters { _ in Counts(handles: 1, buffers: 0) }
+        let failures = recordedFailures { CoreLeakBaseline.empty.check(source: counters.source) }
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertTrue(failures.first?.message.contains("every core handle is closed") ?? false)
+    }
+
+    func testCheckFailsWhenACountStaysBelowTheBaselineNotOnlyAbove() {
+        let counters = VirtualCounters { _ in Counts(handles: 0, buffers: 0) }
+        let baseline = CoreLeakBaseline(handles: 1, buffers: 1)
+        let failures = recordedFailures { baseline.check(source: counters.source) }
+        XCTAssertEqual(failures.count, 2, "equality: a handle and a buffer below the baseline both fail")
+    }
+
+    func testCheckPassesWhenTheCountsEqualANonZeroBaseline() {
+        let counters = VirtualCounters { _ in Counts(handles: 2, buffers: 1) }
+        CoreLeakBaseline(handles: 2, buffers: 1).check(source: counters.source)
+    }
 }

@@ -40,11 +40,14 @@ struct CoreLeakBaseline {
     /// The value a test class stores before `setUp` has run.
     static let empty = CoreLeakBaseline(handles: 0, buffers: 0)
 
-    /// Reads until a reading has held for `settleInterval` (and, when `matching` is given, equals it), or until
+    /// Reads until a reading has held for `settleInterval` (and, when `matching` is given, equals it, and, when `preferring` is given, satisfies it), or until
     /// `timeout` seconds have passed, and returns the last reading. A reading that began before the deadline may finish
     /// settling after it, so a wait ends at most `timeout + settleInterval` seconds after it started: a passing wait
     /// at most that, a wait that never settles `timeout` plus one poll.
-    static func settledCounts(matching target: Counts? = nil, timeout: TimeInterval, source: Source = .live) -> Counts {
+    static func settledCounts(
+        matching target: Counts? = nil, preferring preferred: ((Counts) -> Bool)? = nil,
+        timeout: TimeInterval, source: Source = .live
+    ) -> Counts {
         let deadline = source.now() + timeout
         var heldCounts: Counts?
         var heldSince = source.now()
@@ -52,6 +55,8 @@ struct CoreLeakBaseline {
             let counts = source.read()
             let now = source.now()
             if let target, counts != target {
+                heldCounts = nil
+            } else if let preferred, !preferred(counts) {
                 heldCounts = nil
             } else if counts != heldCounts {
                 heldCounts = counts
@@ -65,10 +70,11 @@ struct CoreLeakBaseline {
     }
 
     /// Captures the counts once they have stopped changing for `settleInterval`, waiting at most `timeout` seconds.
-    /// A buffer in flight that a later read shows freed is not recorded. A buffer or handle still live after the wait
-    /// stays in the baseline, so it is not blamed on the test that follows.
+    /// A buffer in flight that a later read shows freed is not recorded: the wait prefers a reading with no result buffer
+    /// live, however long a read has held a buffer, and only a buffer live through the whole wait is kept. A buffer or
+    /// handle still live after the wait stays in the baseline, so it is not blamed on the test that follows.
     static func capture(timeout: TimeInterval = 10, source: Source = .live) -> CoreLeakBaseline {
-        let counts = settledCounts(timeout: timeout, source: source)
+        let counts = settledCounts(preferring: { $0.buffers == 0 }, timeout: timeout, source: source)
         return CoreLeakBaseline(handles: counts.handles, buffers: counts.buffers)
     }
 
