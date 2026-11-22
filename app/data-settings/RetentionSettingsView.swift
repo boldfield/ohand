@@ -53,6 +53,10 @@ struct RetentionSettingsView: View {
     static let failureIdentifier = "data-settings.retention.failure"
     static let noUnresolvedIdentifier = "data-settings.retention.none-unresolved"
     static let loadingIdentifier = "data-settings.retention.loading"
+    static let redoIdentifier = "data-settings.retention.redo"
+    static let redoButtonIdentifier = "data-settings.retention.redo-button"
+    static let redoProgressIdentifier = "data-settings.retention.redo-progress"
+    static let redoStateIdentifier = "data-settings.retention.redo-state"
     static let tryAgainIdentifier = "data-settings.retention.try-again"
 
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
@@ -112,7 +116,59 @@ struct RetentionSettingsView: View {
                 if status.storagePressure == .low {
                     note(RetentionSettingsText.pressureLowNotice, identifier: Self.pressureIdentifier)
                 }
+                retranscriptionSection
                 unresolvedSection(status)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var retranscriptionSection: some View {
+        if model.showsRetranscription, let redo = model.retranscription {
+            let inProgress = redo.inFlightCount > 0
+            let summary = inProgress
+                ? RetentionSettingsText.redoRemaining(redo.inFlightCount)
+                : RetentionSettingsText.redoCount(redo.redoableCount)
+            VStack(alignment: .leading, spacing: DSSpacing.sm) {
+                DSGroupedSection(title: RetentionSettingsText.redoTitle) {
+                    VStack(alignment: .leading, spacing: DSSpacing.xs) {
+                        Text(summary)
+                            .font(DSFont.rowLabel)
+                            .foregroundColor(DSColor.ink.color)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier(inProgress ? Self.redoProgressIdentifier : Self.redoIdentifier)
+                            .reportDataSettingsRendered(
+                                inProgress ? Self.redoProgressIdentifier : Self.redoIdentifier, text: summary)
+                        Text(RetentionSettingsText.redoListening)
+                            .font(DSFont.footer)
+                            .foregroundColor(DSColor.inkMuted.color)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(RetentionSettingsText.redoEditedNote)
+                            .font(DSFont.footer)
+                            .foregroundColor(DSColor.inkMuted.color)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if redo.recordingGoneCount > 0 {
+                            Text(RetentionSettingsText.redoGone(redo.recordingGoneCount))
+                                .font(DSFont.footer)
+                                .foregroundColor(DSColor.inkMuted.color)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(DSSpacing.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if !inProgress {
+                    DSPillButton(title: RetentionSettingsText.redoButtonTitle) {
+                        Task { await model.retranscribeAll() }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier(Self.redoButtonIdentifier)
+                    .reportDataSettingsRendered(Self.redoButtonIdentifier, text: RetentionSettingsText.redoButtonTitle)
+                    .disabled(!model.canStartRetranscription)
+                }
+                if let message = model.retranscriptionState?.message {
+                    note(message, identifier: Self.redoStateIdentifier)
+                }
             }
         }
     }

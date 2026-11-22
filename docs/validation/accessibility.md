@@ -54,6 +54,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 | Source detail with a reminder, the correction and item controls | `testSourceDetailWithReminderAndControls` | needs-correction |
 | Settings root; Daily prompt; Unfinished recordings; Processing (provider settings), its Add provider and Advanced screens; Privacy; Status; Audio; Export | `testSettingsScreens` | populated |
 | First-run permissions (Settings, Permissions) | `testSettingsPermissionsOnFirstRun` | empty-first-run |
+| Settings, Audio with a voice note to turn into text again (the section and its button; not the state while the replacement runs, which is over within a second of the tap) | `testSettingsAudioWithRecordingsToRedo` | redoable-recording |
 | Data settings: Erase everything and its confirmation (nothing is confirmed) | `testDataSettingsEraseConfirmation` | populated |
 | Status with a failed note; Status with a reminder that needs a time | `testStatusWithFailedNote`, `testStatusWithReminderNeedingATime` | failed-sorting, needs-correction |
 | Locked screen | `testLockedScreen` | locked |
@@ -265,6 +266,7 @@ and two cards with the same caption that are settled separately.
 | "Done" (`home.done`), shown in the header while the keyboard is up | drawn on the header glass | capture text entry |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
+| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll) | Settings, Audio with a recording to redo |
 
 ### Dynamic Type
 
