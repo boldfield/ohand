@@ -97,6 +97,11 @@ final class AccessibilityAuditUITests: XCTestCase {
         (identifier: "", label: "Remind me soon to call the plumber about the leaking tap", placement: .scrollsUnderGlass),
         (identifier: "", label: "What you wrote", placement: .scrollsUnderGlass),
         (identifier: "", label: "Type", placement: .scrollsUnderGlass),
+        // Settings, Audio with a recording to redo, at the largest size: the screen title scrolls up under the status bar's
+        // edge effect, and the "None" line lies below the screen while the redo section is shown. The audit scrolls to
+        // reach both and samples them there (run 45056680973).
+        (identifier: "", label: "Audio", placement: .scrollsUnderGlass),
+        (identifier: "data-settings.retention.none-unresolved", label: "", placement: .scrollsUnderGlass),
     ]
 
     override func setUpWithError() throws {
@@ -376,6 +381,31 @@ final class AccessibilityAuditUITests: XCTestCase {
     func testSettingsPermissionsOnFirstRun() {
         guard launch(.emptyFirstRun), openSettings(), openSettingsRow("Permissions") else { return }
         audit("permissions-first-run")
+    }
+
+    /// Settings, Audio with a voice note whose text came from an earlier version: the section that offers to turn kept
+    /// recordings into text again is on screen, with its button. The state while the replacement runs is not audited: the
+    /// job drains within a second of the tap, so no stable frame of it exists to audit.
+    func testSettingsAudioWithRecordingsToRedo() {
+        guard launch(.redoable), openSettings(), openSettingsRow("Audio") else { return }
+        let button = app.element(identifier: "data-settings.retention.redo-button")
+        XCTAssertTrue(button.waitForExistence(timeout: screenTimeout), "the retention screen shows no redo button")
+        let summary = app.element(identifier: "data-settings.retention.redo")
+        XCTAssertTrue(summary.exists, "the retention screen shows no redo summary")
+        // The section follows the period choices, so at large text sizes it starts below the fold. An element that merely
+        // exists can be off screen: scroll until the button can be tapped, then require the section to be inside the
+        // visible band, so the screenshot and the audit are of the section on screen.
+        XCTAssertTrue(scrollUntilHittable(button), "the redo button cannot be reached")
+        for _ in 0..<3 where button.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
+        let band = currentClearBand()
+        XCTAssertTrue(button.isHittable, "the redo button is not on screen")
+        XCTAssertTrue(
+            button.frame.minY >= band.lowerBound && button.frame.maxY <= band.upperBound,
+            "the redo button is not inside the visible band")
+        XCTAssertTrue(
+            summary.frame.intersects(app.windows.firstMatch.frame) && summary.frame.maxY > band.lowerBound,
+            "the redo summary is not on screen")
+        audit("data-audio-redo")
     }
 
     func testDataSettingsEraseConfirmation() {

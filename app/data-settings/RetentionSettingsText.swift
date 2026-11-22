@@ -27,6 +27,30 @@ enum RetentionSettingsText {
     static let noUnresolvedText = "None"
     static let periodChangeNote = "Changing the period moves when transcribed audio expires. It never deletes audio now."
 
+    static let redoTitle = "Recordings turned into text before a fix"
+    static let redoButtonTitle = "Turn into text again"
+    static let redoEditedNote = "Notes whose text you edited are left alone."
+    static let redoListening =
+        "This listens to each kept recording again on this phone and replaces the text if it differs."
+
+    /// How many kept recordings were turned into text by an earlier version that could lose the beginning of a long note.
+    static func redoCount(_ count: Int) -> String {
+        count == 1
+            ? "1 recording was turned into text by an earlier version that could lose the beginning of a long note."
+            : "\(count) recordings were turned into text by an earlier version that could lose the beginning of a long "
+                + "note."
+    }
+
+    static func redoGone(_ count: Int) -> String {
+        count == 1
+            ? "1 note cannot be redone because its recording has already been removed."
+            : "\(count) notes cannot be redone because their recordings have already been removed."
+    }
+
+    static func redoRemaining(_ count: Int) -> String {
+        count == 1 ? "1 recording is still being turned into text again." : "\(count) recordings are still being turned into text again."
+    }
+
     static func dayCount(_ days: Int) -> String { days == 1 ? "1 day" : "\(days) days" }
 
     static func periodSummary(_ policy: RetentionPolicySetting) -> String {

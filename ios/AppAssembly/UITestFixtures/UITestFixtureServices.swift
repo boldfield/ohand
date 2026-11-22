@@ -39,7 +39,7 @@ final class UITestFixtureLaunch {
         self.storageRoot = storageRoot
 
         let sender = UITestFixtureSender()
-        let recognizer = UITestFixtureRecognizer()
+        let recognizer = UITestFixtureRecognizer(transcriptGeneration: fixture == .redoable ? 1 : 2)
         let permission: NotificationAuthorization = fixture == .emptyFirstRun ? .notDetermined : .authorized
         let notificationCenter = UITestFixtureNotificationCenter(permission: permission)
         self.notificationCenter = notificationCenter
@@ -184,6 +184,15 @@ final class UITestFixtureSeeder {
         case .populated, .locked:
             try await configureProvider()
             try await seedPopulated()
+        case .redoable:
+            try await configureProvider()
+            let transcript = "Synthetic spoken note about the old recording"
+            try await saveVoice(
+                transcript: transcript, expecting: .processed, reply: .proposal(try Self.proposal(text: transcript, itemType: "note")))
+            // The transcript is attached by a job after the save, so the note must settle at the earlier generation
+            // before the recognizer moves on; from then the note is out of date.
+            try await settleNotes()
+            recognizer.advanceToCurrentGeneration()
         case .needsCorrection:
             try await configureProvider()
             try await saveTyped(
