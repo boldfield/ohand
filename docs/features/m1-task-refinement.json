@@ -5025,6 +5025,52 @@
         "ios/OhAndCoreBridge/CoreHandle.swift",
         "ios/scripts/check_test_leak_baseline.py"
       ]
+    },
+    {
+      "key": "CI09",
+      "parent": null,
+      "title": "Install the pinned project generator from a verified release file, not by cloning and compiling it in every job",
+      "file_scope": [
+        "ios/scripts/install-xcodegen.sh (new)",
+        "ios/scripts/generate.sh",
+        "ios/Mintfile",
+        ".github/workflows/ios.yml and upgrade.yml (tool installation steps)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (pinned XcodeGen sentence)"
+      ],
+      "intent": "Remove the per-job clone and compile of XcodeGen: install the pinned release binary, verified by digest and cached, saving about 2.7 minutes per job and a network dependency.",
+      "acceptance": [
+        "See the CI09 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI08"
+      ],
+      "source_pointers": [
+        "ios/scripts/generate.sh",
+        "ios/Mintfile",
+        ".github/workflows/ios.yml",
+        ".github/workflows/upgrade.yml"
+      ]
+    },
+    {
+      "key": "F75",
+      "parent": null,
+      "title": "Home recents tests: the scripted source is touched from two threads and crashes the test process",
+      "file_scope": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift (isolation of the private read methods only)"
+      ],
+      "intent": "Stop the unit-test process crashing intermittently on a data race in the scripted home recents source, and close the same race in the model's read counter if it is real.",
+      "acceptance": [
+        "See the F75 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5912,7 +5958,11 @@
     "CI08": [
       "CI07"
     ],
-    "F74": []
+    "F74": [],
+    "CI09": [
+      "CI08"
+    ],
+    "F75": []
   },
   "retained_dependency_overrides": {
     "V06": [
