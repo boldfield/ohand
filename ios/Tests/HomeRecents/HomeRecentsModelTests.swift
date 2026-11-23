@@ -22,6 +22,8 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
     /// Counts releases. A read that decides to hold records the count with its cursor, so a release that lands before the
     /// read has registered its waiter still lets that read go.
     private var releaseEpoch = 0
+    /// Test-only: awaited by a held read after its cursor is published and before it registers its waiter.
+    private var _beforeWaiterRegistration: (@Sendable () async -> Void)?
     private var handlers: [@Sendable () -> Void] = []
     private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
@@ -89,7 +91,13 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
         return pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
     }
 
+    var beforeWaiterRegistration: (@Sendable () async -> Void)? {
+        get { locked { _beforeWaiterRegistration } }
+        set { locked { _beforeWaiterRegistration = newValue } }
+    }
+
     private func holdUntilReleased(since epoch: Int) async {
+        await beforeWaiterRegistration?()
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let alreadyReleased = locked { () -> Bool in
                 if releaseEpoch != epoch { return true }
@@ -115,8 +123,6 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
         }
         continuations.forEach { $0.resume() }
     }
-
-    func resetReadCursorsForRegression() { locked { _readCursors = [] } }
 
     func unlock() { locked { _unlockCount += 1 } }
 
@@ -300,14 +306,24 @@ final class HomeRecentsModelTests: XCTestCase {
     func testReleaseRacingTheRegistrationOfAHeldReadStillReleasesIt() async {
         let source = FakeHomeRecentsSource()
         source.holdsReads = true
-        for _ in 0..<200 {
-            let read = Task { try await source.readPage(cursor: nil) }
-            // The cursor is published before the read registers its waiter; releasing at once hits that window.
-            while source.readCursors.isEmpty { await Task.yield() }
-            source.releaseHeldReads()
-            _ = try? await read.value
-            source.resetReadCursorsForRegression()
+        let reachedWindow = expectation(description: "the read published its cursor and has not registered a waiter")
+        let (gate, openGate) = AsyncStream<Void>.makeStream()
+        source.beforeWaiterRegistration = {
+            reachedWindow.fulfill()
+            for await _ in gate { break }
         }
+        let readReturned = expectation(description: "the read returned after the release")
+        let read = Task {
+            _ = try? await source.readPage(cursor: nil)
+            readReturned.fulfill()
+        }
+        await fulfillment(of: [reachedWindow], timeout: 5)
+        XCTAssertEqual(source.readCursors.count, 1)
+        // The read is blocked between publishing its cursor and registering its waiter, so this release finds no waiter.
+        source.releaseHeldReads()
+        openGate.yield()
+        await fulfillment(of: [readReturned], timeout: 5)
+        _ = await read.value
     }
 
     func testRelockClearsTheListImmediately() async {
