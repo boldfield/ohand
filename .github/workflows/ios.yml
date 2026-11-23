@@ -1143,6 +1143,7 @@ jobs:
 
       - name: Install XcodeGen launcher
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: ios/scripts/install-xcodegen.sh
 
       # Real handoff between two installed apps: CaptureProbe (native entry) opens this Tauri shell by URL.
