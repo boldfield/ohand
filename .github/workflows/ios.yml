@@ -4,6 +4,10 @@ on:
   pull_request:
     branches:
       - main
+    # CI08: a pull request whose every changed file matches one of these does not start the workflow. The list is closed.
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
 
 permissions:
   contents: read
