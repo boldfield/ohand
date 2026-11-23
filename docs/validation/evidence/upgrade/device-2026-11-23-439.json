@@ -1,0 +1,26 @@
+{
+  "schema": "ohand.upgrade-device-evidence.v1",
+  "collected_at": "2026-11-23T04:50:00Z",
+  "candidate_record": "docs/releases/m1-trial/candidate-439-4ed14c26.json",
+  "device": "iPhone Duo (label trial-phone)",
+  "installed_build_number_before": "416",
+  "installed_build_number_after": "439",
+  "counts_before": {
+    "captures": 48,
+    "corrections": 2,
+    "deleted": 26,
+    "reminders": 9
+  },
+  "counts_after": {
+    "captures": 48,
+    "corrections": 2,
+    "deleted": 26,
+    "reminders": 9
+  },
+  "provider_profile_still_configured": true,
+  "credential_still_present": true,
+  "reminder_time_unchanged": true,
+  "reminder_notification_seen": true,
+  "outcome": "passed",
+  "notes": "Method: with the maintainer's approval each time, the coordinator copied the app's database from the phone with devicectl immediately before the install (build 416) and after the install, unlock and the maintainer's checks (build 439), printed row counts and state names only, never text, and deleted each copy. Both copies passed SQLite's integrity check at schema step 15. Before and after are equal: 48 captures; 48 items, of which 5 active, 17 completed and 26 deleted; 2 corrections on 2 items (1 of text, 1 of type); 9 reminders, 8 closed and 1 scheduled; 1 provider profile, set as the default, with 1 route grant. The scheduled reminder has the same identifier, the same time (2026-11-23T18:00:00Z, America/Los_Angeles) and the same schedule generation (1) in both copies. Maintainer's report on build 439, through the app: the notes are all listed, Settings -> Processing shows the same provider and Check saved secret reports it present, and the reminder shows the same time. reminder_notification_seen: at collection the reminder was still pending in Settings -> Status (the procedure's pending alternative); its scheduled time had not yet come. Limit: the procedure's search for words from a deleted capture was not performed; the database copies show the same 26 deleted items before and after and 22 not deleted, and the maintainer reported the same notes listed. Build numbers were read on the Mac with devicectl (install-ohand.sh --candidate, 'build on phone: 416 -> 439'); the candidate was installed over the existing app, never uninstalled, and launched into the running process list. Between the install and the second copy the maintainer also ran Settings -> Audio -> Turn into text again on build 439 (F71c's device check): the 12 voice transcripts present before the upgrade are 12 after it, 3 of them now of transcript generation 2 and 9 still of generation 1, with 3 replacement requests recorded; this changed transcript text, not any count above. The same session covered F70's device check (playback audible with silent mode on, after a recording and after a fresh launch; recording works after playback), reported passed by the maintainer. Build 416 was installed over 407 on 2026-11-18 without before-upgrade counts, so 416 -> 439 is the first recorded upgrade on this phone."
+}

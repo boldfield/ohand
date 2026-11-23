@@ -4062,6 +4062,16 @@ Acceptance:
 
 Contributes to original T10 criteria: 1 (device), 3, 4.
 
+#### T10b amendment 1
+
+Filed 2026-11-23 by the coordinator, unblocking the task. The records this task cites are now:
+- candidate record `docs/releases/m1-trial/candidate-439-4ed14c26.json` (build 439, revision 4ed14c26);
+- device upgrade record `docs/validation/evidence/upgrade/device-2026-11-23-439.json` (416 to 439 on the iPhone Duo, outcome passed).
+
+Candidate 398 and `device-2026-11-07-398.json` are history: that phone was replaced and erased on 2026-11-09, and a rebuilt binary repeats the device checks, so 439 is the candidate U10b uses for the accessibility pass, T05b for the functional matrix and T06 distributes. The 398 record stays in the repository and may be mentioned as the earlier upgrade on the earlier phone; it is not the cited evidence.
+
+The pull request (PR #408 may be reused or replaced) cites the two records above by path and states the device record's limits as the record states them, without softening or adding: the reminder's notification was pending in Settings -> Status at collection and had not yet been due; the search for words from a deleted capture was not performed; the counts come from database copies taken with the maintainer's approval and deleted, not from exports. Earlier review findings on PR #408 about which task uses the candidate for what, and about the rebuild rule, still apply with 439 in place of 398. This is a documents-only change, so `ios.yml` does not start for it (CI08) and no macOS run is needed.
+
 ### F48
 
 Show reminders that have no time, on Home and in Status, so they are not silently lost
@@ -5403,6 +5413,8 @@ Criterion 2 becomes:
 2. The PR shows, with a link, that this task's own pull request (which changes the workflow) started an `ios.yml` run. The PR body no longer claims or promises the documents-only half.
 
 The documents-only half is not dropped; it moves to the coordinator, after the merge: the coordinator opens a pull request to `main` that changes one file under `docs/` only, confirms that `core.yml` started and `ios.yml` did not, and records both links under this heading. If `ios.yml` starts, the coordinator files a repair task the same day. Reviewers do not ask this task for that evidence.
+
+Evidence (2026-11-23, after CI08 merged as 4ed14c26): pull request #430 changes this file only. Its first commit started `core.yml` (run 45110579803) and the fixture hygiene workflow (run 45110579917) and no `ios.yml` run; CI08's own pull request #426 started `ios.yml` run 45040048054.
 
 ### F74
 
