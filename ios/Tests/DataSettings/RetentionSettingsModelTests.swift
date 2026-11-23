@@ -57,6 +57,22 @@ final class FakeRetentionControls: RetentionControlling, @unchecked Sendable {
     /// When set, period changes, retries and deletions wait at it before answering.
     var operationGate: RetentionOperationGate?
     private(set) var statusReads = 0
+    var redoStatus: Result<RetranscriptionStatus, Error> = .success(
+        RetranscriptionStatus(redoableCount: 0, recordingGoneCount: 0, moreCandidates: false, inFlightCount: 0))
+    var redoableResult: Result<[String], Error> = .success([])
+    var retranscribeResult: Result<RetranscriptionReceipt, Error> = .success(
+        RetranscriptionReceipt(queued: 0, deferred: 0, skipped: [:]))
+    private(set) var retranscribeRequests: [[String]] = []
+
+    func retranscriptionStatus() async throws -> RetranscriptionStatus { try redoStatus.get() }
+
+    func redoableItemIDs() async throws -> [String] { try redoableResult.get() }
+
+    func retranscribe(itemIDs: [String]) async throws -> RetranscriptionReceipt {
+        retranscribeRequests.append(itemIDs)
+        await operationGate?.pass()
+        return try retranscribeResult.get()
+    }
 
     init(status: RetentionStatus) { statusResult = .success(status) }
 
@@ -376,5 +392,132 @@ final class RetentionSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(model.phase, .idle)
         XCTAssertNil(model.status)
+    }
+
+    // MARK: turning kept recordings into text again
+
+    private static func redo(redoable: Int = 0, gone: Int = 0, inFlight: Int = 0) -> RetranscriptionStatus {
+        RetranscriptionStatus(
+            redoableCount: redoable, recordingGoneCount: gone, moreCandidates: false, inFlightCount: inFlight)
+    }
+
+    func testTheRedoSectionIsAbsentWithNoCandidatesAndNothingInProgress() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(gone: 2))
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertFalse(model.showsRetranscription, "a recording that is gone cannot be redone, so there is nothing to offer")
+        XCTAssertFalse(model.canStartRetranscription)
+    }
+
+    func testTheRedoSectionShowsTheCountAndNothingRunsWithoutTheButton() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(redoable: 3, gone: 1))
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        XCTAssertTrue(model.showsRetranscription)
+        XCTAssertTrue(model.canStartRetranscription)
+        XCTAssertEqual(model.retranscription?.redoableCount, 3)
+        XCTAssertTrue(RetentionSettingsText.redoCount(3).hasPrefix("3 recordings"))
+        XCTAssertTrue(RetentionSettingsText.redoGone(1).contains("1 note cannot be redone"))
+        XCTAssertEqual(controls.retranscribeRequests, [], "loading the screen never starts a replacement")
+    }
+
+    func testThePressRequestsTheRedoableItemsOnceAndTheButtonIsReplacedByProgress() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(redoable: 2))
+        controls.redoableResult = .success(["item-a", "item-b"])
+        controls.retranscribeResult = .success(RetranscriptionReceipt(queued: 2, deferred: 0, skipped: [:]))
+        let model = makeModel(controls)
+        await model.refresh()
+
+        controls.redoStatus = .success(Self.redo(redoable: 0, inFlight: 2))
+        await model.retranscribeAll()
+
+        XCTAssertEqual(controls.retranscribeRequests, [["item-a", "item-b"]])
+        XCTAssertTrue(model.showsRetranscription)
+        XCTAssertFalse(model.canStartRetranscription, "while replacements run there is progress and no button")
+        XCTAssertEqual(model.retranscription?.inFlightCount, 2)
+        XCTAssertNil(model.retranscriptionState)
+
+        await model.retranscribeAll()
+        XCTAssertEqual(controls.retranscribeRequests.count, 1, "a second press while they run asks for nothing")
+    }
+
+    func testTheRedoSectionIsGoneWhenNothingRemains() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(inFlight: 1))
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertTrue(model.showsRetranscription)
+
+        controls.redoStatus = .success(Self.redo())
+        await model.refresh()
+
+        XCTAssertFalse(model.showsRetranscription)
+    }
+
+    func testALockedSessionShowsTheLockedStateAndNeverTheRedoCount() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(redoable: 4))
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertTrue(model.showsRetranscription)
+
+        scope = .captureOnly
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertNil(model.retranscription)
+        XCTAssertFalse(model.showsRetranscription)
+
+        await model.retranscribeAll()
+        XCTAssertEqual(controls.retranscribeRequests, [], "a locked screen sends nothing")
+    }
+
+    func testAFailedRedoShowsTheScreensFailureTextAndLeavesTheButtonUsable() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .success(Self.redo(redoable: 1))
+        controls.redoableResult = .success(["item-a"])
+        controls.retranscribeResult = .failure(RetentionControlError.invalidRequest)
+        let model = makeModel(controls)
+        await model.refresh()
+
+        await model.retranscribeAll()
+
+        XCTAssertEqual(
+            model.retranscriptionState, .failed(RetentionSettingsText.failure(RetentionControlError.invalidRequest)))
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertTrue(model.canStartRetranscription)
+    }
+
+    func testAFailedRedoStatusReadShowsTheScreensFailurePresentation() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.redoStatus = .failure(RetentionControlError.unreadable)
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .failed(RetentionSettingsText.failure(RetentionControlError.unreadable)))
+        XCTAssertFalse(model.showsRetranscription)
+    }
+
+    func testTheRedoCopyNamesNoVersionNumberOrInternalTerm() {
+        let words = [
+            RetentionSettingsText.redoTitle, RetentionSettingsText.redoButtonTitle, RetentionSettingsText.redoEditedNote,
+            RetentionSettingsText.redoListening, RetentionSettingsText.redoCount(1), RetentionSettingsText.redoCount(5),
+            RetentionSettingsText.redoGone(1), RetentionSettingsText.redoGone(5), RetentionSettingsText.redoRemaining(1),
+            RetentionSettingsText.redoRemaining(5),
+        ].joined(separator: " ").lowercased()
+        for term in ["generation", "f69", "f71", "recognizer", "job", "core", "attachment", "v1", "v2", "version 2"] {
+            XCTAssertFalse(words.contains(term), "the copy must not say \(term)")
+        }
+        XCTAssertTrue(words.contains("edited"))
+        XCTAssertTrue(words.contains("already been removed"))
     }
 }

@@ -1,5 +1,8 @@
+import os
 import re
+import stat
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,14 +24,20 @@ class PrepareSimulatorTests(unittest.TestCase):
     def test_readiness_thresholds_unchanged_and_timeout_bounded(self):
         self.assertIn("responsive_probe_limit_seconds=3", self.script)
         self.assertIn("responsive_probes_required=10", self.script)
-        timeout = int(re.search(r"responsive_timeout_seconds=(\d+)", self.script).group(1))
-        self.assertLessEqual(timeout, 480)
+        self.assertIn('responsive_timeout_seconds="${OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS:-480}"', self.script)
+        self.assertIn('settle_timeout_seconds="${OHAND_TEST_SETTLE_TIMEOUT_SECONDS:-480}"', self.script)
+        self.assertIn("settle_probes_required=\"${OHAND_TEST_SETTLE_PROBES:-30}\"", self.script)
+        self.assertIn('probe_interval_seconds="${OHAND_TEST_PROBE_INTERVAL_SECONDS:-1}"', self.script)
+        self.assertIn('recovery_quiet_wait_seconds="${OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS:-120}"', self.script)
+        # Unless a test overrides them, the first attempt uses exactly the same timeouts as the recovery attempt.
+        self.assertIn('first_attempt_responsive_timeout_seconds="${OHAND_TEST_FIRST_ATTEMPT_RESPONSIVE_TIMEOUT_SECONDS:-${responsive_timeout_seconds}}"', self.script)
+        self.assertIn('first_attempt_settle_timeout_seconds="${OHAND_TEST_FIRST_ATTEMPT_SETTLE_TIMEOUT_SECONDS:-${settle_timeout_seconds}}"', self.script)
 
     def test_pressure_file_records_swap_and_compressor(self):
         self.assertIn("swapins swapouts compressor_pages", self.script)
 
-    def test_quiet_host_runs_first_in_both_simulator_jobs_and_spares_the_essentials(self):
-        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 3)
+    def test_quiet_host_runs_first_in_every_simulator_job_and_spares_the_essentials(self):
+        self.assertEqual(self.workflow.count("ios/scripts/quiet-host.sh"), 5)
         quiet = (SCRIPTS / "quiet-host.sh").read_text()
         for essential in ("CoreSimulator", "Xcode", "Runner.Listener", "provjobd"):
             self.assertNotIn(f"pkill -x {essential}", quiet)
@@ -86,6 +95,179 @@ class PrepareSimulatorTests(unittest.TestCase):
         self.assertIn('prepare-simulator.sh --clone "${TEMPLATE_UDID}"', self.workflow)
         self.assertNotIn("prepare-simulator.sh \"${SIMULATOR_UDID}\" --erase\n", self.workflow)
 
+
+FAKE_XCRUN = r"""#!/usr/bin/env bash
+# Fake xcrun: FAKE_DIR holds the call log; the first FAKE_UNRESPONSIVE_BOOTS boots never become responsive.
+echo "$*" >> "${FAKE_DIR}/calls.log"
+[ "$1" = "simctl" ] || exit 0
+case "$2" in
+  boot) echo boot >> "${FAKE_DIR}/boots.log" ;;
+  clone)
+    count=$(( $(cat "${FAKE_DIR}/clones.count" 2>/dev/null || echo 0) + 1 ))
+    echo "${count}" > "${FAKE_DIR}/clones.count"
+    echo "clone-${count}"
+    ;;
+  spawn)
+    boots=$(wc -l < "${FAKE_DIR}/boots.log" 2>/dev/null | tr -d ' ')
+    [ "${boots:-0}" -gt "${FAKE_UNRESPONSIVE_BOOTS:-0}" ] || exit 1
+    # Boots up to FAKE_UNSETTLED_BOOTS answer the 10 responsive probes, then stop answering.
+    spawns=$(( $(cat "${FAKE_DIR}/spawns.${boots}" 2>/dev/null || echo 0) + 1 ))
+    echo "${spawns}" > "${FAKE_DIR}/spawns.${boots}"
+    if [ "${boots:-0}" -le "${FAKE_UNSETTLED_BOOTS:-0}" ] && [ "${spawns}" -gt 10 ]; then exit 1; fi
+    # Boot FAKE_SLOW_SETTLE_BOOT answers its settle probes (after the 10 responsive ones) slowly but within the probe limit.
+    if [ "${boots:-0}" = "${FAKE_SLOW_SETTLE_BOOT:-0}" ] && [ "${spawns}" -gt 10 ]; then sleep 1; fi
+    ;;
+esac
+exit 0
+"""
+
+# Only the attempt meant to fail gets a short deadline; a healthy recovery attempt keeps the generous default.
+FIRST_ATTEMPT_TIMES_OUT = {"OHAND_TEST_FIRST_ATTEMPT_RESPONSIVE_TIMEOUT_SECONDS": "2"}
+BOTH_ATTEMPTS_TIME_OUT = {"OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS": "2"}
+
+
+class PrepareSimulatorRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        xcrun = bin_dir / "xcrun"
+        xcrun.write_text(FAKE_XCRUN)
+        xcrun.chmod(xcrun.stat().st_mode | stat.S_IEXEC)
+        self.bin_dir = bin_dir
+        self.evidence = self.dir / "evidence"
+        self.fake_dir = self.dir / "fake"
+        self.fake_dir.mkdir()
+
+    def run_script(self, args, unresponsive_boots, unsettled_boots=0, extra_env=None):
+        env = {
+            **os.environ,
+            "PATH": f"{self.bin_dir}:{os.environ['PATH']}",
+            "FAKE_DIR": str(self.fake_dir),
+            "FAKE_UNRESPONSIVE_BOOTS": str(unresponsive_boots),
+            "FAKE_UNSETTLED_BOOTS": str(unsettled_boots),
+            "OHAND_HOST_PRESSURE_FILE": str(self.evidence / "host-pressure.txt"),
+            # A healthy fake answers at once, so a generous window costs nothing and never races a loaded worker. Tests that
+            # mean a gate to time out set a short timeout explicitly (FIRST_ATTEMPT_* when only the first attempt should fail).
+            "OHAND_TEST_RESPONSIVE_TIMEOUT_SECONDS": "60",
+            "OHAND_TEST_SETTLE_TIMEOUT_SECONDS": "60",
+            "OHAND_TEST_PROBE_INTERVAL_SECONDS": "0",
+            "OHAND_TEST_SETTLE_PROBES": "3",
+            "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "0",
+            **(extra_env or {}),
+        }
+        return subprocess.run(["bash", str(SCRIPTS / "prepare-simulator.sh"), *args], capture_output=True, text=True, env=env, timeout=120)
+
+    def boots(self):
+        return len((self.fake_dir / "boots.log").read_text().split())
+
+    def recoveries(self):
+        path = self.evidence / "simulator-recoveries.txt"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def pressure(self):
+        return (self.evidence / "host-pressure.txt").read_text()
+
+    def test_responsive_first_attempt_has_no_recovery(self):
+        result = self.run_script(["udid", "--erase", "--label", "first"], 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("::warning::", result.stdout)
+        self.assertEqual(self.boots(), 1)
+        self.assertEqual(self.recoveries(), [])
+        self.assertFalse((self.evidence / "simulator-recoveries.txt").exists())
+        self.assertIn("first cold-boot ", self.pressure())
+
+    def test_recovers_once_when_second_attempt_answers(self):
+        result = self.run_script(["udid", "--erase", "--label", "second"], 1, extra_env=FIRST_ATTEMPT_TIMES_OUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        warnings = [line for line in result.stdout.splitlines() if line.startswith("::warning::")]
+        self.assertTrue(any("second" in line and "cold-boot" in line and "responsive gate" in line for line in warnings), warnings)
+        self.assertEqual(self.boots(), 2)
+        self.assertIn("second cold-boot-recovered ", self.pressure())
+        lines = self.recoveries()
+        self.assertEqual(len(lines), 1)
+        label, kind, first_seconds, second_seconds, outcome = lines[0].split()
+        self.assertEqual((label, kind, outcome), ("second", "cold-boot", "recovered"))
+        self.assertTrue(first_seconds.isdigit() and second_seconds.isdigit())
+        calls = (self.fake_dir / "calls.log").read_text()
+        self.assertEqual(calls.count("simctl erase udid"), 2)
+
+    def test_fails_after_exactly_two_attempts(self):
+        result = self.run_script(["udid", "--label", "twice"], 99, extra_env=BOTH_ATTEMPTS_TIME_OUT)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.boots(), 2)
+        self.assertIn("twice warm-boot-failed-twice ", self.pressure())
+        lines = self.recoveries()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith("failed-twice"))
+        self.assertIn("::warning::", result.stdout)
+
+    def test_clone_recovery_deletes_first_clone_and_records_second_udid(self):
+        udid_file = self.dir / "suite-udid.txt"
+        result = self.run_script(["--clone", "template", "--udid-file", str(udid_file), "--label", "suite"], 1, extra_env=FIRST_ATTEMPT_TIMES_OUT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(udid_file.read_text().strip(), "clone-2")
+        calls = (self.fake_dir / "calls.log").read_text().splitlines()
+        self.assertIn("simctl delete clone-1", calls)
+        self.assertNotIn("simctl delete clone-2", calls)
+        self.assertIn("suite clone-recovered ", self.pressure())
+        self.assertEqual(len(self.recoveries()), 1)
+
+    def test_clone_fails_closed_when_udid_file_is_unwritable(self):
+        udid_file = self.dir / "missing-dir" / "suite-udid.txt"
+        result = self.run_script(["--clone", "template", "--udid-file", str(udid_file), "--label", "suite"], 0)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("ready", result.stdout)
+
+    def test_settle_failure_records_whole_attempt_duration(self):
+        result = self.run_script(["udid", "--erase", "--label", "settle"], 0, unsettled_boots=1, extra_env={"OHAND_TEST_FIRST_ATTEMPT_SETTLE_TIMEOUT_SECONDS": "2"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("settle gate", result.stdout)
+        label, kind, first_seconds, second_seconds, outcome = self.recoveries()[0].split()
+        self.assertEqual(outcome, "recovered")
+        # The settle gate alone ran for the 2 s timeout, so the first attempt lasted at least that long.
+        self.assertGreaterEqual(int(first_seconds), 2)
+
+    def test_recovered_attempt_records_whole_attempt_duration_including_settle(self):
+        # The recovery attempt answers its 3 settle probes 1 s each, after becoming responsive at once.
+        result = self.run_script(["udid", "--erase", "--label", "slow"], 1, extra_env={**FIRST_ATTEMPT_TIMES_OUT, "FAKE_SLOW_SETTLE_BOOT": "2"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        label, kind, first_seconds, second_seconds, outcome = self.recoveries()[0].split()
+        self.assertEqual(outcome, "recovered")
+        self.assertGreaterEqual(int(second_seconds), 3)
+        # The pressure file keeps the time to responsive, which excludes the settle gate.
+        pressure_seconds = next(line.split()[2] for line in self.pressure().splitlines() if line.startswith("slow cold-boot-recovered "))
+        self.assertLess(int(pressure_seconds), int(second_seconds))
+
+    def quiet_waits(self, stdout, deadline):
+        return [float(m) for m in re.findall(rf"quieten \(CPU [^,]*, ([\d.]+)s of {deadline}s", stdout)]
+
+    def test_recovery_wait_is_bounded_by_wall_clock(self):
+        # A `top` that takes 2 s and reports a busy host. With an 8 s deadline the wait samples (0-2 s), sleeps 5 s, then starts
+        # a sample with 1 s left: that sample must be cut off at the deadline instead of running its full 2 s.
+        slow_top = self.bin_dir / "top"
+        slow_top.write_text("#!/usr/bin/env bash\nsleep 2 >/dev/null\necho 'CPU usage: 90.0% user, 5.0% sys, 5.0% idle'\n")
+        slow_top.chmod(slow_top.stat().st_mode | stat.S_IEXEC)
+        result = self.run_script(["udid", "--label", "bounded"], 1, extra_env={**FIRST_ATTEMPT_TIMES_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "8"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        waited = self.quiet_waits(result.stdout, 8)
+        self.assertEqual(len(waited), 2, result.stdout)
+        self.assertIn("CPU unknown% idle", result.stdout)
+        # The only slack allowed is ending the cut-off sample process; a full extra sample would reach 9 s.
+        self.assertLessEqual(max(waited), 8.5, result.stdout)
+        self.assertIn("stopped waiting for the host to quieten at the 8s deadline", result.stdout)
+
+    def test_unreadable_cpu_sample_keeps_waiting_until_deadline(self):
+        slow_top = self.bin_dir / "top"
+        slow_top.write_text("#!/usr/bin/env bash\nsleep 1 >/dev/null\necho garbage\n")
+        slow_top.chmod(slow_top.stat().st_mode | stat.S_IEXEC)
+        result = self.run_script(["udid", "--label", "unreadable"], 3, extra_env={**BOTH_ATTEMPTS_TIME_OUT, "OHAND_TEST_RECOVERY_QUIET_WAIT_SECONDS": "3"})
+        # An unreadable sample does not end the wait: it runs on to the deadline, and not past it.
+        self.assertIn("CPU unknown% idle", result.stdout)
+        self.assertLessEqual(max(self.quiet_waits(result.stdout, 3)), 3.5, result.stdout)
+        self.assertIn("stopped waiting for the host to quieten at the 3s deadline", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()

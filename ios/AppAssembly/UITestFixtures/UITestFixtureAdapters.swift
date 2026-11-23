@@ -55,6 +55,25 @@ final class UITestFixtureRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     let recognizerName = "ui-test-fixture-recognizer/1.0"
     private let lock = NSLock()
     private var transcripts: [String: String] = [:]
+    private var generation: Int
+
+    /// The generation the fixture's transcripts are stamped with. A fixture that needs an earlier-generation note seeds it
+    /// at 1 and then moves the recognizer on with `advanceToCurrentGeneration()`.
+    var transcriptGeneration: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    init(transcriptGeneration: Int = 2) {
+        generation = transcriptGeneration
+    }
+
+    func advanceToCurrentGeneration() {
+        lock.lock()
+        generation = 2
+        lock.unlock()
+    }
 
     func script(captureID: String, transcript: String) {
         lock.lock()

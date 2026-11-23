@@ -64,12 +64,53 @@ public final class PlaybackSession: @unchecked Sendable {
     private var player: PlaybackPlayer?
     private var ended: PlaybackEndReason?
     private let release: () -> Void
+    private let audioSession: PlaybackAudioSessionControlling
+    private let isRecordingActive: () -> Bool
+    private let notificationCenter: NotificationCenter
+    private var interruptionObserver: NSObjectProtocol?
+    private var interruptionHandler: (() -> Void)?
+    /// Whether this session holds the audio session active. Cleared by an interruption, which deactivates it.
+    private var audioSessionActive = false
 
-    init(itemID: String, player: PlaybackPlayer, release: @escaping () -> Void) {
+    init(
+        itemID: String, player: PlaybackPlayer, audioSession: PlaybackAudioSessionControlling = NoPlaybackAudioSession(),
+        isRecordingActive: @escaping () -> Bool = { false }, notificationCenter: NotificationCenter = .default,
+        release: @escaping () -> Void
+    ) {
         self.itemID = itemID
         self.player = player
+        self.audioSession = audioSession
+        self.isRecordingActive = isRecordingActive
+        self.notificationCenter = notificationCenter
         self.release = release
         (player as? FinishNotifyingPlayer)?.setFinishHandler { [weak self] in self?.end(.finished) }
+        interruptionObserver = notificationCenter.addObserver(
+            forName: .playbackAudioInterruption, object: nil, queue: nil
+        ) { [weak self] notification in self?.interruptionNotified(notification) }
+    }
+
+    /// Called once when an interruption begins while the session is open. The player has been paused by then.
+    public func setInterruptionHandler(_ handler: @escaping () -> Void) {
+        lock.lock()
+        interruptionHandler = handler
+        lock.unlock()
+    }
+
+    private func interruptionNotified(_ notification: Notification) {
+        let rawType = notification.userInfo?["AVAudioSessionInterruptionTypeKey"] as? UInt
+        // `AVAudioSession.InterruptionType.began` is 1.
+        guard rawType == 1 else { return }
+        lock.lock()
+        guard let current = player else {
+            lock.unlock()
+            return
+        }
+        // The system deactivated the session; the next play configures and activates it again.
+        audioSessionActive = false
+        current.pause()
+        let handler = interruptionHandler
+        lock.unlock()
+        handler?()
     }
 
     public var isOpen: Bool { endReason == nil }
@@ -80,12 +121,24 @@ public final class PlaybackSession: @unchecked Sendable {
         return ended
     }
 
-    /// Starts or resumes playback. Returns false when the session has ended or the output refused to start.
+    /// Starts or resumes playback. Returns false when the session has ended, a recording is in progress, the audio
+    /// session could not be configured or activated (the player is then never started), or the output refused to start.
     @discardableResult
     public func play() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return player?.play() ?? false
+        guard let current = player else { return false }
+        guard !isRecordingActive() else { return false }
+        if !audioSessionActive {
+            do {
+                try audioSession.setPlaybackCategory()
+                try audioSession.activate()
+            } catch {
+                return false
+            }
+            audioSessionActive = true
+        }
+        return current.play()
     }
 
     public func pause() {
@@ -107,8 +160,14 @@ public final class PlaybackSession: @unchecked Sendable {
         ended = reason
         let ending = player
         player = nil
+        let wasActive = audioSessionActive
+        audioSessionActive = false
+        let observer = interruptionObserver
+        interruptionObserver = nil
         lock.unlock()
+        if let observer { notificationCenter.removeObserver(observer) }
         ending?.stop()
+        if wasActive { audioSession.deactivate() }
         release()
     }
 }

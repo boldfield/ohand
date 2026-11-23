@@ -147,7 +147,13 @@ def check_workflow_xcode_pin(project, workflow_path=IOS_WORKFLOW):
     if not project_pin:
         errors.append("project.yml must set options.xcodeVersion")
     workflow = yaml.safe_load(workflow_path.read_text())
+    major = project_pin.split(".")[0]
+    expected_label = f"xcode-{major}"
     for job_name, job in workflow.get("jobs", {}).items():
+        if project_pin and str(job.get("runs-on", "")) != expected_label:
+            errors.append(
+                f"ios.yml job {job_name} runs on {str(job.get('runs-on', ''))!r} but Xcode {project_pin!r} needs the {expected_label!r} runner image"
+            )
         pins = [
             str(step.get("with", {}).get("xcode-version", ""))
             for step in job.get("steps", [])
@@ -241,6 +247,130 @@ def check_artifact_budget(workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
                     errors.append(
                         f"{where} is not preceded by a failure() continue-on-error step running {EXPORT_SCRIPT_NAME}"
                     )
+    return errors
+
+
+# CI07: the former single `simulator` job is three parallel jobs. Each step of the old job is in exactly one of them, except
+# the shared setup, teardown and upload steps, which every one of the three has. The lists are kept here so a step cannot be
+# dropped or run twice by an edit to one job.
+SPLIT_SIMULATOR_JOBS = ("simulator", "notification-probe", "capture-probe")
+SHARED_SIMULATOR_STEPS = (
+    "actions/checkout@v4",
+    "Stop unneeded host work",
+    "Select pinned Xcode",
+    "Install XcodeGen launcher",
+    "Record toolchain versions",
+    "Select simulator",
+    "Generate Xcode project",
+    "Stop the build service before the first boot",
+    "Delete simulator template",
+    "Upload evidence",
+    "Upload evidence (export failure diagnostics)",
+    "Upload evidence (failure diagnostics, failure only)",
+)
+PARTITIONED_SIMULATOR_STEPS = (
+    "Build OhAndTests (no simulator booted yet)",
+    "Build NotificationProbe UI tests (no simulator booted yet)",
+    "Build CaptureProbe UI tests (no simulator booted yet)",
+    "Build BridgeProbe",
+    "Build CredentialProbe",
+    "Build OhAndApp",
+    "Build CaptureProbe",
+    "Build AudioProbe",
+    "Build TranscriptionProbe",
+    "Settle simulator (single cold boot) and keep an empty template",
+    "Run OhAndTests on simulator",
+    "Run credential cross-process relaunch check",
+    "Run NotificationProbe UI tests (allow and deny permission decisions)",
+    "Run CredentialProbe Keychain self-test",
+    "Launch smoke test",
+    "Launch CredentialProbe smoke test",
+    "Launch OhAndApp smoke test",
+    "Verify OhAndApp embedded frameworks",
+    "Launch TranscriptionProbe smoke test",
+    "CaptureProbe handoff UI test and ingress smoke test",
+)
+SPLIT_JOB_TIMEOUT_CEILING_MINUTES = 60
+# The failure-diagnostics allowance the single simulator job had; the three jobs that replaced it share it (CAP_BYTES each).
+SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES = 24000000
+
+
+def check_simulator_job_split(workflow_path=IOS_WORKFLOW):
+    """Every step of the old simulator job runs in exactly one of the three jobs (shared steps in all three)."""
+    jobs = yaml.safe_load(workflow_path.read_text()).get("jobs", {})
+    errors = []
+    names = {}
+    for job_name in SPLIT_SIMULATOR_JOBS:
+        if job_name not in jobs:
+            errors.append(f"ios.yml has no {job_name} job")
+            continue
+        steps = jobs[job_name].get("steps", [])
+        names[job_name] = [step.get("name", step.get("uses")) for step in steps]
+        timeout = jobs[job_name].get("timeout-minutes")
+        if not isinstance(timeout, int) or timeout > SPLIT_JOB_TIMEOUT_CEILING_MINUTES:
+            errors.append(f"ios.yml job {job_name} timeout-minutes must be at most {SPLIT_JOB_TIMEOUT_CEILING_MINUTES}, found {timeout!r}")
+    cap_total = 0
+    for job_name in names:
+        for step in jobs[job_name].get("steps", []):
+            if "export-failure-diagnostics.sh" in str(step.get("run", "")):
+                cap_total += int(step.get("env", {}).get("CAP_BYTES", 104857600))
+    if cap_total > SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES:
+        errors.append(f"ios.yml failure-diagnostics CAP_BYTES of {SPLIT_SIMULATOR_JOBS} total {cap_total}, above the {SPLIT_FAILURE_DIAGNOSTICS_CAP_BYTES} the single simulator job had")
+    for step_name in PARTITIONED_SIMULATOR_STEPS:
+        holders = [job_name for job_name, job_steps in names.items() if job_steps.count(step_name) > 0]
+        copies = sum(job_steps.count(step_name) for job_steps in names.values())
+        if len(names) == len(SPLIT_SIMULATOR_JOBS) and (len(holders) != 1 or copies != 1):
+            errors.append(f"ios.yml step {step_name!r} must run in exactly one of {SPLIT_SIMULATOR_JOBS}, found in {holders} ({copies} times)")
+    for step_name in SHARED_SIMULATOR_STEPS:
+        for job_name, job_steps in names.items():
+            if job_steps.count(step_name) != 1:
+                errors.append(f"ios.yml job {job_name} must have step {step_name!r} exactly once")
+    return errors
+
+
+# CI08: the closed list of paths whose change alone does not start ios.yml. Only a later task adds to it.
+IOS_WORKFLOW_IGNORED_PATHS = ["docs/**", "*.md"]
+CORE_WORKFLOW = IOS_ROOT.parent / ".github" / "workflows" / "core.yml"
+
+
+def check_documents_only_skip(ios_workflow_path=IOS_WORKFLOW, core_workflow_path=CORE_WORKFLOW):
+    """ios.yml ignores exactly docs/** and root *.md (and has no positive path filter); core.yml has no path filter."""
+    errors = []
+    # PyYAML reads the bare key `on` as the boolean True.
+    ios_trigger = yaml.safe_load(ios_workflow_path.read_text()).get(True, {}).get("pull_request", {})
+    if ios_trigger.get("paths-ignore") != IOS_WORKFLOW_IGNORED_PATHS:
+        errors.append(f"ios.yml pull_request paths-ignore must be exactly {IOS_WORKFLOW_IGNORED_PATHS}, found {ios_trigger.get('paths-ignore')!r}")
+    if "paths" in ios_trigger:
+        errors.append("ios.yml pull_request must not have a paths filter (it cannot be combined with paths-ignore)")
+    core_triggers = yaml.safe_load(core_workflow_path.read_text()).get(True, {})
+    for event_name, event in (core_triggers.items() if isinstance(core_triggers, dict) else []):
+        if isinstance(event, dict) and any(key in event for key in ("paths", "paths-ignore")):
+            errors.append(f"core.yml {event_name} must not have a path filter")
+    return errors
+
+
+XCODEBUILD_TEST_INVOCATION = re.compile(r"\bxcodebuild\s+test(-without-building)?\b")
+
+
+def simulator_test_files(root=IOS_ROOT):
+    return [IOS_WORKFLOW] + sorted((root / "scripts").glob("*-simulator.sh"))
+
+
+def check_simulator_test_retry(paths=None):
+    """Every xcodebuild test run in ios.yml and the *-simulator.sh scripts goes through retry-simulator-step.sh (CI05)."""
+    errors = []
+    for path in simulator_test_files() if paths is None else paths:
+        logical_line = ""
+        for number, line in enumerate(Path(path).read_text().splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            logical_line += line.rstrip("\\").strip() + " "
+            if line.rstrip().endswith("\\"):
+                continue
+            invocation = XCODEBUILD_TEST_INVOCATION.search(logical_line)
+            if invocation and "retry-simulator-step.sh" not in logical_line[: invocation.start()]:
+                errors.append(f"{Path(path).name}:{number} runs xcodebuild test outside retry-simulator-step.sh")
+            logical_line = ""
     return errors
 
 
@@ -421,7 +551,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_documents_only_skip() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":

@@ -147,6 +147,7 @@ impl Fixture {
                     confidence: Some(0.91),
                     detected_language: Some("en-US".to_string()),
                     recognizer: "on-device-recognizer/1".to_string(),
+                    transcript_generation: 1,
                     audio_sha256: AUDIO_SHA256.to_string(),
                 }),
                 interpretation: None,

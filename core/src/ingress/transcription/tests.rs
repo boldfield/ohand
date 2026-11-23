@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod replacement;
+
 const CAPTURE_ID: &str = "3f9c1e52-0000-4000-8000-0000000000c5";
 const ROUTE_ID: &str = "route-personal";
 const AUDIO_REFERENCE: &str = "staging/2026-10-08/clip-5.m4a";
@@ -216,6 +218,7 @@ fn recognized(text: &str) -> RecognizerResult {
         confidence: Some(0.91),
         detected_language: Some("en-US".to_string()),
         recognizer: "on-device-recognizer/1".to_string(),
+        transcript_generation: 1,
         audio_sha256: AUDIO_SHA256.to_string(),
     })
 }
@@ -1328,6 +1331,7 @@ fn malformed_outcomes_are_rejected_before_any_write() {
         confidence: Some(0.5),
         detected_language: Some("en-US".to_string()),
         recognizer: "on-device-recognizer/1".to_string(),
+        transcript_generation: 1,
         audio_sha256: AUDIO_SHA256.to_string(),
     };
     let malformed: Vec<(TranscriptionOutcome, TranscriptionRejection)> = vec![
@@ -1349,6 +1353,7 @@ fn malformed_outcomes_are_rejected_before_any_write() {
             outcome(
                 &job,
                 RecognizerResult::Transcript(RecognizedTranscript {
+                    transcript_generation: 1,
                     audio_sha256: "not-a-digest".to_string(),
                     ..transcript()
                 }),

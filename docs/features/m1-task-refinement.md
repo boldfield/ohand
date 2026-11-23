@@ -10,6 +10,8 @@ Addendum 2026-10-23, later: T10 is split the same way into T10a (build identity,
 
 Addendum 2026-10-24, later: F50 is retired after its diagnosis found no product race; the teardown leak check it reproduced goes to F47 (see F47 amendment 2). F47 and F45 no longer wait for F50.
 
+Addendum 2026-11-10: F68 moves the native toolchain to Xcode 27.2 on GitHub's `xcode-27` image. The trial phone is now an iPhone Duo, and a build against the iOS 26 SDK runs letterboxed on its inner display; Apple's path is to recompile with Xcode 27.1 or later, which hosted CI can do since the `xcode-27` image went GA on 2026-10-15. U10b, T05b and T06 gain F68 as an effective dependency: the maintainer's device evidence is collected on the first candidate built after it lands, and T10b's upgrade procedure is repeated on the new phone between two such candidates (the old phone was erased on 2026-11-09). See the F68 section.
+
 Addendum 2026-11-06: T05 is split the same way as V08, P08, U10 and T10, before it is claimed, into T05a (the device-matrix procedure on the production app, the record format and its Linux checker) and T05b (the maintainer's record from the trial iPhone). The original task `10d059a0` is retired unclaimed: its substance is device evidence only the maintainer can produce, and every earlier task of that shape cost rejected rounds before it was split. T06 now depends on T05b. See the T05a and T05b sections.
 
 Addendum 2026-10-24: F49 (hosted-runner simulator starvation) and F50 (two product-side test failures) are added after F47's evidence runs showed failures outside its scope. F47 now waits for F49 and F50, and its dependency on F42 is removed from the JSON graph as the 2026-10-23 amendment intended. F45 also waits for F50, because both may edit `ios/Services/Assembly/CompositionRoot.swift`. U10a also waits for F49, because both edit `.github/workflows/ios.yml`.
@@ -4060,6 +4062,16 @@ Acceptance:
 
 Contributes to original T10 criteria: 1 (device), 3, 4.
 
+#### T10b amendment 1
+
+Filed 2026-11-23 by the coordinator, unblocking the task. The records this task cites are now:
+- candidate record `docs/releases/m1-trial/candidate-439-4ed14c26.json` (build 439, revision 4ed14c26);
+- device upgrade record `docs/validation/evidence/upgrade/device-2026-11-23-439.json` (416 to 439 on the iPhone Duo, outcome passed).
+
+Candidate 398 and `device-2026-11-07-398.json` are history: that phone was replaced and erased on 2026-11-09, and a rebuilt binary repeats the device checks, so 439 is the candidate U10b uses for the accessibility pass, T05b for the functional matrix and T06 distributes. The 398 record stays in the repository and may be mentioned as the earlier upgrade on the earlier phone; it is not the cited evidence.
+
+The pull request (PR #408 may be reused or replaced) cites the two records above by path and states the device record's limits as the record states them, without softening or adding: the reminder's notification was pending in Settings -> Status at collection and had not yet been due; the search for words from a deleted capture was not performed; the counts come from database copies taken with the maintainer's approval and deleted, not from exports. Earlier review findings on PR #408 about which task uses the candidate for what, and about the rebuild rule, still apply with 439 in place of 398. This is a documents-only change, so `ios.yml` does not start for it (CI08) and no macOS run is needed.
+
 ### F48
 
 Show reminders that have no time, on Home and in Status, so they are not silently lost
@@ -4904,3 +4916,581 @@ Acceptance:
 Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. T05a does not depend on F67; T05b and T08 record its export when the candidate contains it.
+
+### F68
+
+Move the native toolchain to Xcode 27.2 on GitHub's `xcode-27` runner image
+
+Found by the coordinator on 2026-11-10 when the trial phone changed. The maintainer's phone is now an iPhone Duo (`iPhone19,4`, iOS 27.2.1). Candidate 400 (`d4237708`), built with the pinned Xcode 26.6 and the iOS 26 SDK, runs on it only in a compatibility box on the inner display: iOS presents every app built against an SDK older than iOS 27 letterboxed there, and Apple's guidance is to recompile with Xcode 27.1 or later, which adds development support for the device. There is no Info.plist opt-in. A two-week trial in a compatibility box on the phone's main display is not the trial M1 is meant to run, and the Duo layout work in the design system (M2) cannot begin on an SDK that does not know the device.
+
+The pin could not move before now because the hosted `macos-26` image carries Xcode 26.6 at most. GitHub now ships one image per Xcode major: the `xcode-27` label (generally available since 2026-10-15; `xcode-27-xlarge` is the paid tier and is not used) runs macOS 27.0.1 on arm64 with Xcode 27.2, 27.1 (default) and 27.0 installed, the iOS 27.0 simulator runtime with the ordinary iPhone and iPad device types, and the iOS 27.1 runtime with the iPhone Duo only. `select_simulator.py` picks the newest runtime that has a device of the requested family, so on that image the iPhone jobs would select the Duo on iOS 27.1, which is not a compact-width phone, while the iPad job would correctly fall back to iOS 27.0.
+
+Scope:
+1. `ios/project.yml`: `options.xcodeVersion: "27.2"`. `.github/workflows/ios.yml`: every job `runs-on: xcode-27`, every `xcode-version: '27.2'`; the comments that describe the runner (arm64, 3 cores, 7 GB, Xcode 26.6, `macos-26` measured against `macos-26-intel`) are rewritten for the new image, with any re-measured boot timing noted. `ios/scripts/check_project_config.py` keeps enforcing that the four `xcode-version` pins equal `options.xcodeVersion`, and also fails when a job of `ios.yml` runs on a label other than `xcode-27` (the label is derived from the pinned major: `xcode-<major>`), with unit tests for both.
+2. `ios/scripts/select_simulator.py`: the `iPhone` family means a compact-width phone; device names containing `Duo` are excluded unless `--family iPhoneDuo` (or an equivalent explicit option) asks for one, so the compact walkthrough and the simulator job keep running on an ordinary iPhone from the iOS 27.0 runtime. Unit tests cover: Duo excluded from `iPhone`, the iPad job falling back to the newest runtime that has an iPad, and the explicit Duo selection.
+3. Whatever the iOS 27 SDK and the Xcode 27.2 toolchain require to compile and pass on the existing targets: deprecations that are errors under the project's warning settings, the iOS 27 scene-lifecycle requirement at launch (the SwiftUI `App` entry point is expected to satisfy it; verify, do not assume), the Rust `OhAndCoreBridge` framework link under the Xcode 27 linker, and the walkthrough and accessibility-audit baselines where the SDK changes layout. Behaviour changes are limited to what the SDK forces; each is named in the PR.
+4. `AGENTS.md` "Required checks for macOS workers": the runner, Xcode and SDK sentences describe the `xcode-27` image and Xcode 27.2; the artifact budget and every other rule are unchanged. `docs/features/ci-artifact-budget.md` is updated only if a number changes.
+
+Not owned: the Duo two-pane layout and any other use of the inner display (M2, per the design system); `core/`; app behaviour beyond what compiling on the new SDK forces; the candidate build itself (the coordinator rebuilds the candidate after this lands, and T10b's upgrade procedure is repeated on the new phone as its own section says).
+
+Acceptance:
+1. `make check` passes on Linux, including `ios-check` with the updated checker and selector tests.
+2. An `ios.yml` run on the `xcode-27` image at the exact submitted head concludes `success`: `toolchain.txt` names Xcode 27.2 and an iOS 27 SDK; `simulator.txt` for the simulator job and the compact walkthrough names an iPhone that is not the Duo; the regular walkthrough names an iPad; `OhAndTests.log` contains `** TEST EXECUTE SUCCEEDED **`; `smoke.log` ends with `Smoke test passed`; the run stays within the artifact budget.
+3. `check_project_config.py` fails a workflow that pins Xcode 27.2 but runs on `macos-26`, and one whose pins disagree, and both failures are unit-tested.
+4. The PR names every source change the SDK forced and why; no acceptance criterion of any landed task is weakened by it.
+5. The maintainer's local build follows: `xcode-select` on Xcode 27.2 (installed as `/Applications/Xcode-27.2.app`, on macOS 26.6 or later), `install-ohand.sh --candidate` produces the next candidate, and the candidate launches full-screen on the Duo's inner display. That check is the coordinator's and is not claimed by the worker.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run on `xcode-27`.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: nothing on the device side of M1 (T10b's repeat on the new phone, U10b, T05b, T06) can use a candidate built before this lands. U10b, T05b and T06 gain F68 as an effective dependency; the maintainer's evidence for them is collected on the first candidate built after it.
+
+**Amendment 1 (2026-11-10, coordinator).** The first exact-head run on `xcode-27` (42859306971, head `d312ffba`) passed the walkthroughs, the Tauri probe and `OhAndTests`, and failed the accessibility job, which then hit its 75-minute limit. The worker blocked for a ruling on the glass ledger. The evidence is `ios-accessibility` of that run (`accessibility/audit-default.log`, `audit-xxxl.log`). Each finding is ruled below. F68 owns `ios/UITests/Accessibility/`, `docs/validation/accessibility.md` and the accessibility job of `ios.yml` for these changes and no others. The standing rule is unchanged: an element is excused only where it is obstructed, an excuse must be settled by an unobstructed audit or a screenshot measurement at 4.5:1 or above, a contrast issue on an unobstructed element fails, and no audit type is dropped.
+
+1. *A full-screen `Toolbar` node obstructs everything drawn on glass.* The iOS 27 snapshot contains a labelled node `Toolbar` with the frame of the whole screen (0, 0, 402, 874) that is not an ancestor of the header or composer content, so `GlassContrastLedger.overlapping` reports it for every `drawnOnGlass` element and none can be settled. Rule: a node whose frame contains the whole screen frame is a container and is not an obstruction, whatever its label or type; every smaller node, including that container's labelled descendants, still obstructs. This cannot hide a real failure, because text drawn on glass is settled at an unobstructed stop only by an audit with no issue or by measuring the screenshot's pixels. Decide it in `overlapping` (pass the screen frame), not by matching the label `Toolbar`. Log the node's element type and identifier once per run so the record says what it is. `GlassContrastLedgerTests` gains: a screen-sized node does not obstruct; a labelled child of it that overlaps does; a node one point smaller than the screen does.
+2. *The audit now reports the header pill, not the mark.* `HomeHeader` exposes the wordmark pill as one element labelled `Oh And` (`.accessibilityElement(children: .ignore)`), and iOS 27 reports contrast on that element (147, 70, 108, 44) while the snapshot still lists the `&` glyph (163, 78, 12, 29) as a node that is neither its ancestor nor its descendant. They are one control. The glass-list entry becomes the header wordmark: a node labelled `Oh And` or `&`, with an empty identifier, in the header above the clear band, `drawnOnGlass`, under one ledger key, and the two nodes do not obstruct each other. It is settled only at a stop where nothing else overlaps the pill, by two measurements that must both reach 4.5:1: the `&` glyph's own frame (the mark is indigo and is the weaker of the two), and the pill's frame with the glyph's frame passed as `excluded` (the ink of the words). A header wordmark below 4.5:1 on either measurement is a real finding. The app's accessibility structure for the pill is not changed to make the audit quieter.
+3. *`Discard` and the status line above the composer are flagged.* `home.composer.discard` ("Discard", on the composer glass) and `capture-entry.message` (the outcome line drawn over the list above the composer) are reported once each on iOS 27. Both join the glass list as `drawnOnGlass`, by identifier, and are settled the same way: a stop where nothing overlaps, measured from the screenshot at 4.5:1 or above. If either measures below 4.5:1, that is a real defect in a design token; do not change the token in this task. Report the measured ratio and block, and the coordinator files the design fix.
+4. *The last Home card is never audited clear of the composer at the default size.* `Synthetic typed action to sweep the porch` stays at y 728 to 771 with the clear band ending at 715 at `home-populated-end` and at every settle stop, so it ends `UNVERIFIED`; at the largest size it clears. This is not ruled as a ledger matter. Establish from the default-size screenshots which it is: if the list scrolled to its end on iOS 27 still leaves the last card under the composer glass, the SDK changed the scroll content inset and the app is fixed (scope item 3; name it in the PR) so the last card can be read clear of the composer, as it could on iOS 26; if the list was not at its end, the test's scroll is fixed. The excuse is not widened and the clear band is not moved to make the card count as clear.
+5. *`Audit failed to complete in time` (code -56) at `capture-text-entry`, both sizes, on the second pass.* An audit that throws still fails. When a pass throws -56, the stop is audited again one audit type at a time (each type of `auditTypes` in its own `performAccessibilityAudit(for:)` call); the stop counts as audited only if every type completes, and the issues are the union. No type is omitted, and a type that still throws fails the stop. Log the first-pass issues before a retry (the log currently prints only their count), so the record shows what the retry was for.
+6. *The 75-minute limit.* Sixteen retries and seven settle stops made that run long; do not raise `timeout-minutes` to get it through. Once the stops pass, if a green accessibility job measures more than 60 minutes on `xcode-27`, the limit may be set to the measured duration plus a third, with the measurement in the PR. Upload the default-size screenshots as well as the largest-size ones when the job fails, within the failure budget (the failed run carried only `xxxl-*`), because finding 4 could not be read from the artifact.
+7. *The notification probe.* The change in `693e265e` accepts either `none` or `UNErrorDomain#2003` from `add` while denied, on any runtime. Make it exact: `UNErrorDomain#2003` on iOS 27 and later, `none` before. The probe records what the platform does, and "either" records nothing. Production already maps `notificationsNotAllowed` (`ios/Services/Notifications/SystemNotificationCenter.swift`); name the runtime change in the PR as SDK-forced with no product change.
+
+`docs/validation/accessibility.md` is updated to match: the glass-list table (the wordmark row, `Discard`, the status line), the container rule, the per-type fallback. If a finding does not behave as ruled here on the next run, block with the log lines instead of adding a further rule.
+
+**Amendment 2 (2026-11-10, coordinator).** The coordinator ran the branch's own `accessibility-simulator.sh` at head `0b4b6082` on a local iPhone 17 simulator with Xcode 27.2 (iOS 27.2 runtime; the hosted image runs the ordinary iPhone on 27.0). The container rule, the `Discard` and status-line entries and the wordmark measurement work: every test passes at both sizes except `testHomePopulated` and `testCaptureSilentTextEntry`, and error -56 did not occur. The causes of those two are below; none is an app defect. Amendment 1 item 4 is closed by item 1 here.
+
+1. *The iOS 27 audit returns the list to its top before it evaluates.* At `home-populated-end` the test leaves the last card clear of the composer (`SCROLL-END`: last card at y 631 to 707, clear band to 715; the screenshot agrees), the audit then scrolls the content back by 81 points (2236 at the largest size) and reports the card's text at y 751, under the composer glass. Every settle stop repeats this, so content that lies under the composer when the list is at its top can never be audited clear, and it ends `UNVERIFIED`. The app's layout is right and is not changed. Rule: an element scrolled under glass is also settled by measurement, on these conditions, all logged: at that stop the snapshot taken before the audit has its frame wholly inside the clear band; the audit moved the content at that stop (`MOVED`); the frame the audit reports for its contrast issue lies outside the clear band; and its contrast measured from the screenshot taken before the audit (`ScreenshotContrast`, the element's own frame) is 4.5:1 or above. Below 4.5:1 is a real finding. An issue the audit reports with a frame inside the clear band is still real, with no measurement. `GlassContrastLedgerTests` covers each condition failing.
+2. *The clear band ignores the wordmark pill, and the header test for the wordmark uses it.* At the largest size the pill is taller than the header buttons (y 70 to 144; the band starts at 141), so `frame.maxY > band.lowerBound` drops the wordmark from the glass list and its issue is reported as real. The pill is glass like the buttons: the top of the clear band is 12 points below the lowest of the header's glass elements, the wordmark pill included. The wordmark is recognised as the header's by its labels and by starting above that band, not by ending above it.
+3. *With `Done` shown, the snapshot gives the `&` node the pill's frame* (132, 70, 108, 44), so the measurement of the pill with the glyph excluded has no pixels and returns "could not be measured". Where the glyph's frame is not strictly inside the pill's, the pill is measured whole at that stop (4.5:1 or above), and the glyph's own measurement must come from a stop in the same run where the snapshot separates the two (Home, for example), carried the way the largest-size run already carries default-size evidence. A run with no separated glyph measurement fails.
+4. *`home.done` ("Done") is flagged.* It is text on the header glass and joins the glass list as `drawnOnGlass` by identifier, settled by measurement, on the terms of Amendment 1 item 3.
+5. *The keyboard's slide-to-type introduction is on screen at `capture-text-entry`.* The `defaults write` in `accessibility-simulator.sh` does not suppress it on iOS 27.2. The test dismisses it (the `Continue` handling it already has elsewhere) and asserts it is gone before the audit; a screen audited with the system's introduction over the keyboard is not the screen the criterion names. This is the likely cause of error -56 on the hosted image, which is not confirmed.
+
+The walkthrough failures of runs 42879279330 (regular width: the simulator did not become responsive within 480 s) and 42891673229 (compact width: "search for garage found no synthetic capture") each passed in the other two runs. Report them in the PR with their log lines; do not change the walkthrough or its timeouts for them in this task.
+
+**Amendment 3 (2026-11-10, coordinator).** This answers finding (A) of the worker's block note on run 42891673229 and replaces the conditions of Amendment 2 item 1; Amendment 2 items 2 to 5 answer its findings (B) and (C) and stand. Finding (D) is accepted: the per-type fallback covers the audit types the iOS 27 SDK has.
+
+On the hosted runner the audit's scroll is still in flight while it evaluates. At `home-populated-end` the first pass moved the list 55 of the 81 points back to its top and flagged the same caption at two frames (y 240 and y 328); the second pass moved the remaining 25 and flagged six card texts at their top-of-list positions, where the `home-populated` stop of the same run audited the same texts with no issue. A contrast verdict from a pass in which the audit moved the content is therefore not evidence about that content, whichever frame it reports. The local run showed the same first-pass flags and a clean second pass only because that host is fast.
+
+Rule, for glass-list elements placed `scrollsUnderGlass` only: when the audit moved the content during a pass (`MOVED`), a contrast issue it raises on such an element is decided from the snapshot and the screenshot taken before that pass, not from the audit's frame. If the element's frame was wholly inside the clear band there, its contrast is measured from that screenshot over its own frame: 4.5:1 or above settles it (`MEASURED`), below is a real finding. If it was not wholly inside the clear band there, it is owed, as now. When the audit did not move the content, the existing rule holds unchanged: an issue on an unobstructed element is real. Every element so measured is logged with the stop, the frame, the distance the audit moved and the ratio. Nothing outside the glass list is decided this way, no audit type is dropped, and issues of every other type are unaffected. `GlassContrastLedgerTests` covers: moved and clear and 4.5:1 or above settles; moved and clear and below fails; moved and not clear is owed; not moved and clear fails.
+
+**Amendment 4 (2026-11-10, coordinator).** The exact-head run on `59eee032` (42918721067) passed both walkthroughs, the Tauri probe, `OhAndTests` and every audit at the largest text size; Amendment 3 held on the hosted runner. One audit failed at the default size: `capture-text-entry` raised a contrast issue with no element on both passes (`element: ? '?' frame: ?`), beside the issues it named on `Done` and on the `&` mark.
+
+The issue is the wordmark's words. Evidence, on a local iPhone 17 simulator with iOS 27.2:
+
+- A simulator that has just been erased (the state every hosted run starts from) reproduces the failure every time. A simulator that has shown a keyboard before does not: there the audit names three elements at the same stop, `Done`, `&` and `Oh And`, and all three are measured.
+- The screenshots of the failing and the passing state are identical pixel for pixel outside the clock and the text cursor.
+- `XCUIAccessibilityAuditIssue` holds no element reference for the issue, so the framework cannot say what it is.
+- With the words removed from a throwaway build of the app (not committed), the same fresh-simulator run raises no issue without an element.
+
+Relaunching the app after the keyboard's introduction is dismissed does not change it, and neither does waiting.
+
+Rule: in one audit pass, the first contrast issue with no element is taken as the wordmark's words when the same pass raises a contrast issue naming the `&` mark and none naming `Oh And`. It is then decided as the wordmark is (`drawnOnGlass`): unobstructed and measured at 4.5:1 or above settles it, below is a real finding, obstructed is owed. The log line says the audit named no element. A second contrast issue with no element in the same pass, one in a pass that names the words, and one in a pass that does not name the mark are real findings and fail, as does an issue of any other type with no element. `GlassContrastLedgerTests` covers the four cases.
+
+What this gives up: a different contrast issue that the audit raised with no element, at a stop where it also failed to name the words, would be taken for the words. The wordmark's own contrast is still proven by measurement at every such stop.
+
+**F68 closed (2026-11-11, coordinator).** PR #409 merged as `95c61dc3`. Acceptance criterion 5 is met on the maintainer's report: with `xcode-select` on Xcode 27.2, `install-ohand.sh --candidate` produced candidate 407 (`docs/releases/m1-trial/candidate-407-95c61dc3.json`), and it fills the inner display of the iPhone Duo instead of running in a compatibility box. Candidate 407 is the first of the two candidates for the T10b repeat on the new phone, and the first candidate on which U10b, T05b and T06 evidence can be collected. A layout made for the Duo's inner display stays in M2, as the "Not owned" paragraph says.
+
+### F69
+
+Keep every recognized segment of a voice note, not only the last one
+
+Found by the maintainer on 2026-11-16 (long voice notes were sorted from their last part only) and reproduced by the coordinator on 2026-11-17 on the trial phone (iPhone Duo, iOS 27.2.1) with synthetic `say` fixtures (16 kHz mono 16-bit WAV) in an instrumented `TranscriptionProbe` that logged every recognizer callback. The recorder is not involved: the fixtures never passed through it.
+
+`SpeechFrameworkRecognizer.recognize` (`ios/Services/Transcription/SpeechFrameworkRecognizer.swift:49-57`) issues an on-device `SFSpeechURLRecognitionRequest` with `shouldReportPartialResults = false` and takes `bestTranscription.formattedString` from the one result whose `isFinal` is true. On iOS 27.2.1 the on-device recognizer delivers one result per segment, each holding only its own segment, and only the last has `isFinal == true`. Observed with the shipped settings:
+
+| Fixture | Callback | `isFinal` | `speechRecognitionMetadata` | Audio covered by its segments | Words |
+| --- | --- | --- | --- | --- | --- |
+| 21 s, one 3 s pause at 8.6 s | 1 | false | present | 0.00–8.55 s | 30 |
+| | 2 | true | present | 11.61–20.88 s | 32 |
+| 95 s, continuous speech | 1 | false | present | 0.00–60.06 s | 206 |
+| | 2 | true | present | 60.27–95.01 s | 112 |
+
+So a pause of about 3 s ends a segment, and so does about a minute of continuous speech; the app keeps the last segment and discards the rest. Joining the two results of the 95 s fixture in callback order gave all twenty sentences (318 words) with nothing lost or repeated at the boundary. A second pass with `shouldReportPartialResults = true` delivered 349 callbacks, of which exactly the same two carried `speechRecognitionMetadata`; every other callback was a growing partial of the segment in progress. Partial results are therefore not needed: with the shipped setting every callback is a finished segment. `TranscriptionProbe`'s engine (`ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift:79-87`) has the same handling, which is why P04 and P09, run with a one-sentence fixture, did not see this.
+
+Scope:
+1. A framework-free accumulator in `ios/Services/Transcription/` that is fed one value per recognizer result (its text, its segments' confidences, the audio start and end taken from its first and last `SFTranscriptionSegment`, and whether it is final) and yields the transcript: the texts of the accepted results in audio order, joined by a single space, each trimmed. A result whose audio start lies before the end of an already accepted result restates it and replaces every accepted result it overlaps, so a recognizer that reports cumulatively (as the server recognizer does, and as another OS build may) yields its last cumulative text once, not a duplicated transcript. A result with no segments or only whitespace contributes nothing.
+2. `SpeechFrameworkRecognizer.recognize` feeds every result to the accumulator and finishes on the final result with the accumulated text. Confidence is the existing mean-of-scored-segments rule applied over the segments of all accepted results. The request keeps `requiresOnDeviceRecognition = true` and `shouldReportPartialResults = false`.
+3. Errors: an error that arrives after segments were accepted still ends the attempt as `outcome(for:)` says today, so a transcript is never built from a recognition that failed part-way, with one exception: `kAFAssistantErrorDomain` 1110 (no speech detected) after at least one accepted segment returns the accumulated transcript, since it reports a silent tail, not a failure. This exception is inferred from the error's meaning and was not observed on the device; the PR says so.
+4. `TranscriptionProbe`'s engine applies the same accumulation (sharing the accumulator source through `ios/project.yml` or keeping a copy with the same tests; the PR says which and why), and the probe's status line gains the number of results received, so a device run shows the segmentation.
+5. `docs/validation/transcription-probe.md`: the request paragraph says results arrive per segment and are accumulated, and the device steps gain a long-audio step (a fixture of at least 90 s and one with a pause of at least 3 s; record the result count and that the first and last sentences are both present).
+
+Owned paths: `ios/Services/Transcription/SpeechFrameworkRecognizer.swift`, a new accumulator file beside it, `ios/Tests/Transcription/`, `ios/TranscriptionProbe/Shared/`, `ios/TranscriptionProbe/Tests/`, `ios/TranscriptionProbe/Sources/AppDelegate.swift` (the status line only), `ios/project.yml` (only if the accumulator source is shared), `docs/validation/transcription-probe.md`.
+
+Not owned: `ios/Capture/` (recording is correct), `core/` (the transcript attachment contract is unchanged: one text and one optional confidence), `TranscriptionJobHandler` beyond what compiling requires, a move to `SpeechAnalyzer`/`SpeechTranscriber` (the long-form API; a later decision, not during the trial), and re-transcribing voice notes already stored with a truncated transcript (no such path exists; it is a separate decision for the maintainer).
+
+Acceptance:
+1. Unit tests drive the accumulator with the four observed sequences above (as value fixtures with the observed time ranges) and assert the joined transcript contains the first and the last sentence of each fixture exactly once.
+2. Unit tests cover: a single final result (unchanged behaviour); three or more segments; a cumulative recognizer (each result starts at 0 and extends the last) yielding only its last text; an empty middle result; confidence as the mean over all accepted segments, and nil when none is scored.
+3. A test over the recognition session with a fake task asserts that a non-final result does not resume the continuation, that the final one resumes it once with the accumulated text, that cancellation between results still returns `.cancelled`, that an error after a non-final result returns the error's outcome, and that 1110 after a non-final result returns the accumulated text.
+4. `TranscriptionProbe`'s tests cover the same accumulation through its engine seam.
+5. Exact-head macOS CI evidence and the Linux checks. No test claims that the speech framework recognized audio on a simulator.
+6. Device check, the coordinator's and not claimed by the worker: on the first build containing this change, the 21 s paused fixture and the 95 s continuous fixture in `TranscriptionProbe` each return their first and last sentences, and one voice note of more than a minute recorded in the app shows its opening words on the detail screen.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 990: every voice note longer than a sentence or two is sorted from part of what was said, which misstates intent in the way DESIGN.md forbids, and trial evidence collected before this lands understates voice capture. T06 and T05b depend on F69 (see the amendment below).
+
+#### F69 amendment 1 (2026-11-17): the trial candidate waits for F69
+
+Maintainer decision on 2026-11-17, after the tasks were created (the pinned specification of task `f29ad5a4` still carries the earlier sentence; nothing the worker does changes). T06 and T05b gain F69 as an effective dependency: the functional device matrix is recorded on, and the signed trial build is produced from, a candidate that contains F69, because a trial run on the earlier candidates would measure voice capture from truncated transcripts. U10b and T10b do not depend on it. F70 is not a dependency of any task.
+
+### F70
+
+Play retained audio through the speaker: configure the audio session for playback
+
+Found by the maintainer on 2026-11-17 on the trial phone: pressing Play on a voice note's detail screen produced no sound. Diagnosed by the coordinator from the code; not yet confirmed by a device experiment, so criterion 1 below asks the worker to establish the mechanism in a test seam and criterion 5 is the device confirmation.
+
+The only audio-session configuration in the app is the recorder's: `AVAudioRecorderVoiceEngine.start` sets the category to `.record` and activates the session (`ios/Capture/Voice/VoiceCaptureEngine.swift:104-106`), and `stopAndClose` deactivates it without changing the category (`:130`). `AVPlaybackPlayer` (`ios/Services/Playback/PlaybackSession.swift:23-49`) builds an `AVAudioPlayer` and plays it without touching the session. After a recording in the same launch the category is therefore still `.record`, which has no output route; in a launch with no recording it is the default `.soloAmbient`, which the silent switch mutes. `AVAudioPlayer.play()` returns true in both cases, so the screen shows "playing" over silence. The simulator plays audio regardless of category and of a silent switch it does not have, so no automated check could see this.
+
+Scope:
+1. Playback owns its session configuration behind a small seam in `ios/Services/Playback/` (a protocol over the three calls it needs, with the `AVAudioSession` implementation beside it): before the first `play()` of an open `PlaybackSession`, set the category to `.playback` with mode `.spokenAudio` and activate the session; when the playback session ends for any reason (`close()`, finished, deletion requested, relock, shutdown), deactivate with `.notifyOthersOnDeactivation`. A failure to configure or activate makes `play()` return false, which the detail screen already presents through its refused-play path; it is never reported as playing.
+2. Playback and recording do not fight over the session. The worker reads `VoiceRecordingController` and the detail screen's entry points and states in the PR whether playback can be started while a recording is in progress; if it can, opening or starting playback during a recording is refused with the existing unplayable handling, and starting a recording ends an open playback first. The recorder keeps setting `.record` on every start, as it does now.
+3. An interruption (`AVAudioSession.interruptionNotification`, began) while playing leaves the control in the paused state, not "playing"; resuming after it reactivates the session.
+
+Owned paths: `ios/Services/Playback/`, `ios/Tests/Playback/`, `ios/Services/Assembly/CompositionRoot.swift` (additive: passing the session seam to `PlaybackService`), `app/source-detail/SourceDetailModel.swift` and `ios/Tests/SourceDetail/` (only what item 3 needs).
+
+Not owned: `ios/Capture/Voice/` (the recorder's session handling is unchanged), playback through the earpiece or a route picker, background audio (no `audio` background mode is added), `core/`.
+
+Acceptance:
+1. Tests with a recording fake of the session seam assert the order `setCategory(.playback)`, `setActive(true)`, player `play()` on the first play; no second configuration on resume after pause; `setActive(false)` exactly once for each way a playback session ends; and `play()` returning false, with the player never started, when configuration or activation throws.
+2. A test asserts that a play refused by the session leaves the detail model in its refused-play state, not `playing`.
+3. The PR states the answer to scope item 2 with source pointers, and a test covers whichever rule applies.
+4. Exact-head macOS CI evidence and the Linux checks. No test claims audible output.
+5. Device check, the coordinator's and not claimed by the worker: on the first build containing this change, with the phone's silent mode on, a voice note recorded in the current launch plays audibly from its detail screen, and so does one opened after a fresh launch; recording still works after a playback.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 900: retained audio is the authoritative record when a transcript is wrong, and it cannot be heard. Independent of F69 (no shared files); no task depends on F70.
+
+#### F70 amendment 1 (2026-11-18, coordinator): ownership of the recording-start wiring
+
+Three review rounds on PRs #410 and #414 asked for a coordinator grant. The original owned paths could not satisfy scope item 2: "starting a recording ends an open playback first" has to be wired where the recorder and the playback service are assembled, and that is `ios/AppAssembly/`. The omission was the coordinator's.
+
+F70 additionally owns, for scope item 2 only:
+- `ios/AppAssembly/AppServices.swift` (additive: connecting the voice services' before-recording-starts hook to `PlaybackService.recordingWillStart()`),
+- `ios/AppAssembly/VoiceServiceAdapters.swift` (additive: the hook on the recorder fan-out and the decorator that runs it on every route that starts the engine, including recovery continuation),
+- `ios/Tests/VoiceCapture/` (new test files for that decorator; existing files unchanged).
+
+Acceptance criterion 3 is read as the round-3 review read it: one test must fail if the production assignment in `AppServices.swift` is removed or miswired. It builds the real assembly (or the smallest real part of it that contains that assignment) and asserts that starting a recording ends an open playback. Tests that set the hook by hand do not meet it.
+
+No other task in flight edits those two files. `ios/Services/Assembly/CompositionRoot.swift` is also edited additively by F71b (PR #416); whichever lands second rebases.
+
+### F71a
+
+Core: replace a voice note's machine transcript from its retained audio
+
+Requested by the maintainer on 2026-11-17. Before F69, the app kept only the last segment the on-device recognizer delivered, so every voice note with a pause of about 3 s or more than about a minute of speech is stored with a transcript that lacks its beginning. F69 fixes new notes. The stored ones cannot be repaired today: a transcript is stored once (`core/src/ingress/transcription/mod.rs`, module comment: "A different job cannot attach a second transcript because the item is already `transcribed`"), `transcript_attachments.item_id` is the primary key (`core/src/store/schema/mod.rs`, step 7), and `requeue_transcription` refuses a `transcribed` item (`core/src/ingress/transcription/queue.rs:232-237`). F71a adds the core path; F71b the boundary and native handler; F71c the control.
+
+The repair is bounded by audio retention: audio expires seven days after its transcription by default (`core/src/lifecycle/retention/mod.rs`), and a note whose audio is gone keeps its truncated transcript. This task does not change retention.
+
+Decisions:
+- **Only machine text is replaced.** A replacement is refused when the item's current text is not its attached transcript (a user text correction is in force, including one that cleared the text), when the item is deleted, when the capture's audio reference is gone or recorded as removed, or when the outcome was made from audio whose SHA-256 differs from the attachment's. A user correction made between the request and the outcome wins: the outcome is discarded and the job ends with a content-free reason.
+- **Which transcripts are candidates is recorded, not guessed.** `transcript_attachments` gains `transcript_generation` (INTEGER NOT NULL, 1 for every existing row). The core constant `CURRENT_TRANSCRIPT_GENERATION` is 2, documented as "every recognized segment kept (F69)". A candidate is a live, `transcribed` item whose attachment has a lower generation, whose current text is that transcript and whose audio is still recorded. Rows written between F69 and F71b carry generation 1 although they are complete; re-transcribing them is harmless (see "unchanged").
+- **A replacement is requested explicitly and runs as an ordinary on-device transcription job.** `request_retranscription(item_ids | all candidates, limit)` queues one `transcription_attachment` job per candidate at the item's current revision, in one transaction, at most `MAX_RETRANSCRIPTION_BATCH` (100) per call, skipping an item with a transcription job queued or running, and records each request in a new table keyed by job id (item, requested time, the transcript record it would replace, and later its outcome). The item's `transcription_state` stays `transcribed` throughout and its text stays readable and searchable while the job runs. The job is authorized exactly as a first transcription is: on device only, never pinned to a profile.
+- **Settling a replacement outcome** (`apply_transcription_outcome`, decided by the request row, in the same single transaction and with the same lease, redelivery and conflict rules as a first attachment):
+  - transcript whose trimmed text equals the stored one: `unchanged`; no event, no revision; the attachment's generation and recognizer are updated;
+  - transcript that differs: `replaced`; a `transcript` event at a new revision through `save_transcript_event_in_tx` (so history and the search index see it), the attachment row now holds the new text, record id, source job, recognizer, language, confidence and generation, and interpretation is queued at the new revision under the rules a first attachment uses;
+  - unsupported, failed or no speech: `kept`; the existing transcript stays, nothing is written to the item, and the request records the reason. A failed replacement never moves the item to `transcription_failed`.
+- **The superseded transcript is kept as history and removed by deletion.** Its text, record id, recognizer and attached revision stay readable by `transcript_provenance`-style read (a list of superseded transcripts for the item), and item deletion and reset remove them with the current one. The capture row is never modified.
+- **The retention clock does not restart.** Expiry keeps counting from the first successful transcription; the replacement's time is recorded separately. A replacement must not extend how long audio is kept.
+- **Earlier interpretation results.** The worker reads how a new text revision made by a user text correction treats proposals, suggestions and a scheduled reminder made from the earlier revision, states it in the PR with source pointers, and makes a replacement's new revision behave the same way, except that `text_corrected` stays false and the text basis stays `Transcript`. If that path would cancel a scheduled reminder or leave two live reminders for one item, the worker stops and blocks the task with the finding rather than choosing.
+
+Scope: schema step 15 (the generation column, the request table, the superseded-transcript storage) with its migration and restore tests; `core/src/ingress/transcription/` (request, candidate query, settlement); `core/src/lifecycle/retention/` only so its clock reads the first-success time; deletion and reset coverage of the new rows; the export if it lists transcripts (the superseded ones are exported as superseded or the PR says why not).
+
+Owned paths: `core/src/store/schema/`, `core/src/ingress/transcription/`, `core/src/lifecycle/retention/mod.rs` (the clock source only), `core/src/lifecycle/` deletion and `core/src/ffi/reset*` only where the new rows must be removed, `core/src/export/` (only for superseded transcripts), `core/tests/`, `docs/architecture/m1-contracts.md` (the transcript and retention paragraphs).
+
+Not owned: `core/src/ffi/` boundaries other than reset (F71b), `ios/`, `app/`, the retention period, interpretation and reminder rules themselves.
+
+Acceptance:
+1. Migration: a version-14 database with attached transcripts opens at 15 with every row at generation 1, text and provenance unchanged; restore of a backup taken at 14 behaves the same; the migration is idempotent under the existing interrupted-migration tests.
+2. Candidates: tests cover a candidate, and each exclusion (deleted, text correction in force, cleared correction, audio reference gone, audio recorded removed, generation current, typed item, job in flight).
+3. Request: one transaction, bounded by the batch limit, idempotent when repeated while jobs are in flight, and the item stays `transcribed` and searchable by its old text.
+4. Settlement: tests for `replaced`, `unchanged` and each `kept` reason; for a user correction landing between request and outcome (discarded, correction intact); for deletion between request and outcome; for a digest mismatch; for redelivery of the same outcome (same result, no second event) and of a different one (conflict); and for a crash at each fault point, as the first-attachment tests do.
+5. After `replaced`: the item's text and search results are the new transcript, `text_corrected` is false, the revision advanced by one, an interpretation job exists at the new revision when one is authorized, the superseded text is readable as history, and the retention assessment of the item is the same before and after.
+6. Deletion and reset leave no superseded transcript text and no request row for the item.
+7. The PR states the earlier-interpretation behaviour with source pointers, and a test pins it for an item that had a scheduled reminder.
+8. `make check` and `make test`.
+
+Validation: `make check`, `make test`.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800. No trial task depends on F71a, F71b or F71c: the trial candidate contains F69, so notes captured during the trial are complete, and these three tasks repair notes captured before it. Because F71a adds a schema step, a candidate cut after it lands upgrades the trial database by one more step, which T10b's procedure covers as it stands.
+
+#### F71a amendment 1 (2026-11-17, coordinator): the core does not learn of audio removal; the queue hook is allowed
+
+Two findings from review round 2 of PR #411, both caused by the specification, not by the worker.
+
+1. **"Audio recorded as removed" is not something the core knows.** The F71a text above excludes a candidate whose audio is "recorded as removed". That was the coordinator's error: retention and user removal are native file effects recorded in the native ledger (`ios/Services/AudioRetention/AudioRetentionLedger.swift`); the core never opens an audio file (`core/src/ffi/audio_retention.rs`, module comment) and `captures.audio_reference` stays set after the file is gone. The worker's `recorded_audio_removals` table and `record_audio_removal` have no production caller and cannot have one inside F71a's paths, and no table could know of removals made before step 15. Decision: the core does not record removals. F71a removes that table, the function, its re-export and its tests, and corrects the step-15 schema comment. The core's candidate rule reads: a live, `transcribed` item whose attachment has a lower generation, whose current text is that transcript and whose capture still has an audio reference. Whether the file exists is decided natively, by F71b (its amendment 1). Acceptance criterion 2's "audio recorded removed" case is dropped; "audio reference gone" stays. A replacement job whose audio file is missing ends through the handler's existing missing-audio outcome and settles as `kept` with a content-free reason, and a test covers that settlement.
+2. **`core/src/jobs/queue/mod.rs` is allowed, additively.** A replacement request must not be left looking in flight when the queue cancels its job outside the settle path, and the cancellation happens in that file. F71a may add the request-settling hook to the queue's existing cancellation paths (`claim_job_with_lease_in_tx`, both paths, and `cancel_job_in_tx`) and nothing else there. No open task owns that file.
+
+The red checks on head `55edf053` were hosted-runner faults, not findings about the change: the upgrade job's simulator boot failed with "The iOS 27.2 simulator runtime is not available. runtime path not found" (exit 145), and the largest-text accessibility audit failed `testHomePopulated` on a change that touches no Swift. The next head needs its own exact-head green run, as always; a job that fails for a runner fault is rerun, never waived. The PR description is updated to match the head.
+
+### F71b
+
+Boundary and native handler: request and run transcript replacements
+
+Depends on F71a and F69. F71a lets the core replace a machine transcript; nothing native can ask for it, and the native handler does not say which recognizer generation produced an outcome.
+
+Scope:
+1. `core/src/ffi/retention_controls.rs`: the read command `retranscription_status` (in an authenticated read session: the number of candidates in the read scopes, and the number of replacement jobs queued or running) and the control command `retranscribe` (`item_ids`, or all candidates, bounded by `MAX_RETRANSCRIPTION_BATCH`; outcome `queued` with the count queued and the count skipped per content-free reason). Failures are normalized and echo no identifier or content, as the file's other commands do.
+2. `core/src/ffi/transcription_attachment.rs` and the bindings: the outcome carries `transcript_generation`; the acknowledgment distinguishes `replaced`, `unchanged` and `kept`. An outcome without a generation is refused, not defaulted.
+3. `ios/Services/Transcription/`: `OnDeviceRecognizing` gains `transcriptGeneration`, 2 for `SpeechFrameworkRecognizer` once it accumulates segments (F69); `TranscriptionJobHandler` sends it and treats the three replacement dispositions as settled work. The handler is read for any native guard that skips an item already `transcribed`; if one exists, it defers to the core's decision instead.
+4. `ios/Services/AudioRetention/RetentionControlService.swift` and the bridge: `retranscriptionStatus()` and `retranscribe(...)`, and a drain is requested after `retranscribe` so the jobs run without waiting for the next capture.
+5. Audio in use: a replacement job for audio that is open for playback or being removed waits and is retried, using the fences the first-transcription path and the retention service already use; the PR names them.
+
+Owned paths: `core/src/ffi/retention_controls.rs` and its tests, `core/src/ffi/transcription_attachment.rs` and its tests, `core/bindings/`, `ios/OhAndCoreBridge/` (the generated or hand-written surface for these commands), `ios/Services/Transcription/` (except the accumulator F69 added), `ios/Services/AudioRetention/RetentionControlService.swift`, `ios/Tests/Transcription/`, `ios/Tests/AudioRetention/`.
+
+Not owned: `core/src/ingress/` and the schema (F71a), `app/` (F71c), `ios/TranscriptionProbe/`.
+
+Acceptance:
+1. Rust boundary tests for both commands: scopes respected, an unauthenticated session refused, the batch bound, and no identifier or content in any failure.
+2. A real-core integration test in `ios/Tests/Transcription/` with a fake recognizer: a note stored with a short transcript at generation 1 is requested, the handler runs the job, and the item's text is the fake recognizer's longer transcript; the same test with an identical transcript ends `unchanged` with no new revision; with a failing recognizer the old text stays.
+3. A test that an outcome without a generation is refused, and that `SpeechFrameworkRecognizer.transcriptGeneration` is 2.
+4. A test for scope item 5 with the playback fence held.
+5. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
+
+#### F71b amendment 1 (2026-11-17, coordinator): native code decides whether the recording still exists
+
+Follows F71a amendment 1. The core lists candidates by what it knows; only native code knows whether an audio file is still on the phone, including files removed before this feature existed. F71b therefore changes as follows; where this amendment and the text above disagree, the amendment governs.
+
+- `retranscription_status` answers, in an authenticated read session, the candidate items in the read scopes as `item_id` and `audio_reference` pairs (bounded by `MAX_RETRANSCRIPTION_BATCH`, with a flag when more exist) and the number of replacement jobs queued or running. Like the boundary's other answers, these identifiers go to the native service and are never logged or shown.
+- `RetentionControlService.retranscriptionStatus()` keeps only the candidates whose recording is present: the file exists at the layout's path for that reference and the retention ledger does not record it as removed, decided with the same file-system seam and ledger `AudioRetentionService` and playback availability use. It reports that count, and the count of candidates whose recording is gone separately.
+- `retranscribe` is always sent with explicit `item_ids`, the present ones; the "all candidates" form of the command is not offered to native callers and may be omitted from the boundary. A recording removed between the status and the job is the handler's existing missing-audio outcome, which the core settles as `kept`.
+- Added acceptance: a test in `ios/Tests/AudioRetention/` with one candidate whose file is present, one whose file is absent and one the ledger records as removed asserts that only the first is counted and requested; and a real-core test that a job whose file disappears before it runs ends with the old text in place.
+- Added owned path: `ios/Services/AudioRetention/AudioRetentionLedger.swift` is read, not changed.
+
+F71c shows the count of recordings that can be redone and, when some are gone, says how many notes cannot be redone because their recording was already removed; its wording rule is unchanged.
+
+### F71c
+
+Settings: turn kept recordings into text again
+
+Depends on F71b. The control that asks for the replacements, on the screen that already owns audio retention (`app/data-settings/RetentionSettings*.swift`).
+
+Scope: on Settings → the retention screen, in an authenticated read session and only while `retranscriptionStatus()` reports at least one candidate or one replacement in progress, a section that says in plain words what happened and what the action does, following `docs/features/m1-ui-design.md` and `RetentionSettingsText`: how many recordings were turned into text by an earlier version that could lose the beginning of a long note; that the action listens to each kept recording again on this phone and replaces the text if it differs; that notes whose text the user edited are left alone; and that a note whose recording has already been removed cannot be redone. One button starts it (`retranscribe` for all candidates); while replacements are queued or running the section shows the count remaining and no button; when none remain and there are no candidates the section is gone. Nothing runs without the button: no automatic replacement at launch or upgrade.
+
+The detail screen is not changed by this task; an item whose text is replaced while its detail screen is open refreshes through the screen's existing revision handling, and the worker confirms that with a test rather than adding a mechanism.
+
+Owned paths: `app/data-settings/RetentionSettingsModel.swift`, `RetentionSettingsView.swift`, `RetentionSettingsText.swift`, `ios/Tests/DataSettings/`, `ios/Tests/SourceDetail/` (the refresh test only), the walkthrough and accessibility baselines if the retention screen is in them.
+
+Not owned: `ios/Services/` (F71b), `core/`, a per-item "transcribe again" control (not asked for), any change to the retention period choices.
+
+Acceptance:
+1. Model tests: the section is absent with no candidates and nothing in progress; present with the count; the button calls `retranscribe` once and is replaced by progress; a capture-only (locked) session shows the screen's existing locked state and never the count; a failure shows the screen's existing failure presentation and leaves the button usable.
+2. A real-core test from the model down: one candidate, the button, a fake recognizer, and the section disappears with the item's text replaced.
+3. The copy is in `RetentionSettingsText`, names no version number or internal term, and the accessibility audit of the retention screen passes with the section shown.
+4. The detail-screen refresh test described above.
+5. Exact-head macOS CI evidence and the Linux checks.
+6. Device check, the coordinator's and not claimed by the worker: on the maintainer's phone, with at least one pre-F69 voice note whose recording is still kept, the section shows, the button runs, and that note's detail screen shows its opening words.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 800.
+
+#### F71c amendment 1 (2026-11-20, coordinator): the audited state needs a fixture, and the pushed detail screen does not refresh
+
+Both reviewers refused PR #423 on two points that are the coordinator's errors in the text above. Where this amendment and that text disagree, the amendment governs.
+
+1. **Criterion 3 cannot be met inside the owned paths.** The retention screen is audited as `data-audio` in `AccessibilityAuditUITests.testSettingsScreens` with the `.populated` fixture, whose recognizer reports generation 2, so the fixture has no candidate and the section never renders. F71c additionally owns: `ios/AppAssembly/UITestFixtures/` (a fixture state, or an addition to an existing one, with at least one voice note stored at generation 1 whose synthetic recording is present, so the section shows with its button; nothing else about the existing fixtures changes), `ios/UITests/Accessibility/` (one audited stop of the retention screen with the section shown, at both text sizes, following the glass ledger rules; the progress state as well if it can be held still, and the PR says so if it cannot), `ios/scripts/accessibility-groups.txt` (a line for any new test method) and `docs/validation/accessibility.md` if it lists audited screens. Criterion 3 is met only by an audit that ran with the section on screen, shown by the run's screenshot.
+
+2. **The premise of the detail-screen sentence was false.** `SourceDetailView.readAgainAfterChange()` begins `guard isInItemPane else { return }` (`app/source-detail/SourceDetailView.swift:167`), and only the search screen's pane sets it. A detail screen pushed from Home or Status does not re-read when an item changes; that was already so before this feature, for every kind of change. F71c still does not change the detail screen. Criterion 4 becomes two tests in `ios/Tests/SourceDetail/`, neither of which calls `model.load()` itself to produce the result it asserts: (a) with the screen in the item pane, a published item change (the notification the job drain publishes) leads to the replaced text being shown; (b) a detail screen opened after the replacement reads the new text. The PR states plainly that a pushed detail screen that is already open keeps the old text until it is opened again. Whether a pushed screen should refresh live is a separate decision and is not part of F71c.
+
+3. The PR body carries the exact-head `ios.yml` URL and the evidence confirmation, as AGENTS.md step 4 requires.
+
+### CI04
+
+Recover once when a simulator never becomes responsive
+
+Requested by the maintainer on 2026-11-17. Seven `ios.yml` runs started that day across three pull requests (F69 #412, F70 #410, F71a #411). One was cancelled and one failed on a real compile error. Of the other five, four had at least one job fail for a reason outside their diff, some on two or three attempts in a row, and one passed first time. The runner image (`xcode-27-arm64` 20261103.629) and the selected runtime (iOS 27.2) are the ones F68's green run used on 2026-11-11, so this is host pressure on the hosted runners, not an image change. The failures, by kind:
+
+| Kind | Count | Where |
+| --- | --- | --- |
+| `prepare-simulator.sh`: "simulator did not answer 10 probes in a row within 3s inside 480s" | 3 | run 44148283529 attempt 1 (simulator job, settle step); 44145594127 attempt 1 and 44187328566 attempts 1 and 2 (regular-width walkthrough) |
+| Launch or device fault before any assertion ("Failed to launch", "Unable to find a device matching the provided destination specifier ... Shutdown", "Device does not have a 'default' display port") | 3 | 44148283529 attempt 2 (CaptureProbe handoff); 44145594127 attempts 1 and 2 (Tauri job) |
+| Test assertion failed on a slow host or a flaky test | 4 | CaptureProbe "app never left the foreground" (44148283529 attempt 3); `testHomePopulated` "excused under or on glass" (44161872581, 44187328566); accessibility audit "did not run", code -56 (44187328566) |
+| `upgrade.yml`: "iOS 27.2 simulator runtime is not available. runtime path not found" | 1 | F71a's first run |
+
+CI04 owns the first row, CI05 the second. The third and fourth rows are not owned by either task: a failed assertion is never retried automatically, and the coordinator keeps rerunning those by hand until each has its own diagnosis.
+
+`ios/scripts/prepare-simulator.sh` boots the device once and exits 1 when `wait_for_simulator_to_respond` or `wait_for_host_to_settle` times out (`:189-201`). Every caller then fails its job. A rerun on a fresh runner passes, which is what the coordinator has been doing by hand. Whether a second boot on the same starved host also passes is not known; this task makes the attempt and records the result so the rate can be read from evidence.
+
+Scope:
+1. When the device does not become responsive, or the host does not settle, `prepare-simulator.sh` makes exactly one recovery attempt: write the host snapshot, shut down every simulator, stop the CoreSimulator service so it restarts clean, wait for the host to quieten (bounded, at most 120 s, diagnostic CPU idle logged), then repeat the same preparation with the same gates and the same timeouts. For `--erase` the device is erased again; for `--clone` the failed clone is deleted and a new one made from the template, and the new UDID replaces the old one in the `--udid-file`. A second failure exits 1 as now. No gate, probe count or timeout is lowered, and there is never a third attempt.
+2. Every recovery is visible. The script prints a GitHub `::warning::` line naming the label, the kind and which gate failed, appends a line to `host-pressure.txt` with kind `<kind>-recovered` or `<kind>-failed-twice`, and appends one line per recovery to `simulator-recoveries.txt` in the evidence directory (label, kind, first-attempt seconds, second-attempt seconds, outcome). The file is absent when no recovery happened.
+3. The three jobs that call the script (`simulator`, `walkthrough`, `accessibility`) upload `simulator-recoveries.txt` inside their existing routine artifact; no new artifact and no new upload step.
+4. AGENTS.md, "Required checks for macOS workers": the sentence describing the preparation gate gains the one-recovery rule and the evidence file. Nothing else in AGENTS.md changes.
+
+Owned paths: `ios/scripts/prepare-simulator.sh`, `ios/scripts/test_prepare_simulator.py`, `.github/workflows/ios.yml` (only what item 3 needs, if anything), the one AGENTS.md sentence.
+
+Not owned: the probe counts and timeouts, `quiet-host.sh`, `select_simulator.py`, the runner label, `upgrade.yml`, any test source, any retry of a test run (CI05).
+
+Acceptance:
+1. `test_prepare_simulator.py` runs the script against a fake `xcrun` on `PATH` (a stub script the test writes, so the test runs on Linux) and asserts: a device that answers on the first attempt produces no recovery, no warning and no `simulator-recoveries.txt`; a device that fails the first attempt and answers on the second exits 0, with the warning line, the `-recovered` pressure line and one recoveries line; a device that fails twice exits 1 with `-failed-twice` and exactly two boot attempts; the `--clone` recovery deletes the first clone and writes the second UDID to the `--udid-file`. The timeouts are made injectable through environment variables read only by the tests so the suite runs in seconds; the defaults stay 480 s and the test asserts the defaults are unchanged.
+2. `make check` passes (it runs `ios-check`, which runs these tests).
+3. Exact-head `ios.yml` evidence. The PR states, for its own run, whether any recovery happened and quotes the recoveries file if so. A run with no recovery is acceptable; the worker does not manufacture a starved host on the hosted runner.
+4. The artifact budget in AGENTS.md still holds (the new file is a few lines of text).
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 950: every native task currently needs manual reruns to land. No dependencies.
+
+### CI05
+
+Retry a simulator test step once when it failed before any assertion ran
+
+Second row of the table in CI04. In these failures no product code was judged: the test runner could not launch the app or could not find a booted device. A manual rerun passes. The rule that keeps this from hiding real failures: a step is retried only when every failure in its log matches a closed list of launch and device signatures. One failed assertion of any other kind means no retry.
+
+Scope:
+1. `ios/scripts/classify_simulator_fault.py` reads a step log and prints `infrastructure` or `test-failure`, with the matched lines. It answers `infrastructure` only when the log has at least one match from the closed list and no failing test whose message is outside the list. The initial list is the three signatures in CI04's table, taken verbatim from the cited runs' logs (the worker reads those logs with `gh run view <id> --attempt <n> --log-failed`; they are kept 90 days). "app never left the foreground", any `XCTAssert` failure, an accessibility audit finding and a compile error are `test-failure`. The list lives in one place in that file, each entry with the run it was observed in.
+2. `ios/scripts/retry-simulator-step.sh <udid> <log> -- <command...>` runs the command; on a non-zero exit it classifies the log; for `infrastructure` it prints a `::warning::` line, re-prepares the device with `prepare-simulator.sh <udid>` (a warm boot, with CI04's gates), keeps the first log beside the second as `<log>.attempt-1`, appends a line to `simulator-recoveries.txt` (CI04's file and format, kind `test-launch`), and runs the command once more. The second exit status is final. `test-failure` returns the original status immediately.
+3. `ios.yml` runs its `xcodebuild test-without-building` invocations and app-launch smoke scripts through the wrapper: in the `simulator` job (directly or inside the scripts those steps call), and in the two Tauri steps "Install, launch and assert echo round-trip" and "Native-to-Tauri handoff UI tests". The walkthrough and accessibility jobs are wired the same way where their scripts invoke `xcodebuild`. A step's result bundle path is made unique per attempt so the second attempt does not fail on an existing bundle, and the failure-diagnostics export still finds both.
+4. AGENTS.md, same section: one sentence stating the rule in the first paragraph above and naming the evidence file.
+
+Owned paths: the two new scripts and their unit tests (`ios/scripts/test_classify_simulator_fault.py`, `ios/scripts/test_retry_simulator_step.py`), `.github/workflows/ios.yml`, the `ios/scripts/*-simulator.sh` scripts (only the invocation lines), `ios/scripts/check_project_config.py` and its tests if a structural check is added, the Makefile `ios-check` target (adding the new tests), the one AGENTS.md sentence.
+
+Not owned: any test source under `ios/` or `app/`, any assertion, timeout or expectation inside a test, `upgrade.yml`, `prepare-simulator.sh` (CI04).
+
+Acceptance:
+1. Classifier tests use synthetic log excerpts shaped like the cited ones (no copied device identifiers) and assert: each listed signature alone is `infrastructure`; each of "app never left the foreground", an `XCTAssertEqual` failure, the `testHomePopulated` message and a compile error is `test-failure`; a log with one listed signature and one unlisted test failure is `test-failure`; an empty or missing log is `test-failure`.
+2. Wrapper tests with stub commands assert: success runs once; an infrastructure failure followed by success exits 0 with two runs, the warning, the kept first log and one recoveries line; an infrastructure failure twice exits non-zero after exactly two runs; a test failure exits with the original status after exactly one run and no re-preparation.
+3. A structural test fails if `ios.yml` or a `*-simulator.sh` script invokes `xcodebuild test-without-building` outside the wrapper.
+4. `make check` passes; exact-head `ios.yml` evidence; the PR states whether any retry happened in its own run and quotes the recoveries file if so.
+5. The artifact budget still holds: a kept first-attempt log is text and is uploaded inside the existing routine artifact.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940. Depends on CI04 (shared `ios.yml`, the recoveries file and the warm re-preparation).
+
+### F72
+
+Accessibility audit: a Home card keeps one name however its age is worded
+
+`AccessibilityAuditUITests.testHomePopulated` failed in four hosted attempts across three unrelated pull requests between 2026-11-17 and 2026-11-19 (run 44161872581; 44187328566 attempt 1; 44475712809 attempts 2 and 4), each time with "'<card>||<element>' was excused under or on glass at home-populated… and never audited unobstructed", and passed on rerun. CI05 does not retry it, correctly: it is a failed assertion. F71b sat blocked on it for six hours.
+
+One cause is established from the code and the messages. The ledger names an element by its card, and `ScreenElement.cardName` (`ios/UITests/Accessibility/GlassContrast.swift:28-32`) removes the card's age only when it matches `[0-9]+ [A-Za-z]+\.? ago`. The caption's age comes from `RelativeDateTimeFormatter` with `dateTimeStyle = .named` (`app/home/HomeBodyView.swift:273-278`), which writes an age of zero as "now". A card first seen as "Action · now, Synthetic spoken action to water the ferns" is excused under that name; at the next stop it reads "Action · 4 sec. ago, …", its name becomes "Action · , …", no element carries the owed name any more, and `settleOwedElements` gives up on it (`AccessibilityAuditUITests.swift:884`, the `guard … else { break }`). Three of the four attempts have a message carrying "· now," in the owed name.
+
+The other messages name a card whose age was already removed ("Action · , Remind me 2099-01-15 11:00:00 to call mom", "Idea · , Synthetic spoken idea about a window box") and fail at `home-populated-settle-3`. Their cause is not established. Candidates the worker checks against the audit logs: the owed element was not on screen at its settle stop, the 12-stop or 6-drag limit ran out, or the element was unobstructed by the test's geometry but the audit at that stop did not record it.
+
+Scope:
+1. A card's name does not depend on its age in any wording the formatter produces: "now", "N sec. ago", "N min. ago", "yesterday", "in N sec." and the forms at the largest text size. The worker removes the age as a position in the caption (what stands between the type's separator and the comma), not as a list of phrases, and states in the PR which wordings it verified.
+2. The second cause is diagnosed from evidence, not guessed. The worker reads `audit-default.log` and `audit-xxxl.log` from a failing attempt (the `ios-accessibility` artifact is kept 2 days and the `-failure` one 1 day; if they have expired, reproduce on a hosted run or locally with the procedure in `docs/validation/accessibility.md`, erasing the simulator first) and states which candidate it was, with the log lines. The fix follows the diagnosis. If it cannot be reproduced or read, the PR says so, lands item 1 alone, and adds the logging that would identify it next time (the owed key, whether it was found at each drag, and the final frames).
+3. The standing rule is unchanged: an element is excused only where it is obstructed, every excuse is settled by an unobstructed audit or a measurement, and an unsettled excuse fails the test. No element joins the glass list, no audit type is dropped, no limit is raised to make the test pass, and nothing is retried.
+
+Owned paths: `ios/UITests/Accessibility/`, `docs/validation/accessibility.md` (a short note of the cause).
+
+Not owned: `app/home/` (the caption's wording is correct and stays), `ios.yml`, the CI04/CI05 scripts, any other UI test.
+
+Acceptance:
+1. `GlassContrastLedgerTests` asserts that one card yields the same name for each wording in item 1, at both text sizes' caption forms, and that two different cards of the same type still have different names.
+2. A ledger test reproduces the failure: an element excused on a card captioned "now" is settled by an unobstructed audit of the same card captioned "4 sec. ago". It fails on current main.
+3. The PR states the diagnosis for item 2 with quoted log lines, or states that it could not be established and shows the added logging.
+4. Exact-head `ios.yml` evidence with the accessibility job green, and the Linux checks.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 945: every native pull request runs this test. No dependencies; no task depends on it.
+
+### CI06
+
+Split the accessibility job into two parallel halves by test group
+
+Requested by the maintainer on 2026-11-19. The accessibility job takes 50 to 66 minutes when it passes against a 75-minute limit, and attempt 5 of run 44475712809 was cancelled at the limit with the audits still running. A passing run (44477039781) spent about 6 minutes on checkout, generation and build, 10 on the two simulator preparations, 16.5 on the default-size pass and 17.5 on the largest-size pass.
+
+The job cannot be split by text size, which is the obvious cut. The largest-size pass reads `settled-default.txt`, written by the default-size pass, and settles from it any element it could not bring clear of the glass (`AccessibilityAuditUITests.settleFromTheDefaultSize`, `:150-167`; the reason is in the comment above it). The two sizes therefore stay together, in order, on one simulator. The cut is across the tests: two groups, each run at the default size and then the largest size in its own job.
+
+Scope:
+1. The `accessibility` job in `ios.yml` becomes a matrix of two jobs, `accessibility (group a)` and `accessibility (group b)`, in the shape of the `walkthrough` matrix. Each builds, prepares its own simulator, and runs `accessibility-simulator.sh` for its group with `-only-testing` for that group's tests, default size then largest size.
+2. The groups are a partition of the test methods of the `OhAndAccessibilityUITests` scheme, held in one file under `ios/scripts/` that the script reads. The split is chosen so that the two jobs' audit time is roughly equal, from the per-test durations in a hosted run's log. The scheme's fast non-audit suites (the ledger tests) go in one group.
+3. Each group is closed under settlement: no element owed at the largest size in one group may depend on a default-size audit that now runs in the other group. The worker establishes this from evidence: in the `audit-xxxl.log` of a full hosted run, every `CLEAR-AT-DEFAULT` line names the default-size screen that settled it, and that screen's test must be in the same group as the test that owed it. If no balanced partition is closed, the worker takes the most balanced closed one and says so; if none is closed at all, the worker blocks the task with the lines that prevent it. No test, excuse, glass-list entry or audit rule is changed to make a split possible.
+4. The script's end-of-run checks (an audit log and screenshots per size, no `ISSUE`, `ERROR`, `FAIL` or `UNVERIFIED` line, at least one `PASS`) apply per group unchanged. Each job uploads `ios-accessibility-<group>` and, on failure, `ios-accessibility-<group>-failure`, with the same contents, retention and exclusions as now. The artifact budget in AGENTS.md is restated for two artifacts and still holds in total.
+5. The 75-minute limit stays. It is not raised.
+6. AGENTS.md ("Required checks for macOS workers") and `docs/validation/accessibility.md` describe the two jobs and the groups file.
+
+Owned paths: `.github/workflows/ios.yml` (the accessibility job only), `ios/scripts/accessibility-simulator.sh`, the new groups file and its test under `ios/scripts/`, `ios/scripts/check_project_config.py` and its tests where they name the job or its artifacts, the Makefile `ios-check` target (adding the new test), `ios/scripts/test_accessibility_gate.py`, the AGENTS.md and `accessibility.md` passages.
+
+Not owned: anything under `ios/UITests/` (F72 is editing it), the other jobs, `prepare-simulator.sh`, `retry-simulator-step.sh`, the number of simulator preparations in the script.
+
+Acceptance:
+1. A Linux unit test reads the test method names from the Swift sources of the scheme and the groups file and fails unless every test is in exactly one group, and no group names a test that does not exist. A test added later without a group therefore fails `make check`.
+2. The PR quotes the per-test durations used, each group's audit time, and the `CLEAR-AT-DEFAULT` lines from a full run with the group of the owing test and of the settling test beside each, showing criterion 3 of the scope.
+3. On the exact-head run both accessibility jobs are green, each finishes in under 45 minutes, and between them the two `audit-default.log` files and the two `audit-xxxl.log` files hold a `PASS` or `FAIL` line for every screen that a full single-job run on main holds (the worker diffs the screen names and quotes the result). No screen is audited by neither job.
+4. `make check` passes; the artifact totals for the run are stated and within budget.
+
+Validation: `make check`, `make test`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 942. No dependencies. A run then has six macOS jobs against the plan's five concurrent; one queues briefly.
+
+### F73
+
+**Capture probe handoff test: a shortcut handoff after a restart reaches the foreground or says why not**
+
+Filed 2026-11-20. `CaptureProbeHandoffUITests.testEachShortcutHandoffRendersOneNewEntryAndPlainLaunchesRenderNone` (`ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift`) failed the `simulator` job's "CaptureProbe handoff UI test and ingress smoke test" step in four hosted attempts on two unrelated pull requests in two days: run 44587576418 attempts 1 and 2 (F72's branch) and run 44645076106 attempts 4 and 6 (F71b's branch). Neither branch touches `ios/CaptureProbe/`. The attempt 6 message is `XCTAssertTrue failed - app not foreground: url-cold-after-restart should render a new entry` (line 69); the messages of the other three attempts were not read when this was filed and the task reads them first. It is a failed assertion, so CI05 rightly does not retry it.
+
+Not diagnosed. One candidate, from the code only: `openShortcutURL()` waits 5 s for SpringBoard's "Open" prompt and carries on if it has not appeared, and the next wait gives the app 20 s to reach the foreground. A prompt that appears after 5 s on a slow runner is never accepted, and the app never comes forward. The task confirms or rejects this from evidence before changing anything.
+
+Scope:
+1. Diagnose from hosted evidence: the failed attempts' exported diagnostics (`ios-evidence-failure`, kept one day; if expired, reproduce by rerunning the step) and their logs. State what was on screen when the wait expired (the prompt, SpringBoard, the app still launching, or the probe in the background), for each failed attempt that can still be read.
+2. Fix the cause in the test, or in the probe if the probe is at fault. The handoff must be driven to a known state (prompt accepted or known absent, app in the foreground) by waiting on the condition, not by a fixed sleep and not by only lengthening a timeout.
+3. When the app is not in the foreground at the end of the wait, the failure message names what is in front (the foreground application's bundle identifier and whether the "Open" prompt is showing) and attaches a screenshot, so the next failure diagnoses itself.
+
+Owned paths: `ios/CaptureProbe/UITests/`, `ios/CaptureProbe/` (only if the probe is at fault, stated in the PR), `ios/scripts/smoke-capture-simulator.sh` (only for evidence it prints), `docs/validation/` (a short note of the diagnosis).
+
+Not owned: `ios/scripts/classify_simulator_fault.py` and `retry-simulator-step.sh` (the closed signature list is not widened for this), `.github/workflows/ios.yml`.
+
+Acceptance:
+1. The PR states the diagnosis with the evidence it rests on, per failed attempt read, and says plainly if the candidate above was wrong.
+2. No assertion is removed or weakened: every phase still asserts the foreground, the rendered entry, the saved status and the distinct capture ID, and `smoke-capture-simulator.sh` still checks the persisted files against every `CAPTURE-PHASE` line.
+3. The not-in-foreground failure message and screenshot of scope item 3 exist, shown by a test or by a deliberately failed local run described in the PR.
+4. Exact-head macOS CI evidence, and the `simulator` job of that same head passes this step in three consecutive attempts (the first run and two reruns of the job, all linked). A failure in any of them is investigated, not rerun past.
+5. The Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run with its two reruns.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940.
+
+### CI07
+
+**Split the simulator job into three parallel jobs**
+
+Filed 2026-11-20 from a measurement of 400 job executions in the last 40 `ios.yml` runs (2026-11-10 to 2026-11-20). The `simulator` job is the slowest job of every run (median 72 minutes against a 90 minute limit) and the least reliable (53% of executions passed). It is one serial chain, so a failure near its end repeats everything before it: the capture probe step, the last test step, caused 17 of its 32 failures, and each rerun repeated about an hour of work that had passed. Workers hold a slot while they wait on this job, which starves other work on the fleet.
+
+Median minutes of its long steps in passing executions: settle (cold boot and template) 18.6, NotificationProbe suites 16.8, OhAndTests 10.1, capture probe 6.4, the launch smokes and Keychain self-test about 10 together, project generation and builds about 9.
+
+Scope: replace the one job with three jobs that run in parallel, each on its own runner with its own single cold boot, each compiling only what it runs before its first boot (the "compiler and a booted simulator never run together" rule is kept):
+1. `simulator` (name unchanged, so its evidence artifact stays `ios-evidence`): OhAndTests, the credential relaunch check, the CredentialProbe Keychain self-test, the launch smokes (BridgeProbe, CredentialProbe, OhAndApp, TranscriptionProbe), the embedded-framework check, and the builds those need (including AudioProbe, which is built and not run today).
+2. `notification-probe`: the settle-and-template step and the two NotificationProbe suites on clones of the template, as today. Evidence artifact `ios-evidence-notification`.
+3. `capture-probe`: the CaptureProbe UI test build, the CaptureProbe build and the handoff UI test with its ingress smoke. Evidence artifact `ios-evidence-capture`.
+
+Every step that exists today runs in exactly one of the three jobs, with the same command, the same gates and the same retry wrapper. Each job records the toolchain and the selected simulator, writes `host-pressure.txt` and `simulator-recoveries.txt`, and uploads its failure diagnostics under its artifact name with the `-failure` suffix, under the artifact budget (a green run of the whole workflow stays under 25 MB, any run under 125 MB). Each job gets a time limit justified from the measured step times in a comment, and none is above 60 minutes.
+
+Owned paths: `.github/workflows/ios.yml` (the `simulator` job and the two new jobs only), `ios/scripts/check_project_config.py` and its tests (a check that every step name of the old job appears in exactly one of the three, from a list kept beside the check), `AGENTS.md` (the "Required checks for macOS workers" passage: the three jobs, their artifacts, and which artifact holds which log), `docs/features/ci-artifact-budget.md` if it lists jobs.
+
+Not owned: the other jobs of `ios.yml`, `ios/scripts/*-simulator.sh`, `prepare-simulator.sh`, `retry-simulator-step.sh`, `classify_simulator_fault.py`, any test or probe source.
+
+Acceptance:
+1. A test in `ios-check` fails if a step of the old job is missing from the three jobs or appears in two of them. No test step, smoke, gate or assertion is dropped or loosened, and no step gains `continue-on-error` that did not have it.
+2. In the exact-head run all three jobs pass, and the PR states each job's duration and the workflow's longest job. The longest of the three is under 50 minutes in that run; if it is not, the PR says which step took the time and the task is not done.
+3. `OhAndTests.log` with `** TEST EXECUTE SUCCEEDED **` and `smoke.log` ending `Smoke test passed` are still in `ios-evidence`, so the worker instructions in `AGENTS.md` step 4 stay true; `AGENTS.md` names the two new artifacts and what they hold.
+4. The artifact budget holds: the PR states the total artifact size of the green run.
+5. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 944.
+
+### CI08
+
+**Do not start the macOS jobs for a pull request that changes only documents**
+
+Filed 2026-11-20 with CI07. Depends on CI07 (both edit `ios.yml` and the same `AGENTS.md` passage). `ios.yml` starts on every pull request to `main`, whatever it changes, and one attempt costs about four runner-hours across six jobs and holds a worker for over an hour. A pull request that changes only documents cannot change what those jobs build or test.
+
+Scope: `ios.yml` does not start for a pull request whose every changed file is under `docs/` or is a Markdown file at the repository root (`*.md`), using the trigger's path filter. Anything else starts it as today: `core/` (the core is linked into the app), `ios/`, `app/`, `tools/`, `.github/`, `Makefile`, bindings, configuration, and any Markdown or other file under those directories. The list of ignored paths is closed and short; a path is added to it only by a later task.
+
+A pull request that changes `AGENTS.md` only is included in the skip: it is a root Markdown file and no job reads it.
+
+Owned paths: `.github/workflows/ios.yml` (the trigger only), `ios/scripts/check_project_config.py` and its tests (the ignored-path list is exactly the two patterns above), `AGENTS.md` (one sentence in "Required checks for macOS workers" saying when the workflow does not start, and that a documents-only task needs no macOS run).
+
+Not owned: the jobs of `ios.yml`, `core.yml`, `upgrade.yml`.
+
+Acceptance:
+1. A test in `ios-check` fails if the ignored-path list differs from `docs/**` and root `*.md`, or if a path filter is added to `core.yml`.
+2. The PR shows, with links, one pull request or commit range that changes only a file under `docs/` and started no `ios.yml` run, and that this task's own pull request (which changes the workflow) started one.
+3. Nothing that affects the app is skipped: the PR lists every top-level directory of the repository and says for each whether a change there starts the workflow.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 930.
+
+
+#### CI08 amendment 1
+
+Filed 2026-11-22. Criterion 2 as written cannot be met before the change is on `main`, and that was the coordinator's error: a pull request to `main` that carries this change also changes `ios.yml`, so it is never documents-only, and the path filter applies to other pull requests only once it has merged. Both round-1 reviewers rejected on this point alone and verified everything else. A fork or scratch repository would spend macOS runner time on the shared account to imitate what the real repository shows for free one merge later.
+
+Criterion 2 becomes:
+2. The PR shows, with a link, that this task's own pull request (which changes the workflow) started an `ios.yml` run. The PR body no longer claims or promises the documents-only half.
+
+The documents-only half is not dropped; it moves to the coordinator, after the merge: the coordinator opens a pull request to `main` that changes one file under `docs/` only, confirms that `core.yml` started and `ios.yml` did not, and records both links under this heading. If `ios.yml` starts, the coordinator files a repair task the same day. Reviewers do not ask this task for that evidence.
+
+Evidence (2026-11-23, after CI08 merged as 4ed14c26): pull request #430 changes this file only. Its first commit started `core.yml` (run 45110579803) and the fixture hygiene workflow (run 45110579917) and no `ios.yml` run; CI08's own pull request #426 started `ios.yml` run 45040048054.
+
+### F74
+
+**Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails**
+
+Filed 2026-11-20. Unit tests that build a real composition root end with `CoreLeakBaseline.check()` (`ios/Tests/Support/CoreLeakBaseline.swift`), which compares the process-wide live core handle and result buffer counts with the values `capture()` took in `setUp`. In run 44645076106 (F71b, head 6f58776f) four of six attempts failed one such test with "no result buffer leaks", off by one, a different test each time: `LifecycleCoordinatorRealCoreTests.testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground` (1 against 0), `AppServicesTests.testEveryLaunchStartsLockedSoNothingStoredIsReadable` twice (0 against 1) and `CompositionRootTests.testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration` (1 against 0). The F71b worker reports the first of these also failed on run 44224383184 attempt 1, a head without F71b's changes. The coordinator first attributed these to F71b; that was wrong.
+
+The worker's reading, which the task verifies before acting on it: the failing tests ended in 1.6 s and 2.5 s, so `check()` did not wait out its 10 s. Its loop ended when the counts matched, and a buffer was live when `XCTAssertEqual` read the count again a moment later. In the other direction, `capture()` stops on two equal reads 10 ms apart and can record a buffer that is still in flight, which the test then "loses". Both are a short-lived buffer in flight when the counts are read, from a core read that another queue started.
+
+Scope:
+1. Verify the reading from the failed logs (the test durations, and what the neighbouring tests left running) and state it in the PR. If a test is found that returns while work it started is still issuing core reads, say which; fixing that test is in scope only if it is under `ios/Tests/Support/`, otherwise it is reported.
+2. `check()` asserts on the counts it waited for, and requires them to hold at the baseline for a short settle interval before it passes, so a read that starts just after a match is waited for and not asserted against. `capture()` does not record a buffer that is in flight when a later read shows it freed.
+3. A real leak still fails: a buffer or handle that is still live after the wait fails the test at the caller's line, with equality and not "at most", as the type's comments say today.
+
+Owned paths: `ios/Tests/Support/CoreLeakBaseline.swift`, a new test file for it under `ios/Tests/Support/` (the counts are injected so the test controls them), `ios/scripts/check_test_leak_baseline.py` and its tests if the rule it enforces needs to name the new entry point.
+
+Not owned: `ios/OhAndCoreBridge/` (the counters), any other test file, any timeout elsewhere.
+
+Acceptance:
+1. Deterministic tests with injected counts, no real core and no sleeping for luck: a buffer that appears just after the counts match and is freed within the settle interval passes; a buffer that is never freed fails; a handle that is never closed fails; a buffer in flight during `capture()` that is then freed gives a baseline without it; a buffer that stays live through `capture()`'s wait stays in the baseline, as today.
+2. The total wait is still bounded, and the PR states the longest time a passing `check()` and a failing `check()` can take.
+3. No test file other than the new one changes, and `check_test_leak_baseline` still passes.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 938.
+
+### F75
+
+**Home recents tests: the scripted source is touched from two threads and crashes the test process**
+
+Filed 2026-11-21. In run 44829485816 attempt 2 (CI08, head 8b2e3077, a change to the workflow and its checker only) the unit-test job failed because the test process crashed in `HomeRecentsModelTests.testANewSaveLeadsTheListAsSortingUntilInterpreted`: `EXC_BAD_ACCESS` in `swift_release` under `Array.append`, at `FakeHomeRecentsSource.readPage(cursor:)` (`ios/Tests/HomeRecents/HomeRecentsModelTests.swift:27`), on a cooperative-pool thread, called from `HomeRecentsModel.readPage(cursor:)` (`app/home/HomeRecentsModel.swift:277`). The crash report is in that run's `ios-evidence-failure` artifact (kept one day).
+
+The coordinator's reading, which the task verifies before acting on it: `HomeRecentsSource.readPage` and `interpretationIsFinished` are nonisolated `async`, so they run off the main actor, and the fake appends to `readCursors`, `statusReadItemIDs` and `heldReads` and reads `pages`, `failure`, `holdsReads` and `heldSnapshotReads` there with no synchronization, while the test, on the main actor, reads and writes the same properties. The same frame shows `HomeRecentsModel.readPage(cursor:)` itself on the pool thread, where it changes `readsInFlight`; the type's comment says it is confined to the main queue.
+
+Scope:
+1. Confirm from the code which of the fake's state and the model's state is reached from both the main actor and another executor, and state it in the PR.
+2. Make `FakeHomeRecentsSource` safe to call from any thread (a lock around its state, or main-actor isolation of its methods if the protocol allows it without changing production callers), keeping what each test asserts.
+3. If `HomeRecentsModel` does change `readsInFlight`, or anything else, off the main actor, make those two private read methods run on the main actor; no other behaviour of the model changes. If it does not, say why the frame is on the pool thread and leave the model alone.
+
+Owned paths: `ios/Tests/HomeRecents/HomeRecentsModelTests.swift`, `app/home/HomeRecentsModel.swift` (the isolation of the private read methods and their counter only).
+
+Not owned: the `HomeRecentsSource` conformance in the app, any other test file, any timeout.
+
+Acceptance:
+1. The PR states, per property, which executor reads and writes it before and after the change.
+2. No assertion in the test file is removed or weakened, and no wait is lengthened to pass.
+3. The `HomeRecents` unit tests pass on the exact head in three consecutive attempts of the `simulator` job (the crash is intermittent, so one pass proves little); the attempts are linked.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 937.
+
+### CI09
+
+**Install the pinned project generator from a verified release file, not by cloning and compiling it in every job**
+
+Filed 2026-11-20. Depends on CI08 (both edit `ios.yml`). Every macOS job runs `brew install mint` and then `ios/scripts/generate.sh`, which has mint clone XcodeGen 2.40.0 and its Swift package dependencies from GitHub and compile them, in every job of every attempt. Measured over 320 executions the step takes a median 2.7 minutes (longest 4.4), and since CI07 a run has eight such jobs: over twenty runner-minutes per attempt spent rebuilding the same tool. It is also a network dependency at the start of every job. On 2026-11-20 between 22:44 and 22:47 UTC five jobs across two pull requests (runs 44825865473 and 44827604659) failed in this step within a minute of starting, with `fatal: could not read Username for 'https://github.com': terminal prompts disabled` while cloning a dependency, when four pull requests had started thirty-two jobs together. It had not failed in the 320 executions before that.
+
+Scope:
+1. One script, `ios/scripts/install-xcodegen.sh`, puts the pinned XcodeGen on `PATH` from the project's published release archive for that version, checked against a SHA-256 recorded in the repository beside the version pin, and fails if the digest differs. The version stays pinned in one place that `generate.sh`, the `Mintfile` and the script agree on (a check in `ios-check` fails if they differ).
+2. Every job of `ios.yml` and `upgrade.yml` that generates the project uses the script instead of `brew install mint`, and keeps the archive in the Actions cache keyed by version and digest, so a warm job makes no network request for the tool. A cold cache downloads once, with a bounded retry (three tries, with a pause) for a failed download; a digest mismatch is never retried.
+3. `generate.sh` keeps working on a developer's machine with mint or a matching `xcodegen`, as today.
+
+Owned paths: `ios/scripts/install-xcodegen.sh` (new), `ios/scripts/generate.sh`, `ios/Mintfile`, `.github/workflows/ios.yml` and `.github/workflows/upgrade.yml` (the tool installation steps only), `ios/scripts/check_project_config.py` and its tests, `AGENTS.md` (the pinned XcodeGen sentence, if it names mint), `docs/features/ci-artifact-budget.md` only if the cache needs a line there.
+
+Not owned: any test step, gate or time limit; `core.yml`.
+
+Acceptance:
+1. `ios-check` tests: the version is the same in every place it is written; the digest is present and is 64 hexadecimal characters; no workflow job installs mint; every job that runs `generate.sh` runs the install script first.
+2. The generated project is the same: the PR shows that `project.pbxproj` generated by the release binary and by the mint build of the same version are byte-identical, or lists and explains every difference.
+3. In the exact-head run the PR states the time of the installation and generation steps per job, cold and (from a rerun of one job) warm. Warm is under 30 seconds for both steps together.
+4. Exact-head macOS CI evidence, an `upgrade.yml` run if that workflow can be started for the branch (stated if not), and the Linux checks.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 928.

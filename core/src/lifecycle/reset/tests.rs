@@ -99,6 +99,7 @@ impl Store {
             "SELECT COUNT(*) FROM proposals WHERE session_topic_proposal LIKE ?1",
             "SELECT COUNT(*) FROM reminders WHERE source_phrase LIKE ?1",
             "SELECT COUNT(*) FROM transcript_attachments WHERE text LIKE ?1",
+            "SELECT COUNT(*) FROM superseded_transcripts WHERE text LIKE ?1",
             "SELECT COUNT(*) FROM search_index WHERE original_text LIKE ?1 OR current_text LIKE ?1",
         ]
         .iter()
@@ -204,6 +205,7 @@ fn transcription_outcome(job: &Job, audio_reference: &str, text: &str) -> Transc
             confidence: Some(0.9),
             detected_language: Some("en-US".to_string()),
             recognizer: "on-device-recognizer/1".to_string(),
+            transcript_generation: 1,
             audio_sha256: AUDIO_SHA256.to_string(),
         }),
         interpretation: None,
@@ -924,4 +926,81 @@ fn late_results_after_reset_started_revive_nothing_even_after_a_restart() {
         store.count("SELECT COUNT(*) FROM items WHERE lifecycle_state != 'deleted'"),
         0
     );
+}
+
+#[test]
+fn reset_removes_superseded_transcripts_and_replacement_requests() {
+    use crate::ingress::transcription::{request_retranscription, RetranscriptionSelection};
+
+    let store = Store::new();
+    let item_id = import(
+        &store,
+        &voice_capture(
+            "3f9c1e52-0000-4000-8000-000000000003",
+            "staging/attached.m4a",
+        ),
+    );
+    enqueue(
+        &store,
+        "transcription-first",
+        &item_id,
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+    );
+    let first = claim(&store);
+    apply_transcription_outcome(
+        &mut store.open(),
+        &transcription_outcome(&first, "staging/attached.m4a", &format!("{SECRET} spoken")),
+        instant(4),
+    )
+    .unwrap();
+    let queued = request_retranscription(
+        &mut store.open(),
+        RetranscriptionSelection::AllCandidates,
+        10,
+        instant(5),
+    )
+    .unwrap()
+    .queued;
+    assert_eq!(queued.len(), 1);
+    let replacement = loop {
+        let job = claim(&store);
+        if job.job_id == queued[0].job_id {
+            break job;
+        }
+    };
+    apply_transcription_outcome(
+        &mut store.open(),
+        &transcription_outcome(
+            &replacement,
+            "staging/attached.m4a",
+            &format!("{SECRET} spoken, in full"),
+        ),
+        instant(6),
+    )
+    .unwrap();
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM superseded_transcripts"),
+        1
+    );
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM transcript_replacement_requests"),
+        1
+    );
+    assert!(store.secret_hits() > 0);
+
+    start_reset(&mut store.open(), instant(10)).unwrap();
+
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM superseded_transcripts"),
+        0
+    );
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM transcript_replacement_requests"),
+        0
+    );
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM transcript_attachments"),
+        0
+    );
+    assert_eq!(store.secret_hits(), 0);
 }

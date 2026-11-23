@@ -4675,6 +4675,402 @@
       "source_pointers": [
         "docs/validation/accessibility.md"
       ]
+    },
+    {
+      "key": "F68",
+      "parent": null,
+      "title": "Move the native toolchain to Xcode 27.2 on GitHub's xcode-27 runner image",
+      "file_scope": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/select_simulator.py",
+        "ios/scripts/tests/",
+        "ios/ (only what the iOS 27 SDK forces)",
+        "AGENTS.md (macOS workers section)"
+      ],
+      "intent": "Pin Xcode 27.2, run ios.yml on the xcode-27 image, keep the compact simulator jobs off the iPhone Duo runtime, and fix what the iOS 27 SDK forces, so the trial candidate runs natively on the maintainer's iPhone Duo.",
+      "acceptance": [
+        "See the F68 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/select_simulator.py"
+      ]
+    },
+    {
+      "key": "F69",
+      "parent": null,
+      "title": "Keep every recognized segment of a voice note, not only the last one",
+      "file_scope": [
+        "ios/Services/Transcription/SpeechFrameworkRecognizer.swift",
+        "ios/Services/Transcription/ (new accumulator file)",
+        "ios/Tests/Transcription/",
+        "ios/TranscriptionProbe/Shared/",
+        "ios/TranscriptionProbe/Tests/",
+        "ios/TranscriptionProbe/Sources/AppDelegate.swift (status line only)",
+        "ios/project.yml (only if the accumulator source is shared)",
+        "docs/validation/transcription-probe.md"
+      ],
+      "intent": "Accumulate the per-segment results the on-device recognizer delivers, in audio order, so a voice note's transcript holds everything that was said instead of its last segment.",
+      "acceptance": [
+        "See the F69 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Transcription/SpeechFrameworkRecognizer.swift",
+        "ios/TranscriptionProbe/Shared/SpeechFrameworkEngine.swift",
+        "ios/Tests/Transcription/SpeechFrameworkRecognizerTests.swift"
+      ]
+    },
+    {
+      "key": "F70",
+      "parent": null,
+      "title": "Play retained audio through the speaker: configure the audio session for playback",
+      "file_scope": [
+        "ios/Services/Playback/",
+        "ios/Tests/Playback/",
+        "ios/Services/Assembly/CompositionRoot.swift (additive)",
+        "app/source-detail/SourceDetailModel.swift (interruption state only)",
+        "ios/Tests/SourceDetail/",
+        "ios/AppAssembly/AppServices.swift (additive, amendment 1)",
+        "ios/AppAssembly/VoiceServiceAdapters.swift (additive, amendment 1)",
+        "ios/Tests/VoiceCapture/ (new files, amendment 1)"
+      ],
+      "intent": "Set and activate a playback audio session before playing retained audio and release it when playback ends, so Play is audible after a recording and with the silent switch on.",
+      "acceptance": [
+        "See the F70 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Playback/PlaybackSession.swift",
+        "ios/Services/Playback/PlaybackService.swift",
+        "ios/Capture/Voice/VoiceCaptureEngine.swift",
+        "app/source-detail/SourceDetailModel.swift"
+      ]
+    },
+    {
+      "key": "F71a",
+      "parent": null,
+      "title": "Core: replace a voice note's machine transcript from its retained audio",
+      "file_scope": [
+        "core/src/store/schema/",
+        "core/src/ingress/transcription/",
+        "core/src/lifecycle/retention/mod.rs (clock source only)",
+        "core/src/lifecycle/ and core/src/ffi/reset* (removal of the new rows only)",
+        "core/src/export/ (superseded transcripts only)",
+        "core/tests/",
+        "docs/architecture/m1-contracts.md",
+        "core/src/jobs/queue/mod.rs (additive: settle a replacement request when the queue cancels its job)"
+      ],
+      "intent": "Let the core replace an uncorrected machine transcript with a new on-device transcription of the same retained audio, on explicit request, keeping the superseded text as history and leaving retention unchanged.",
+      "acceptance": [
+        "See the F71a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ingress/transcription/queue.rs",
+        "core/src/store/schema/mod.rs",
+        "core/src/lifecycle/retention/mod.rs"
+      ]
+    },
+    {
+      "key": "F71b",
+      "parent": null,
+      "title": "Boundary and native handler: request and run transcript replacements",
+      "file_scope": [
+        "core/src/ffi/retention_controls.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "core/bindings/",
+        "ios/OhAndCoreBridge/",
+        "ios/Services/Transcription/",
+        "ios/Services/AudioRetention/RetentionControlService.swift",
+        "ios/Tests/Transcription/",
+        "ios/Tests/AudioRetention/",
+        "ios/Services/AudioRetention/AudioRetentionLedger.swift (read only)"
+      ],
+      "intent": "Expose the replacement request and status over the retention boundary, carry the recognizer generation with each outcome, and have the native handler run replacement jobs.",
+      "acceptance": [
+        "See the F71b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F71a",
+        "F69"
+      ],
+      "source_pointers": [
+        "core/src/ffi/retention_controls.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "ios/Services/Transcription/TranscriptionJobHandler.swift",
+        "ios/Services/AudioRetention/RetentionControlService.swift"
+      ]
+    },
+    {
+      "key": "F71c",
+      "parent": null,
+      "title": "Settings: turn kept recordings into text again",
+      "file_scope": [
+        "app/data-settings/RetentionSettingsModel.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "app/data-settings/RetentionSettingsText.swift",
+        "ios/Tests/DataSettings/",
+        "ios/Tests/SourceDetail/ (refresh test only)",
+        "ios/AppAssembly/UITestFixtures/ (amendment 1)",
+        "ios/UITests/Accessibility/ (amendment 1)",
+        "ios/scripts/accessibility-groups.txt (amendment 1)"
+      ],
+      "intent": "Offer one explicit action on the retention screen that re-transcribes the kept recordings of notes transcribed before F69, with a plain account of what it does and does not touch.",
+      "acceptance": [
+        "See the F71c section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F71b"
+      ],
+      "source_pointers": [
+        "app/data-settings/RetentionSettingsModel.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "app/data-settings/RetentionSettingsText.swift"
+      ]
+    },
+    {
+      "key": "CI04",
+      "parent": null,
+      "title": "Recover once when a simulator never becomes responsive",
+      "file_scope": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/test_prepare_simulator.py",
+        ".github/workflows/ios.yml",
+        "AGENTS.md (one sentence)"
+      ],
+      "intent": "Make the simulator preparation attempt one recorded recovery before failing the job, without lowering any gate.",
+      "acceptance": [
+        "See the CI04 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/scripts/prepare-simulator.sh",
+        "ios/scripts/test_prepare_simulator.py",
+        ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "CI05",
+      "parent": null,
+      "title": "Retry a simulator test step once when it failed before any assertion ran",
+      "file_scope": [
+        "ios/scripts/classify_simulator_fault.py",
+        "ios/scripts/retry-simulator-step.sh",
+        "ios/scripts/test_classify_simulator_fault.py",
+        "ios/scripts/test_retry_simulator_step.py",
+        ".github/workflows/ios.yml",
+        "ios/scripts/*-simulator.sh (invocation lines)",
+        "ios/scripts/check_project_config.py",
+        "Makefile (ios-check)",
+        "AGENTS.md (one sentence)"
+      ],
+      "intent": "Retry a simulator test step once only when every failure in its log is a listed launch or device fault; never retry a failed assertion.",
+      "acceptance": [
+        "See the CI05 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI04"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/smoke-capture-simulator.sh",
+        "ios/scripts/prepare-simulator.sh"
+      ]
+    },
+    {
+      "key": "F72",
+      "parent": null,
+      "title": "Accessibility audit: a Home card keeps one name however its age is worded",
+      "file_scope": [
+        "ios/UITests/Accessibility/",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Stop testHomePopulated failing when a card's caption age changes wording between audit stops, and diagnose the remaining unsettled-excuse failures from evidence.",
+      "acceptance": [
+        "See the F72 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/UITests/Accessibility/GlassContrast.swift",
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift",
+        "app/home/HomeBodyView.swift"
+      ]
+    },
+    {
+      "key": "CI06",
+      "parent": null,
+      "title": "Split the accessibility job into two parallel halves by test group",
+      "file_scope": [
+        ".github/workflows/ios.yml (accessibility job)",
+        "ios/scripts/accessibility-simulator.sh",
+        "ios/scripts/ (new groups file and its test)",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/test_accessibility_gate.py",
+        "Makefile (ios-check)",
+        "AGENTS.md (macOS checks passage)",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Run the accessibility audits as two parallel jobs split by test group, each at both text sizes, so each finishes well inside the time limit and a flaky failure reruns half the work.",
+      "acceptance": [
+        "See the CI06 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/accessibility-simulator.sh",
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift"
+      ]
+    },
+    {
+      "key": "F73",
+      "parent": null,
+      "title": "Capture probe handoff test: a shortcut handoff after a restart reaches the foreground or says why not",
+      "file_scope": [
+        "ios/CaptureProbe/UITests/",
+        "ios/CaptureProbe/ (only if the probe is at fault)",
+        "ios/scripts/smoke-capture-simulator.sh (evidence output only)",
+        "docs/validation/"
+      ],
+      "intent": "Diagnose and fix the hosted flake in CaptureProbeHandoffUITests where the app is not in the foreground after a shortcut handoff, and make the failure name what is in front.",
+      "acceptance": [
+        "See the F73 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift",
+        "ios/scripts/smoke-capture-simulator.sh",
+        ".github/workflows/ios.yml"
+      ]
+    },
+    {
+      "key": "CI07",
+      "parent": null,
+      "title": "Split the simulator job into three parallel jobs",
+      "file_scope": [
+        ".github/workflows/ios.yml (simulator job and two new jobs)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (macOS checks passage)",
+        "docs/features/ci-artifact-budget.md"
+      ],
+      "intent": "Run the simulator job's steps as three parallel jobs so the slowest job of a run drops from about 72 minutes to under 50 and a flaky failure reruns a third of the work.",
+      "acceptance": [
+        "See the CI07 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "key": "CI08",
+      "parent": null,
+      "title": "Do not start the macOS jobs for a pull request that changes only documents",
+      "file_scope": [
+        ".github/workflows/ios.yml (trigger)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (macOS checks passage)"
+      ],
+      "intent": "Skip ios.yml for pull requests whose every changed file is under docs/ or a root Markdown file.",
+      "acceptance": [
+        "See the CI08 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI07"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "key": "F74",
+      "parent": null,
+      "title": "Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails",
+      "file_scope": [
+        "ios/Tests/Support/CoreLeakBaseline.swift",
+        "ios/Tests/Support/ (new test file)",
+        "ios/scripts/check_test_leak_baseline.py and its tests"
+      ],
+      "intent": "Stop real-root unit tests failing on a result buffer that is briefly in flight when the leak counts are read, without letting a real leak pass.",
+      "acceptance": [
+        "See the F74 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/Support/CoreLeakBaseline.swift",
+        "ios/OhAndCoreBridge/CoreHandle.swift",
+        "ios/scripts/check_test_leak_baseline.py"
+      ]
+    },
+    {
+      "key": "CI09",
+      "parent": null,
+      "title": "Install the pinned project generator from a verified release file, not by cloning and compiling it in every job",
+      "file_scope": [
+        "ios/scripts/install-xcodegen.sh (new)",
+        "ios/scripts/generate.sh",
+        "ios/Mintfile",
+        ".github/workflows/ios.yml and upgrade.yml (tool installation steps)",
+        "ios/scripts/check_project_config.py and its tests",
+        "AGENTS.md (pinned XcodeGen sentence)"
+      ],
+      "intent": "Remove the per-job clone and compile of XcodeGen: install the pinned release binary, verified by digest and cached, saving about 2.7 minutes per job and a network dependency.",
+      "acceptance": [
+        "See the CI09 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "CI08"
+      ],
+      "source_pointers": [
+        "ios/scripts/generate.sh",
+        "ios/Mintfile",
+        ".github/workflows/ios.yml",
+        ".github/workflows/upgrade.yml"
+      ]
+    },
+    {
+      "key": "F75",
+      "parent": null,
+      "title": "Home recents tests: the scripted source is touched from two threads and crashes the test process",
+      "file_scope": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift (isolation of the private read methods only)"
+      ],
+      "intent": "Stop the unit-test process crashing intermittently on a data race in the scripted home recents source, and close the same race in the model's read counter if it is real.",
+      "acceptance": [
+        "See the F75 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
+        "app/home/HomeRecentsModel.swift"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -5214,7 +5610,9 @@
       "T12a"
     ],
     "T06": [
-      "T05b"
+      "T05b",
+      "F68",
+      "F69"
     ],
     "T07": [
       "T06"
@@ -5451,7 +5849,8 @@
       "F61"
     ],
     "U10b": [
-      "U10a"
+      "U10a",
+      "F68"
     ],
     "F42": [],
     "F43": [],
@@ -5530,12 +5929,40 @@
       "T09",
       "T10b",
       "T12b",
-      "U10b"
+      "U10b",
+      "F68",
+      "F69"
     ],
     "F67": [],
     "U10c": [
       "U10b"
-    ]
+    ],
+    "F69": [],
+    "F70": [],
+    "F71a": [],
+    "F71b": [
+      "F71a",
+      "F69"
+    ],
+    "F71c": [
+      "F71b"
+    ],
+    "CI04": [],
+    "CI05": [
+      "CI04"
+    ],
+    "F72": [],
+    "CI06": [],
+    "F73": [],
+    "CI07": [],
+    "CI08": [
+      "CI07"
+    ],
+    "F74": [],
+    "CI09": [
+      "CI08"
+    ],
+    "F75": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -5853,6 +6280,42 @@
     {
       "date": "2026-11-07",
       "change": "U10b amendment 1: the maintainer has no hardware keyboard, so the Full Keyboard Access run moves to U10c (blocked, maintainer input, not a dependency of T05b, T06 or T08). U10b's criterion 1 is read as the VoiceOver and largest-text runs; keyboard sections of the record say 'not run'. The keyboard checks are still owed before any distribution beyond the maintainer's phone."
+    },
+    {
+      "date": "2026-11-10",
+      "change": "F68 added: the trial phone is now an iPhone Duo and SDK-26 builds run letterboxed on its inner display; the native toolchain moves to Xcode 27.2 on GitHub's xcode-27 image (GA 2026-10-15). U10b, T05b and T06 gain F68 as an effective dependency; the maintainer's device evidence is collected on the first candidate built after it lands, and T10b's upgrade procedure is repeated on the new phone between two such candidates."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F69 and F70 added from the maintainer's phone reports. F69: the on-device recognizer delivers one result per segment (a segment ends at a pause of about 3 s or after about a minute of speech) and the app kept only the final one, so long voice notes were transcribed from their last part; reproduced with synthetic fixtures in an instrumented TranscriptionProbe on iOS 27.2.1. F70: playback never configures the audio session, so retained audio is silent after a recording (.record) or with the silent switch on (.soloAmbient); diagnosed from the code, device confirmation is its criterion 5. Neither is a dependency of another task."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "Maintainer decision: the trial candidate waits for F69. T06 and T05b gain F69 as an effective dependency, so the functional device matrix and the signed trial build use a candidate whose voice transcripts hold everything that was said. F70 stays a dependency of nothing."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F71a, F71b and F71c added at the maintainer's request: re-transcribe voice notes stored before F69 from their retained audio. The core stores one transcript per item, so F71a adds an explicit, guarded replacement of an uncorrected machine transcript (schema step 15, superseded text kept as history, retention clock unchanged), F71b the boundary and native handler, F71c one explicit action on the retention screen. Chain F71a -> F71b (also after F69) -> F71c. No trial task depends on them. The repair reaches only notes whose audio is still retained."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "F71a amendment 1 and F71b amendment 1, from review round 2 of PR #411: the core does not record audio removal (a native file effect held in the native ledger), so F71a drops its recorded_audio_removals table and lists candidates by audio reference only, and F71b decides natively which candidates still have a recording and requests only those. F71a may add its request-settling hook to core/src/jobs/queue/mod.rs. The specification's 'recorded as removed' exclusion was the coordinator's error."
+    },
+    {
+      "date": "2026-11-17",
+      "change": "CI04 and CI05 added at the maintainer's request: every ios.yml run started on 2026-11-17 needed manual reruns for hosted-runner simulator faults. CI04 gives prepare-simulator.sh one recorded recovery attempt; CI05 retries a test step once when every failure in its log is a listed launch or device fault. Failed assertions are never retried."
+    },
+    {
+      "date": "2026-11-18",
+      "change": "F70 amendment 1: F70 also owns additive edits to ios/AppAssembly/AppServices.swift and VoiceServiceAdapters.swift and new tests under ios/Tests/VoiceCapture/, which scope item 2 needs; criterion 3 requires a test that fails if the production assignment in AppServices.swift is removed. Requested by reviewers on PRs #410 and #414; the narrow original ownership was the coordinator's omission."
+    },
+    {
+      "date": "2026-11-19",
+      "change": "F72 added: testHomePopulated failed in four hosted attempts on three unrelated pull requests because a Home card's ledger name changes when its caption age goes from 'now' to 'N sec. ago'; a second, undiagnosed cause is to be established from the audit logs. The audit rule is unchanged and nothing is retried."
+    },
+    {
+      "date": "2026-11-19",
+      "change": "CI06 added at the maintainer's request: the accessibility job is split into two parallel jobs by test group. It cannot be split by text size because the largest-size pass settles owed elements from the default-size pass's settled-default.txt. The 75-minute limit is not raised."
     }
   ]
 }

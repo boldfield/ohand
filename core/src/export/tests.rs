@@ -177,6 +177,7 @@ impl Store {
                     confidence: Some(0.91),
                     detected_language: Some("en-US".to_string()),
                     recognizer: "on-device-recognizer/1".to_string(),
+                    transcript_generation: 1,
                     audio_sha256: AUDIO_SHA256.to_string(),
                 }),
                 interpretation: None,
@@ -888,4 +889,86 @@ fn without_wal_a_writer_is_held_off_until_the_snapshot_is_released() {
         .conn()
         .execute("UPDATE items SET updated_at = 'changed'", [])
         .unwrap();
+}
+
+#[test]
+fn a_replaced_transcript_is_exported_as_superseded_history_beside_the_current_one() {
+    use crate::ingress::transcription::{request_retranscription, RetranscriptionSelection};
+
+    let seeded = Store::seeded();
+    let queued = request_retranscription(
+        &mut seeded.store.open(),
+        RetranscriptionSelection::Items(std::slice::from_ref(&seeded.voice_item)),
+        1,
+        exported_at(),
+    )
+    .unwrap()
+    .queued;
+    let job = loop {
+        let claimed = claim_job_with_lease(
+            &mut seeded.store.open(),
+            Duration::seconds(300),
+            exported_at(),
+        )
+        .unwrap()
+        .expect("job is claimable");
+        if claimed.job_id == queued[0].job_id {
+            break claimed;
+        }
+    };
+    apply_transcription_outcome(
+        &mut seeded.store.open(),
+        &TranscriptionOutcome {
+            job_id: job.job_id.clone(),
+            lease_attempt: job.attempt_count,
+            audio_reference: AUDIO_REFERENCE.to_string(),
+            result: RecognizerResult::Transcript(RecognizedTranscript {
+                text: "find the watering can and water the ferns tomorrow".to_string(),
+                confidence: None,
+                detected_language: Some("en-US".to_string()),
+                recognizer: "on-device-recognizer/2".to_string(),
+                transcript_generation: 1,
+                audio_sha256: AUDIO_SHA256.to_string(),
+            }),
+            interpretation: None,
+        },
+        exported_at(),
+    )
+    .unwrap();
+
+    let referenced = read_export(&export_bytes(
+        &seeded.store,
+        &request(&[ItemScope::Personal], AudioInclusion::References),
+    ))
+    .unwrap();
+    let voice = referenced
+        .items
+        .iter()
+        .find(|item| item.item_id == seeded.voice_item)
+        .unwrap();
+    assert_eq!(
+        voice.transcript.as_ref().unwrap().text,
+        "find the watering can and water the ferns tomorrow"
+    );
+    assert_eq!(voice.superseded_transcripts.len(), 1);
+    let superseded = &voice.superseded_transcripts[0];
+    assert_eq!(superseded.text, "water the ferns tomorrow");
+    assert_eq!(superseded.recognizer, "on-device-recognizer/1");
+    assert_eq!(
+        superseded.superseded_by_record_id,
+        voice.transcript.as_ref().unwrap().transcript_record_id
+    );
+    assert_eq!(superseded.audio_sha256.as_deref(), Some(AUDIO_SHA256));
+
+    let excluded = read_export(&export_bytes(
+        &seeded.store,
+        &request(&[ItemScope::Personal], AudioInclusion::Excluded),
+    ))
+    .unwrap();
+    let omitted = excluded
+        .items
+        .iter()
+        .find(|item| item.item_id == seeded.voice_item)
+        .unwrap();
+    assert_eq!(omitted.superseded_transcripts[0].audio_sha256, None);
 }

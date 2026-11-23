@@ -8,6 +8,7 @@ import XCTest
 /// A recognizer that answers from a script and records every call. It never touches the network.
 final class FakeOnDeviceRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     let recognizerName = "fake-on-device/1.0"
+    let transcriptGeneration: Int
     private let lock = NSLock()
     private var outcome: OnDeviceRecognitionOutcome
     private var holdsUntilCancelled: Bool
@@ -15,7 +16,8 @@ final class FakeOnDeviceRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     private var sawCancellation = false
     private var onRecognize: (@Sendable (URL) -> Void)?
 
-    init(outcome: OnDeviceRecognitionOutcome, holdsUntilCancelled: Bool = false) {
+    init(outcome: OnDeviceRecognitionOutcome, holdsUntilCancelled: Bool = false, transcriptGeneration: Int = 2) {
+        self.transcriptGeneration = transcriptGeneration
         self.outcome = outcome
         self.holdsUntilCancelled = holdsUntilCancelled
     }
@@ -287,6 +289,13 @@ struct TranscriptionStore {
             Attachment(
                 text: Self.text(statement, 0), audioSHA256: Self.text(statement, 1),
                 recognizer: Self.text(statement, 2), sourceJobID: Self.text(statement, 3))
+        }
+    }
+
+    /// The outcome each replacement request recorded, in request order; empty text while one is still unsettled.
+    var replacementOutcomes: [String] {
+        queryAll("SELECT COALESCE(outcome, '') FROM transcript_replacement_requests ORDER BY requested_at", nil) {
+            Self.text($0, 0)
         }
     }
 

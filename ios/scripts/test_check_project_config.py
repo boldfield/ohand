@@ -13,6 +13,92 @@ class ProjectConfigChecks(unittest.TestCase):
     def test_committed_configuration_passes(self):
         self.assertEqual(checks.run_all_checks(), [])
 
+    def split_workflow(self):
+        return yaml.safe_load(checks.IOS_WORKFLOW.read_text())
+
+    def write_split_workflow(self, workflow):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "ios.yml"
+        path.write_text(yaml.safe_dump(workflow))
+        return path
+
+    def test_simulator_split_passes_as_committed(self):
+        self.assertEqual(checks.check_simulator_job_split(), [])
+
+    def test_simulator_split_reports_a_step_missing_from_all_three_jobs(self):
+        workflow = self.split_workflow()
+        step_name = "Launch OhAndApp smoke test"
+        jobs = workflow["jobs"]
+        for job_name in checks.SPLIT_SIMULATOR_JOBS:
+            jobs[job_name]["steps"] = [s for s in jobs[job_name]["steps"] if s.get("name") != step_name]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(step_name, errors[0])
+
+    def test_simulator_split_reports_a_step_in_two_jobs(self):
+        workflow = self.split_workflow()
+        step_name = "Build CaptureProbe"
+        jobs = workflow["jobs"]
+        step = next(s for s in jobs["capture-probe"]["steps"] if s.get("name") == step_name)
+        jobs["simulator"]["steps"].append(copy.deepcopy(step))
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(step_name, errors[0])
+
+    def test_simulator_split_reports_a_shared_step_missing_from_a_job(self):
+        workflow = self.split_workflow()
+        jobs = workflow["jobs"]
+        jobs["capture-probe"]["steps"] = [s for s in jobs["capture-probe"]["steps"] if s.get("name") != "Select simulator"]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("capture-probe", errors[0])
+
+    def test_simulator_split_reports_failure_diagnostics_caps_above_the_old_single_job_allowance(self):
+        workflow = self.split_workflow()
+        for job_name in checks.SPLIT_SIMULATOR_JOBS:
+            export_step = next(s for s in workflow["jobs"][job_name]["steps"] if "export-failure-diagnostics.sh" in s.get("run", ""))
+            export_step["env"]["CAP_BYTES"] = "24000000"
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("CAP_BYTES", errors[0])
+
+    def test_simulator_split_reports_a_missing_job_and_a_long_timeout(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["timeout-minutes"] = 90
+        del workflow["jobs"]["notification-probe"]
+        errors = checks.check_simulator_job_split(self.write_split_workflow(workflow))
+        self.assertTrue(any("notification-probe" in e for e in errors))
+        self.assertTrue(any("timeout-minutes" in e for e in errors))
+
+    def test_documents_only_skip_passes_as_committed(self):
+        self.assertEqual(checks.check_documents_only_skip(), [])
+
+    def test_documents_only_skip_reports_a_changed_ignore_list(self):
+        for ignored in (["docs/**"], ["docs/**", "*.md", "tools/**"], ["docs/**", "**.md"], None):
+            workflow = self.split_workflow()
+            if ignored is None:
+                del workflow[True]["pull_request"]["paths-ignore"]
+            else:
+                workflow[True]["pull_request"]["paths-ignore"] = ignored
+            errors = checks.check_documents_only_skip(self.write_split_workflow(workflow))
+            self.assertEqual(len(errors), 1, ignored)
+            self.assertIn("paths-ignore", errors[0])
+
+    def test_documents_only_skip_reports_a_paths_filter_on_ios_workflow(self):
+        workflow = self.split_workflow()
+        workflow[True]["pull_request"]["paths"] = ["ios/**"]
+        errors = checks.check_documents_only_skip(self.write_split_workflow(workflow))
+        self.assertTrue(any("paths filter" in e for e in errors))
+
+    def test_documents_only_skip_reports_a_path_filter_on_core_workflow(self):
+        for key in ("paths", "paths-ignore"):
+            workflow = yaml.safe_load(checks.CORE_WORKFLOW.read_text())
+            workflow[True]["pull_request"][key] = ["docs/**"]
+            errors = checks.check_documents_only_skip(checks.IOS_WORKFLOW, self.write_split_workflow(workflow))
+            self.assertEqual(len(errors), 1, key)
+            self.assertIn("core.yml", errors[0])
+
     def test_transitive_framework_must_be_embedded_in_app(self):
         project = checks.load_project()
         app = project["targets"]["OhAndApp"]
@@ -155,18 +241,18 @@ class ProjectConfigChecks(unittest.TestCase):
         project["targets"]["AudioProbe"]["settings"]["PRODUCT_BUNDLE_IDENTIFIER"] = "com.boldfield.ohand.probes.bridge"
         self.assertTrue(any("not unique" in e for e in checks.check_project(project)))
 
-    def write_workflow(self, directory, pins):
+    def write_workflow(self, directory, pins, runs_on="xcode-27"):
         steps = "".join(
             f"      - uses: maxim-lobanov/setup-xcode@v1\n        with:\n          xcode-version: '{pin}'\n" for pin in pins
         ) or "      - run: echo no xcode step\n"
         path = Path(directory) / "ios.yml"
-        path.write_text(f"name: x\njobs:\n  build:\n    runs-on: macos-26\n    steps:\n{steps}")
+        path.write_text(f"name: x\njobs:\n  build:\n    runs-on: {runs_on}\n    steps:\n{steps}")
         return path
 
     def test_committed_workflow_pin_matches_project(self):
         project = checks.load_project()
         self.assertEqual(checks.check_workflow_xcode_pin(project), [])
-        self.assertEqual(str(project["options"]["xcodeVersion"]), "26.6")
+        self.assertEqual(str(project["options"]["xcodeVersion"]), "27.2")
 
     def write_upload_workflow(self, directory, continue_on_error):
         step = {"name": "Upload evidence", "uses": "actions/upload-artifact@v4", "with": {"name": "x", "path": "y"}}
@@ -280,20 +366,33 @@ class ProjectConfigChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_workflow(directory, ["16.4"])
             errors = checks.check_workflow_xcode_pin(project, path)
-        self.assertTrue(any("'16.4'" in e and "'26.6'" in e for e in errors), errors)
+        self.assertTrue(any("'16.4'" in e and "'27.2'" in e for e in errors), errors)
 
     def test_project_pin_change_without_workflow_change_is_reported(self):
         project = copy.deepcopy(checks.load_project())
-        project["options"]["xcodeVersion"] = "27.0"
+        project["options"]["xcodeVersion"] = "27.0.1"
         errors = checks.check_workflow_xcode_pin(project)
-        self.assertEqual(len([e for e in errors if "'27.0'" in e]), 4, errors)
+        self.assertEqual(len([e for e in errors if "'27.0.1'" in e]), 6, errors)
+
+    def test_pin_27_2_on_macos_26_runner_is_reported(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_workflow(directory, ["27.2"], runs_on="macos-26")
+            errors = checks.check_workflow_xcode_pin(project, path)
+        self.assertTrue(any("'macos-26'" in e and "'xcode-27'" in e for e in errors), errors)
+
+    def test_pin_27_2_on_xcode_27_runner_passes(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_workflow(directory, ["27.2"])
+            self.assertEqual(checks.check_workflow_xcode_pin(project, path), [])
 
     def test_job_without_exactly_one_xcode_step_is_reported(self):
         project = checks.load_project()
         with tempfile.TemporaryDirectory() as directory:
             missing = self.write_workflow(directory, [])
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, missing)))
-            doubled = self.write_workflow(directory, ["26.6", "26.6"])
+            doubled = self.write_workflow(directory, ["27.2", "27.2"])
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, doubled)))
 
     def copy_plists(self, directory):
@@ -381,6 +480,29 @@ class FaceIdUsageChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project, root = self.write_project(directory, False, "let value = 1\n")
             self.assertEqual(checks.check_face_id_usage(project, root), [])
+
+
+class SimulatorTestRetryChecks(unittest.TestCase):
+    def check(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "x-simulator.sh"
+            path.write_text(text)
+            return checks.check_simulator_test_retry([path])
+
+    def test_committed_files_run_xcodebuild_tests_through_the_wrapper(self):
+        self.assertEqual(checks.check_simulator_test_retry(), [])
+
+    def test_wrapped_invocation_passes(self):
+        self.assertEqual(self.check('"${script_dir}/retry-simulator-step.sh" "${udid}" log -- env A=1 xcodebuild test-without-building \\\n  -scheme X\n'), [])
+
+    def test_bare_invocation_is_reported(self):
+        self.assertEqual(len(self.check("xcodebuild test-without-building \\\n  -scheme X 2>&1 | tee log\n")), 1)
+
+    def test_bare_invocation_with_environment_prefix_is_reported(self):
+        self.assertEqual(len(self.check("A=1 xcodebuild test-without-building -scheme X\n")), 1)
+
+    def test_comment_mentioning_the_command_is_ignored(self):
+        self.assertEqual(self.check("# runs xcodebuild test-without-building\n"), [])
 
 
 if __name__ == "__main__":

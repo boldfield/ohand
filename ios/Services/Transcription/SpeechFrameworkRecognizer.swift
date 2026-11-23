@@ -8,6 +8,8 @@ import Speech
 /// framework does not know and a language whose on-device model is not installed are both `unsupported`.
 public final class SpeechFrameworkRecognizer: OnDeviceRecognizing, @unchecked Sendable {
     public let recognizerName: String
+    /// Generation 2: every recognized segment is accumulated (see `RecognitionAccumulator`), not only the last.
+    public let transcriptGeneration = 2
     private let mayPromptForPermission: @Sendable () -> Bool
 
     /// `mayPromptForPermission` is asked when speech permission has not been decided; answer `true` only while
@@ -48,15 +50,14 @@ public final class SpeechFrameworkRecognizer: OnDeviceRecognizing, @unchecked Se
                 guard session.install(continuation) else { return }
                 let request = SFSpeechURLRecognitionRequest(url: audioURL)
                 request.requiresOnDeviceRecognition = true
+                // Every callback is a finished segment, so partial results are not needed.
                 request.shouldReportPartialResults = false
                 let task = recognizer.recognitionTask(with: request) { result, error in
-                    if let result = result, result.isFinal {
-                        session.finish(
-                            .transcript(
-                                text: result.bestTranscription.formattedString,
-                                confidence: SpeechFrameworkRecognizer.confidence(of: result.bestTranscription)))
-                    } else if let error = error {
-                        session.finish(SpeechFrameworkRecognizer.outcome(for: error as NSError))
+                    if let result = result {
+                        session.receive(RecognitionResultValue(result))
+                    }
+                    if let error = error {
+                        session.receive(error: error as NSError)
                     }
                 }
                 session.attach(task)
@@ -104,6 +105,10 @@ public final class SpeechFrameworkRecognizer: OnDeviceRecognizing, @unchecked Se
         return min(max(mean, 0), 1)
     }
 
+    static func isNoSpeechDetected(_ error: NSError) -> Bool {
+        error.domain == "kAFAssistantErrorDomain" && error.code == 1110
+    }
+
     /// `kAFAssistantErrorDomain` 1110 is "No speech detected" and 216 is a request the framework ended, as observed
     /// on device (see docs/validation/transcription-probe.md). A cancellation this code asked for is reported by
     /// `RecognitionSession` as `.cancelled`, so a 216 reaching here was raised by the system, not by us: it is a
@@ -126,6 +131,7 @@ protocol RecognitionCancelling: AnyObject {
 extension SFSpeechRecognitionTask: RecognitionCancelling {}
 
 /// Resumes the recognition's continuation exactly once, whether recognition finishes, fails or is cancelled first.
+/// It accumulates the per-segment results, so the transcript is the whole recognition and not its last segment.
 /// It also holds `keepingAlive` (the `SFSpeechRecognizer`) until the recognition ends, because the framework may stop
 /// delivering results once the recognizer that made a task is released.
 final class RecognitionSession: @unchecked Sendable {
@@ -134,6 +140,7 @@ final class RecognitionSession: @unchecked Sendable {
     private var continuation: CheckedContinuation<OnDeviceRecognitionOutcome, Never>?
     private var task: RecognitionCancelling?
     private var isCancelled = false
+    private var accumulator = RecognitionAccumulator()
 
     init(keepingAlive: AnyObject) {
         keepAlive = keepingAlive
@@ -159,6 +166,32 @@ final class RecognitionSession: @unchecked Sendable {
         if !cancelNow { self.task = task }
         lock.unlock()
         if cancelNow { task.cancel() }
+    }
+
+    /// Takes one recognizer result. Only the final result ends the recognition, with everything accepted so far.
+    func receive(_ result: RecognitionResultValue) {
+        lock.lock()
+        accumulator.add(result)
+        let accumulated = result.isFinal ? accumulatedOutcome() : nil
+        lock.unlock()
+        if let accumulated { finish(accumulated) }
+    }
+
+    /// Takes a recognizer error. It ends the recognition as `SpeechFrameworkRecognizer.outcome(for:)` says, except
+    /// that "no speech detected" after accepted segments reports a silent tail and returns the accumulated transcript.
+    func receive(error: NSError) {
+        lock.lock()
+        let isSilentTail = SpeechFrameworkRecognizer.isNoSpeechDetected(error) && accumulator.hasAcceptedResults
+        let accumulated = isSilentTail ? accumulatedOutcome() : nil
+        lock.unlock()
+        finish(accumulated ?? SpeechFrameworkRecognizer.outcome(for: error))
+    }
+
+    /// Caller holds `lock`.
+    private func accumulatedOutcome() -> OnDeviceRecognitionOutcome {
+        .transcript(
+            text: accumulator.transcript,
+            confidence: SpeechFrameworkRecognizer.confidence(ofSegmentConfidences: accumulator.segmentConfidences))
     }
 
     /// Ends the recognition with `outcome` unless it already ended; later calls do nothing.

@@ -3,11 +3,54 @@ import SQLite3
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
+@testable import OhAnd
 
 private final class PlaybackRootUnreachableSender: ProviderRequestSender, @unchecked Sendable {
     func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
         throw URLError(.notConnectedToInternet)
     }
+}
+
+/// Records playback's audio-session calls in order, so a test can see whether the session was released.
+private final class PlaybackRootAudioSessionLog: PlaybackAudioSessionControlling, @unchecked Sendable {
+    static let deactivation = "setActive(false, .notifyOthersOnDeactivation)"
+
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var calls: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    private func record(_ call: String) {
+        lock.lock()
+        recorded.append(call)
+        lock.unlock()
+    }
+
+    func setPlaybackCategory() throws { record("setCategory(.playback, .spokenAudio)") }
+    func activate() throws { record("setActive(true)") }
+    func deactivate() { record(Self.deactivation) }
+}
+
+/// The synthetic recorder engine with a probe that runs as the engine starts, before it writes anything.
+private final class ProbedVoiceEngine: VoiceCaptureEngine {
+    let synthetic = SyntheticVoiceEngine()
+    var atStart: () -> Void = {}
+
+    var onEvent: ((VoiceEngineEvent) -> Void)? {
+        get { synthetic.onEvent }
+        set { synthetic.onEvent = newValue }
+    }
+
+    func start(writingTo destination: URL, maxDuration: TimeInterval) throws {
+        atStart()
+        try synthetic.start(writingTo: destination, maxDuration: maxDuration)
+    }
+
+    func stopAndClose() -> Bool { synthetic.stopAndClose() }
 }
 
 private final class PlaybackRootResultBox<Value>: @unchecked Sendable {
@@ -29,7 +72,8 @@ private final class PlaybackRootResultBox<Value>: @unchecked Sendable {
 
 /// Drives `ServiceCompositionRoot.playback` over the real Rust core and the real `AVAudioPlayer` with the real
 /// `LifecycleCoordinator`: that the root returns a playable handle, that the root's deletion service ends playback
-/// only once an intent is recorded, and that the lifecycle's retention and deletion cleanup share the root's fence.
+/// only once an intent is recorded, that the lifecycle's retention and deletion cleanup share the root's fence, and
+/// that the app assembly keeps playback and recording off the shared audio session at the same time.
 final class PlaybackRootIntegrationTests: XCTestCase {
     private static let routeID = "route-playback"
 
@@ -165,7 +209,130 @@ final class PlaybackRootIntegrationTests: XCTestCase {
         XCTAssertFalse(root.playback.fence.isHeld(audioURL))
     }
 
+    // MARK: recording through the app assembly
+
+    /// `AppServices` connects the recorder to the root's playback. A recording started from the capture screen ends an
+    /// open, playing session and releases its audio session before the engine takes the session for recording.
+    func testANewRecordingThroughTheAppAssemblyEndsPlayingAudioBeforeTheEngineStarts() throws {
+        let audio = PlaybackRootAudioSessionLog()
+        let engine = ProbedVoiceEngine()
+        let (services, root) = try makeAppServices(audio: audio, engine: engine)
+        defer { services.shutDown() }
+        let (itemID, captureID) = try saveCapture(root)
+        let audioURL = try seedAudio(captureID: captureID)
+        let opened = try run { try await root.playback.open(itemID: itemID) }
+        XCTAssertTrue(opened.play())
+        var stateAtStart: (isOpen: Bool, calls: [String])?
+        engine.atStart = { stateAtStart = (opened.isOpen, audio.calls) }
+
+        var started: Result<VoiceRecordingStarted, VoiceStartFailure>?
+        services.voice.recorder.start { started = $0 }
+        XCTAssertTrue(pump(until: { started != nil }), "the recording start completes")
+        defer { services.voice.recorder.cancel() }
+
+        _ = try XCTUnwrap(started).get()
+        let observed = try XCTUnwrap(stateAtStart, "the engine started")
+        XCTAssertFalse(observed.isOpen, "playback had ended when the engine started")
+        XCTAssertEqual(
+            observed.calls,
+            ["setCategory(.playback, .spokenAudio)", "setActive(true)", PlaybackRootAudioSessionLog.deactivation])
+        XCTAssertEqual(opened.endReason, .closed)
+        XCTAssertFalse(root.playback.fence.isHeld(audioURL))
+        XCTAssertEqual(engine.synthetic.startCount, 1)
+    }
+
+    /// The assembly also tells playback a recording is in progress: an open while one is running is refused.
+    func testAnOpenWhileRecordingThroughTheAppAssemblyIsRefused() throws {
+        let audio = PlaybackRootAudioSessionLog()
+        let engine = ProbedVoiceEngine()
+        let (services, root) = try makeAppServices(audio: audio, engine: engine)
+        defer { services.shutDown() }
+        let (itemID, captureID) = try saveCapture(root)
+        _ = try seedAudio(captureID: captureID)
+        var started: Result<VoiceRecordingStarted, VoiceStartFailure>?
+        services.voice.recorder.start { started = $0 }
+        XCTAssertTrue(pump(until: { started != nil }), "the recording start completes")
+        _ = try XCTUnwrap(started).get()
+
+        XCTAssertThrowsError(try run { try await root.playback.open(itemID: itemID) }) {
+            XCTAssertEqual($0 as? PlaybackError, .recordingInProgress)
+        }
+
+        services.voice.recorder.cancel()
+        XCTAssertTrue(pump(until: { services.voice.controller.state == .idle }), "the recording ends")
+        let reopened = try run { try await root.playback.open(itemID: itemID) }
+        XCTAssertTrue(reopened.isOpen, "once the recording ends, playback opens again")
+        reopened.close()
+        XCTAssertEqual(audio.calls, [], "no session was configured for a refused open")
+    }
+
+    /// Continuing a recording from recovery starts the engine through the same assembly, so it ends playback too.
+    func testAContinuedRecordingThroughTheAppAssemblyEndsPlayingAudioBeforeTheEngineStarts() throws {
+        let audio = PlaybackRootAudioSessionLog()
+        let engine = ProbedVoiceEngine()
+        let (services, root) = try makeAppServices(audio: audio, engine: engine)
+        defer { services.shutDown() }
+        let (itemID, captureID) = try saveCapture(root)
+        _ = try seedAudio(captureID: captureID)
+        try FileManager.default.createDirectory(at: root.inProgressAudioDirectory, withIntermediateDirectories: true)
+        try SyntheticVoiceEngine.writeClosedRecording(
+            at: root.inProgressAudioDirectory.appendingPathComponent("voice-left-1.wav"), frames: 8000)
+        var listing: VoiceRecoveryListing?
+        services.voice.recovery.refresh { listing = $0 }
+        XCTAssertTrue(pump(until: { listing != nil }), "the recovery listing completes")
+        let leftRecording = try XCTUnwrap(listing?.recordings.first, "the left recording is offered")
+        let opened = try run { try await root.playback.open(itemID: itemID) }
+        XCTAssertTrue(opened.play())
+        var stateAtStart: (isOpen: Bool, calls: [String])?
+        engine.atStart = { stateAtStart = (opened.isOpen, audio.calls) }
+
+        var continued: Result<VoiceRecordingStarted, VoiceRecoveryFailure>?
+        services.voice.recovery.continueRecording(leftRecording) { continued = $0 }
+        XCTAssertTrue(pump(until: { continued != nil }), "the continuation completes")
+        defer { services.voice.recorder.cancel() }
+
+        _ = try XCTUnwrap(continued).get()
+        let observed = try XCTUnwrap(stateAtStart, "the engine started")
+        XCTAssertFalse(observed.isOpen, "playback had ended when the engine started")
+        XCTAssertEqual(observed.calls.last, PlaybackRootAudioSessionLog.deactivation)
+        XCTAssertEqual(observed.calls.filter { $0 == PlaybackRootAudioSessionLog.deactivation }.count, 1)
+        XCTAssertEqual(opened.endReason, .closed)
+    }
+
     // MARK: helpers
+
+    /// The app's assembly over an authenticated root whose playback records its audio-session calls, with the
+    /// microphone and the recorder engine replaced.
+    private func makeAppServices(
+        audio: PlaybackRootAudioSessionLog, engine: ProbedVoiceEngine
+    ) throws -> (AppServices, ServiceCompositionRoot) {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        XCTAssertEqual(session.scope, .authenticated)
+        let lifecycle = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try ServiceCompositionRoot(
+            testing: CompositionConfiguration(
+                storageRootPath: storageRoot.path, captureRouteID: Self.routeID, jobRetryDelaySeconds: 3600),
+            environment: CompositionEnvironment(
+                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+            adapters: .injectedForTests(
+                sender: PlaybackRootUnreachableSender(), readSession: session,
+                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true),
+                playbackAudioSession: audio),
+            modules: [lifecycle])
+        var environment = VoiceRecordingEnvironment.live(protectRecordingFile: { _ in })
+        environment.isForeground = { true }
+        environment.schedulePoll = { _, _ in {} }
+        let voice = VoiceCaptureServices(
+            root: root, engine: engine, permission: FakeMicrophonePermission(), environment: environment,
+            notificationCenter: NotificationCenter())
+        let services = AppServices(
+            root: root, lifecycle: lifecycle, handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
+            voice: voice, notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: NotificationCenter(), isProtectedDataAvailable: { true })
+        return (services, root)
+    }
+
 
     private var layout: ProtectedStorageLayout { ProtectedStorageLayout(rootDirectory: storageRoot) }
 
