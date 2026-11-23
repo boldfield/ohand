@@ -549,9 +549,62 @@ def check_no_signing_material(root=IOS_ROOT):
     ]
 
 
+INSTALL_XCODEGEN_SCRIPT = IOS_ROOT / "scripts" / "install-xcodegen.sh"
+GENERATE_SCRIPT = IOS_ROOT / "scripts" / "generate.sh"
+MINTFILE = IOS_ROOT / "Mintfile"
+INSTALL_XCODEGEN_COMMAND = "ios/scripts/install-xcodegen.sh"
+
+
+def is_xcodegen_cache_step(step):
+    return str(step.get("uses", "")).startswith("actions/cache") and "ohand-xcodegen" in str(step.get("with", {}).get("path", ""))
+
+
+def check_xcodegen_pin(install_script=INSTALL_XCODEGEN_SCRIPT, generate_script=GENERATE_SCRIPT, mintfile=MINTFILE, workflow_paths=(IOS_WORKFLOW, UPGRADE_WORKFLOW)):
+    """CI09: one XcodeGen version in the install script, generate.sh and Mintfile; a recorded digest; no mint in workflows."""
+    errors = []
+    install_text = install_script.read_text()
+    version_match = re.search(r'^PINNED_XCODEGEN_VERSION="([^"]*)"', install_text, re.MULTILINE)
+    digest_match = re.search(r'^PINNED_XCODEGEN_SHA256="([^"]*)"', install_text, re.MULTILINE)
+    version = version_match.group(1) if version_match else None
+    digest = digest_match.group(1) if digest_match else None
+    if not version:
+        errors.append(f"{install_script.name} does not pin PINNED_XCODEGEN_VERSION")
+    if not digest or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        errors.append(f"{install_script.name} PINNED_XCODEGEN_SHA256 must be 64 lowercase hexadecimal characters, found {digest!r}")
+    generate_match = re.search(r'^PINNED_XCODEGEN_VERSION="([^"]*)"', generate_script.read_text(), re.MULTILINE)
+    if not generate_match or generate_match.group(1) != version:
+        errors.append(f"generate.sh pins XcodeGen {generate_match.group(1) if generate_match else None!r}, {install_script.name} pins {version!r}")
+    mint_match = re.search(r"^yonaskolb/XcodeGen@(\S+)\s*$", mintfile.read_text(), re.MULTILINE)
+    if not mint_match or mint_match.group(1) != version:
+        errors.append(f"Mintfile pins XcodeGen {mint_match.group(1) if mint_match else None!r}, {install_script.name} pins {version!r}")
+    expected_cache_key = f"xcodegen-{version}-{digest}"
+    for workflow_path in workflow_paths:
+        jobs = yaml.safe_load(workflow_path.read_text()).get("jobs", {})
+        for job_name, job in jobs.items():
+            steps = job.get("steps", [])
+            install_index = None
+            generate_index = None
+            for index, step in enumerate(steps):
+                run = str(step.get("run", ""))
+                where = f"{workflow_path.name} job {job_name} step {step.get('name', index)!r}"
+                if re.search(r"\bmint\b", run):
+                    errors.append(f"{where} uses mint")
+                if INSTALL_XCODEGEN_COMMAND in run and install_index is None:
+                    install_index = index
+                if "generate.sh" in run and generate_index is None:
+                    generate_index = index
+                if is_xcodegen_cache_step(step) and step["with"].get("key") != expected_cache_key:
+                    errors.append(f"{where} cache key must be {expected_cache_key!r}, found {step['with'].get('key')!r}")
+            if install_index is not None and not any(is_xcodegen_cache_step(step) for step in steps[:install_index]):
+                errors.append(f"{workflow_path.name} job {job_name} installs XcodeGen without restoring its archive cache first")
+            if generate_index is not None and (install_index is None or install_index > generate_index):
+                errors.append(f"{workflow_path.name} job {job_name} runs generate.sh without running {INSTALL_XCODEGEN_COMMAND} first")
+    return errors
+
+
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_documents_only_skip() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_artifact_uploads_non_fatal() + check_artifact_budget() + check_simulator_test_retry() + check_simulator_job_split() + check_xcodegen_pin() + check_documents_only_skip() + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":
