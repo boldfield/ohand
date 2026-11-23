@@ -4,74 +4,151 @@ import XCTest
 @testable import OhAndServices
 
 /// A scriptable session and read: tests flip the access state and answer pages themselves.
-final class FakeHomeRecentsSource: HomeRecentsSource {
-    var isAuthenticated = false
-    var isQuietAttemptInFlight = false
-    private(set) var readCursors: [String?] = []
-    private(set) var unlockCount = 0
-    var pages: [String?: CoreRecentItemsPage] = [:]
-    var failure: Error?
-    /// Saved items whose interpretation has ended, typed or not; every other status read answers still pending.
-    var finishedInterpretations: Set<String> = []
-    private(set) var statusReadItemIDs: [String] = []
-    /// When set, a read waits until `releaseHeldReads()`, so a test can relock while it is outstanding.
-    var holdsReads = false
-    /// How many of the next reads to hold until `releaseHeldReads()`. Each answers with the page as it stood when the read
-    /// was made, the way a core read that started before a change returns what it saw.
-    var heldSnapshotReads = 0
+/// Reads arrive on a cooperative-pool thread while the test, on the main actor, scripts and inspects the same state, so
+/// every stored property is guarded by `lock` and no lock is held across a suspension.
+final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _isAuthenticated = false
+    private var _isQuietAttemptInFlight = false
+    private var _readCursors: [String?] = []
+    private var _unlockCount = 0
+    private var _pages: [String?: CoreRecentItemsPage] = [:]
+    private var _failure: Error?
+    private var _finishedInterpretations: Set<String> = []
+    private var _statusReadItemIDs: [String] = []
+    private var _holdsReads = false
+    private var _heldSnapshotReads = 0
     private var heldReads: [CheckedContinuation<Void, Never>] = []
+    /// Counts releases. A read that decides to hold records the count with its cursor, so a release that lands before the
+    /// read has registered its waiter still lets that read go.
+    private var releaseEpoch = 0
+    /// Test-only: awaited by a held read after its cursor is published and before it registers its waiter.
+    private var _beforeWaiterRegistration: (@Sendable () async -> Void)?
     private var handlers: [@Sendable () -> Void] = []
     private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
+    private func locked<Value>(_ body: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    var isAuthenticated: Bool {
+        get { locked { _isAuthenticated } }
+        set { locked { _isAuthenticated = newValue } }
+    }
+    var isQuietAttemptInFlight: Bool {
+        get { locked { _isQuietAttemptInFlight } }
+        set { locked { _isQuietAttemptInFlight = newValue } }
+    }
+    var readCursors: [String?] { locked { _readCursors } }
+    var unlockCount: Int { locked { _unlockCount } }
+    var pages: [String?: CoreRecentItemsPage] {
+        get { locked { _pages } }
+        set { locked { _pages = newValue } }
+    }
+    var failure: Error? {
+        get { locked { _failure } }
+        set { locked { _failure = newValue } }
+    }
+    /// Saved items whose interpretation has ended, typed or not; every other status read answers still pending.
+    var finishedInterpretations: Set<String> {
+        get { locked { _finishedInterpretations } }
+        set { locked { _finishedInterpretations = newValue } }
+    }
+    var statusReadItemIDs: [String] { locked { _statusReadItemIDs } }
+    /// When set, a read waits until `releaseHeldReads()`, so a test can relock while it is outstanding.
+    var holdsReads: Bool {
+        get { locked { _holdsReads } }
+        set { locked { _holdsReads = newValue } }
+    }
+    /// How many of the next reads to hold until `releaseHeldReads()`. Each answers with the page as it stood when the read
+    /// was made, the way a core read that started before a change returns what it saw.
+    var heldSnapshotReads: Int {
+        get { locked { _heldSnapshotReads } }
+        set { locked { _heldSnapshotReads = newValue } }
+    }
+
     func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
-        readCursors.append(cursor)
-        if heldSnapshotReads > 0 {
-            heldSnapshotReads -= 1
-            let pageAsCalled = pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
-            await withCheckedContinuation { heldReads.append($0) }
+        let (holdsSnapshot, holds, pageAsCalled, epochAsCalled): (Bool, Bool, CoreRecentItemsPage, Int) = locked {
+            _readCursors.append(cursor)
+            let page = _pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
+            if _heldSnapshotReads > 0 {
+                _heldSnapshotReads -= 1
+                return (true, false, page, releaseEpoch)
+            }
+            return (false, _holdsReads, page, releaseEpoch)
+        }
+        if holdsSnapshot {
+            await holdUntilReleased(since: epochAsCalled)
             if let failure { throw failure }
             return pageAsCalled
         }
-        if holdsReads {
-            await withCheckedContinuation { heldReads.append($0) }
+        if holds {
+            await holdUntilReleased(since: epochAsCalled)
         }
         if let failure { throw failure }
         return pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
     }
 
+    var beforeWaiterRegistration: (@Sendable () async -> Void)? {
+        get { locked { _beforeWaiterRegistration } }
+        set { locked { _beforeWaiterRegistration = newValue } }
+    }
+
+    private func holdUntilReleased(since epoch: Int) async {
+        await beforeWaiterRegistration?()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let alreadyReleased = locked { () -> Bool in
+                if releaseEpoch != epoch { return true }
+                heldReads.append(continuation)
+                return false
+            }
+            if alreadyReleased { continuation.resume() }
+        }
+    }
+
     func interpretationIsFinished(itemID: String) async throws -> Bool {
-        statusReadItemIDs.append(itemID)
+        locked { _statusReadItemIDs.append(itemID) }
         if let failure { throw failure }
-        return finishedInterpretations.contains(itemID)
+        return locked { _finishedInterpretations.contains(itemID) }
     }
 
     func releaseHeldReads() {
-        let continuations = heldReads
-        heldReads = []
+        let continuations = locked { () -> [CheckedContinuation<Void, Never>] in
+            releaseEpoch += 1
+            let held = heldReads
+            heldReads = []
+            return held
+        }
         continuations.forEach { $0.resume() }
     }
 
-    func unlock() { unlockCount += 1 }
+    func unlock() { locked { _unlockCount += 1 } }
 
     func observeAccess(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
-        handlers.append(handler)
+        locked { handlers.append(handler) }
         return {}
     }
 
     func observeItemChanges(_ handler: @escaping @Sendable (ItemChange) -> Void) -> () -> Void {
-        changeHandlers.append(handler)
+        locked { changeHandlers.append(handler) }
         return {}
     }
 
     func publish(_ change: ItemChange) {
-        changeHandlers.forEach { $0(change) }
+        let current = locked { changeHandlers }
+        current.forEach { $0(change) }
     }
 
     /// Changes the session the way the real one does: the state first, then every observer.
     func setAccess(authenticated: Bool, quietAttemptInFlight: Bool = false) {
-        isAuthenticated = authenticated
-        isQuietAttemptInFlight = quietAttemptInFlight
-        handlers.forEach { $0() }
+        let current = locked { () -> [@Sendable () -> Void] in
+            _isAuthenticated = authenticated
+            _isQuietAttemptInFlight = quietAttemptInFlight
+            return handlers
+        }
+        current.forEach { $0() }
     }
 }
 
@@ -224,6 +301,29 @@ final class HomeRecentsModelTests: XCTestCase {
         source.setAccess(authenticated: false)
         XCTAssertEqual(model.bodyState, .locked)
         XCTAssertTrue(source.readCursors.isEmpty)
+    }
+
+    func testReleaseRacingTheRegistrationOfAHeldReadStillReleasesIt() async {
+        let source = FakeHomeRecentsSource()
+        source.holdsReads = true
+        let reachedWindow = expectation(description: "the read published its cursor and has not registered a waiter")
+        let (gate, openGate) = AsyncStream<Void>.makeStream()
+        source.beforeWaiterRegistration = {
+            reachedWindow.fulfill()
+            for await _ in gate { break }
+        }
+        let readReturned = expectation(description: "the read returned after the release")
+        let read = Task {
+            _ = try? await source.readPage(cursor: nil)
+            readReturned.fulfill()
+        }
+        await fulfillment(of: [reachedWindow], timeout: 5)
+        XCTAssertEqual(source.readCursors.count, 1)
+        // The read is blocked between publishing its cursor and registering its waiter, so this release finds no waiter.
+        source.releaseHeldReads()
+        openGate.yield()
+        await fulfillment(of: [readReturned], timeout: 5)
+        _ = await read.value
     }
 
     func testRelockClearsTheListImmediately() async {

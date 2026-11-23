@@ -271,12 +271,14 @@ final class HomeRecentsModel: ObservableObject {
     /// them at once; tests wait for this to reach zero before checking that nothing leaked.
     private(set) var readsInFlight = 0
 
+    @MainActor
     private func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
         readsInFlight += 1
         defer { readsInFlight -= 1 }
         return try await source.readPage(cursor: cursor)
     }
 
+    @MainActor
     private func interpretationIsFinished(itemID: String) async throws -> Bool {
         readsInFlight += 1
         defer { readsInFlight -= 1 }
