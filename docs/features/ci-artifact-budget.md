@@ -52,6 +52,8 @@ Recorded in AGENTS.md. Each upload step in every workflow:
 
 `ios/scripts/check_project_config.py` (run by `make check` through `ios-check`) enforces the mechanical parts of the rule so a later workflow edit cannot silently regress it.
 
+The Actions cache is not artifact storage and is outside this budget. Since CI09 the macOS jobs keep one entry in it, the verified XcodeGen release archive (about 5 MB, key `xcodegen-<version>-<sha256>`), saved once per key and branch scope and evicted by GitHub's own per-repository cache limit; nothing else is cached.
+
 Non-goals: changing where the scripts write their result bundles, changing which tests run, or reducing run frequency. Those stay as they are.
 
 ## CI01

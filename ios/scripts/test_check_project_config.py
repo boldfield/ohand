@@ -67,6 +67,49 @@ class ProjectConfigChecks(unittest.TestCase):
                 step["with"]["key"] = "xcodegen-2.40.0"
         self.assertTrue(any("cache key" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
 
+    def test_xcodegen_pin_reports_an_install_without_cache_restore_before_or_save_after(self):
+        for action, message in (("restore", "without restoring"), ("save", "without saving")):
+            workflow = self.split_workflow()
+            workflow["jobs"]["simulator"]["steps"] = [
+                step for step in workflow["jobs"]["simulator"]["steps"] if not checks.is_xcodegen_cache_step(step, action)
+            ]
+            self.assertTrue(any(message in e for e in self.xcodegen_pin_errors(workflow=workflow)), action)
+
+    def test_xcodegen_pin_reports_a_cache_that_is_restored_after_the_install(self):
+        workflow = self.split_workflow()
+        steps = workflow["jobs"]["simulator"]["steps"]
+        restore = next(step for step in steps if checks.is_xcodegen_cache_step(step, "restore"))
+        steps.remove(restore)
+        steps.insert(steps.index(next(step for step in steps if checks.is_xcodegen_cache_step(step, "save"))), restore)
+        self.assertTrue(any("without restoring" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_reports_a_combined_cache_step(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["steps"].insert(0, {
+            "name": "Cache XcodeGen", "uses": "actions/cache@v4",
+            "with": {"path": checks.XCODEGEN_ARCHIVE_CACHE_PATH, "key": "xcodegen"},
+        })
+        self.assertTrue(any("actions/cache/restore" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_covers_jobs_that_generate_through_another_script(self):
+        workflow = {"jobs": {"upgrade": {"steps": [
+            {"uses": "actions/checkout@v4"},
+            {"name": "Upgrade check", "run": "tools/release/simulator_upgrade_check.sh"},
+        ]}}}
+        self.assertTrue(any("job upgrade generates the project" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+        workflow["jobs"]["upgrade"]["steps"][1]["run"] = "tools/bindings/generate.sh target/bindings"
+        self.assertEqual(self.xcodegen_pin_errors(workflow=workflow), [])
+
+    def test_every_script_that_generates_the_project_is_listed(self):
+        repository = checks.IOS_ROOT.parent
+        unlisted = []
+        for directory in ("ios", "tools", "core"):
+            for script in sorted((repository / directory).rglob("*.sh")):
+                relative = script.relative_to(repository).as_posix()
+                if checks.runs_project_generation(script.read_text()) and not relative.endswith(checks.PROJECT_GENERATING_SCRIPTS):
+                    unlisted.append(relative)
+        self.assertEqual(unlisted, [])
+
     def test_simulator_split_passes_as_committed(self):
         self.assertEqual(checks.check_simulator_job_split(), [])
 

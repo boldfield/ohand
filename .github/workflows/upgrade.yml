@@ -51,15 +51,25 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
       - name: Restore XcodeGen archive cache
-        uses: actions/cache@v4
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ohand-xcodegen
           key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
-      - name: Install XcodeGen launcher
+      - name: Install XcodeGen
         shell: bash
         run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Select simulator and the prior revision
         id: select
@@ -161,15 +171,25 @@ jobs:
         with:
           xcode-version: '27.2'
 
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
       - name: Restore XcodeGen archive cache
-        uses: actions/cache@v4
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ohand-xcodegen
           key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
-      - name: Install XcodeGen launcher
+      - name: Install XcodeGen
         shell: bash
         run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Build Release and look for the report
         shell: bash
