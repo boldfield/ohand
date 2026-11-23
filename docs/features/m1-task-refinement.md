@@ -5404,6 +5404,8 @@ Criterion 2 becomes:
 
 The documents-only half is not dropped; it moves to the coordinator, after the merge: the coordinator opens a pull request to `main` that changes one file under `docs/` only, confirms that `core.yml` started and `ios.yml` did not, and records both links under this heading. If `ios.yml` starts, the coordinator files a repair task the same day. Reviewers do not ask this task for that evidence.
 
+Evidence (2026-11-23, after CI08 merged as 4ed14c26): the pull request that added this paragraph changes this file only.
+
 ### F74
 
 **Leak baseline: a buffer in flight when the counts are read is not a leak, and a real leak still fails**
