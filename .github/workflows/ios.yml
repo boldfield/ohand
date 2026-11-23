@@ -920,16 +920,9 @@ jobs:
           key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Install XcodeGen
+        id: xcodegen-install
         shell: bash
         run: ios/scripts/install-xcodegen.sh
-
-      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
-      - name: Save XcodeGen archive cache
-        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/ohand-xcodegen
-          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Select simulator
         id: simulator
@@ -981,6 +974,14 @@ jobs:
           set -euo pipefail
           cd ios
           ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence "${AUDIT_GROUP}"
+
+      # Unconditional steps only up to the audits (test_accessibility_gate.py), so this job saves the archive after them.
+      - name: Save XcodeGen archive cache
+        if: always() && steps.xcodegen-install.outcome == 'success' && steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Show host pressure
         if: always()
