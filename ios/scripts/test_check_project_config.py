@@ -71,6 +71,34 @@ class ProjectConfigChecks(unittest.TestCase):
         self.assertTrue(any("notification-probe" in e for e in errors))
         self.assertTrue(any("timeout-minutes" in e for e in errors))
 
+    def test_documents_only_skip_passes_as_committed(self):
+        self.assertEqual(checks.check_documents_only_skip(), [])
+
+    def test_documents_only_skip_reports_a_changed_ignore_list(self):
+        for ignored in (["docs/**"], ["docs/**", "*.md", "tools/**"], ["docs/**", "**.md"], None):
+            workflow = self.split_workflow()
+            if ignored is None:
+                del workflow[True]["pull_request"]["paths-ignore"]
+            else:
+                workflow[True]["pull_request"]["paths-ignore"] = ignored
+            errors = checks.check_documents_only_skip(self.write_split_workflow(workflow))
+            self.assertEqual(len(errors), 1, ignored)
+            self.assertIn("paths-ignore", errors[0])
+
+    def test_documents_only_skip_reports_a_paths_filter_on_ios_workflow(self):
+        workflow = self.split_workflow()
+        workflow[True]["pull_request"]["paths"] = ["ios/**"]
+        errors = checks.check_documents_only_skip(self.write_split_workflow(workflow))
+        self.assertTrue(any("paths filter" in e for e in errors))
+
+    def test_documents_only_skip_reports_a_path_filter_on_core_workflow(self):
+        for key in ("paths", "paths-ignore"):
+            workflow = yaml.safe_load(checks.CORE_WORKFLOW.read_text())
+            workflow[True]["pull_request"][key] = ["docs/**"]
+            errors = checks.check_documents_only_skip(checks.IOS_WORKFLOW, self.write_split_workflow(workflow))
+            self.assertEqual(len(errors), 1, key)
+            self.assertIn("core.yml", errors[0])
+
     def test_transitive_framework_must_be_embedded_in_app(self):
         project = checks.load_project()
         app = project["targets"]["OhAndApp"]
