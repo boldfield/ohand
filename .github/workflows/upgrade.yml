@@ -51,9 +51,15 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
+      - name: Restore XcodeGen archive cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
       - name: Install XcodeGen launcher
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
 
       - name: Select simulator and the prior revision
         id: select
@@ -155,9 +161,15 @@ jobs:
         with:
           xcode-version: '27.2'
 
+      - name: Restore XcodeGen archive cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
       - name: Install XcodeGen launcher
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
 
       - name: Build Release and look for the report
         shell: bash
