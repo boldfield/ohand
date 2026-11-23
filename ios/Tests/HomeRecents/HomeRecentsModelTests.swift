@@ -19,6 +19,9 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
     private var _holdsReads = false
     private var _heldSnapshotReads = 0
     private var heldReads: [CheckedContinuation<Void, Never>] = []
+    /// Counts releases. A read that decides to hold records the count with its cursor, so a release that lands before the
+    /// read has registered its waiter still lets that read go.
+    private var releaseEpoch = 0
     private var handlers: [@Sendable () -> Void] = []
     private var changeHandlers: [@Sendable (ItemChange) -> Void] = []
 
@@ -65,30 +68,35 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
     }
 
     func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
-        let (holdsSnapshot, holds, pageAsCalled): (Bool, Bool, CoreRecentItemsPage) = locked {
+        let (holdsSnapshot, holds, pageAsCalled, epochAsCalled): (Bool, Bool, CoreRecentItemsPage, Int) = locked {
             _readCursors.append(cursor)
             let page = _pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
             if _heldSnapshotReads > 0 {
                 _heldSnapshotReads -= 1
-                return (true, false, page)
+                return (true, false, page, releaseEpoch)
             }
-            return (false, _holdsReads, page)
+            return (false, _holdsReads, page, releaseEpoch)
         }
         if holdsSnapshot {
-            await holdUntilReleased()
+            await holdUntilReleased(since: epochAsCalled)
             if let failure { throw failure }
             return pageAsCalled
         }
         if holds {
-            await holdUntilReleased()
+            await holdUntilReleased(since: epochAsCalled)
         }
         if let failure { throw failure }
         return pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
     }
 
-    private func holdUntilReleased() async {
-        await withCheckedContinuation { continuation in
-            locked { heldReads.append(continuation) }
+    private func holdUntilReleased(since epoch: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let alreadyReleased = locked { () -> Bool in
+                if releaseEpoch != epoch { return true }
+                heldReads.append(continuation)
+                return false
+            }
+            if alreadyReleased { continuation.resume() }
         }
     }
 
@@ -100,12 +108,15 @@ final class FakeHomeRecentsSource: HomeRecentsSource, @unchecked Sendable {
 
     func releaseHeldReads() {
         let continuations = locked { () -> [CheckedContinuation<Void, Never>] in
+            releaseEpoch += 1
             let held = heldReads
             heldReads = []
             return held
         }
         continuations.forEach { $0.resume() }
     }
+
+    func resetReadCursorsForRegression() { locked { _readCursors = [] } }
 
     func unlock() { locked { _unlockCount += 1 } }
 
@@ -284,6 +295,19 @@ final class HomeRecentsModelTests: XCTestCase {
         source.setAccess(authenticated: false)
         XCTAssertEqual(model.bodyState, .locked)
         XCTAssertTrue(source.readCursors.isEmpty)
+    }
+
+    func testReleaseRacingTheRegistrationOfAHeldReadStillReleasesIt() async {
+        let source = FakeHomeRecentsSource()
+        source.holdsReads = true
+        for _ in 0..<200 {
+            let read = Task { try await source.readPage(cursor: nil) }
+            // The cursor is published before the read registers its waiter; releasing at once hits that window.
+            while source.readCursors.isEmpty { await Task.yield() }
+            source.releaseHeldReads()
+            _ = try? await read.value
+            source.resetReadCursorsForRegression()
+        }
     }
 
     func testRelockClearsTheListImmediately() async {
