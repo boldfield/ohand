@@ -5404,7 +5404,7 @@ Criterion 2 becomes:
 
 The documents-only half is not dropped; it moves to the coordinator, after the merge: the coordinator opens a pull request to `main` that changes one file under `docs/` only, confirms that `core.yml` started and `ios.yml` did not, and records both links under this heading. If `ios.yml` starts, the coordinator files a repair task the same day. Reviewers do not ask this task for that evidence.
 
-Evidence (2026-11-23, after CI08 merged as 4ed14c26): the pull request that added this paragraph changes this file only.
+Evidence (2026-11-23, after CI08 merged as 4ed14c26): pull request #430 changes this file only. Its first commit started `core.yml` (run 45110579803) and the fixture hygiene workflow (run 45110579917) and no `ios.yml` run; CI08's own pull request #426 started `ios.yml` run 45040048054.
 
 ### F74
 
