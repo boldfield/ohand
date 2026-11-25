@@ -5470,6 +5470,37 @@ Validation: `make check`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 937.
 
+### F76
+
+**Audio settings audit at the largest text size: the screen title is sometimes never audited clear, and the test fails**
+
+Filed 2026-11-25. `AccessibilityAuditUITests.testSettingsAudioWithRecordingsToRedo` (added by F71c) fails intermittently in `accessibility (group b)` at the largest text size only, with `'||Audio' was excused under or on glass at data-audio-redo and never audited unobstructed` (`ios/UITests/Accessibility/AccessibilityAuditUITests.swift:127`, raised in `tearDownWithError`). The same test passes at the default size in the same job.
+
+Evidence, all on the same runner image, simulator (iPhone 17, iOS 27.2) and app code:
+- failed at the largest size in runs 45113396496, 45123317888 (attempts 1 and 2) and 45142839927 (attempt 2), all on CI09's pull request #433, which changes only how XcodeGen is installed;
+- passed at both sizes in runs 45101431672, 45143002077 and 45201994160 (F75's pull requests). In those runs the log shows no `xxxl-data-audio-redo-settle-*` attachment: the title was never owed, so nothing had to be settled. In the failed run the settle pass ran (two downward drags, `xxxl-data-audio-redo-settle-1-03.png`, then an audit) and the title was still not clear.
+
+So whether the title is excused at this stop varies between runs, and when it is, the settle pass does not bring it clear. The coordinator has not found why it fell four times on one pull request and never on another; the task answers that before changing anything (the generated project is one thing to compare: `project.pbxproj` from the cached release archive against the one mint builds, for the same pinned version).
+
+Scope:
+1. From the failed and passing runs' logs and exported screenshots, state where the title was at the stop and after the settle drags in each, and why they differ.
+2. Make the stop deterministic: the test reaches the same scroll position every run before `audit("data-audio-redo")`, and the title is audited clear in the same test (by settling it where it is reliably unobstructed, as the ledger requires), at both sizes.
+3. Nothing is excused that is not audited clear later; the ledger's rule and the `scrollsUnderGlass` list keep their meaning. No entry is added to an exemption list to make this pass.
+
+Owned paths: `ios/UITests/Accessibility/AccessibilityAuditUITests.swift` (this test and the helpers it needs), `ios/UITests/Accessibility/` helpers, `docs/validation/accessibility.md` (what the stop audits). `ios/scripts/install-xcodegen.sh` is not owned; if the generated project is the cause, the task says so with the diff and stops there.
+
+Acceptance:
+1. The PR states the cause with the evidence of item 1.
+2. F71c's criterion 3 still holds: the audit runs with the redo section on screen, shown by the run's screenshot at both sizes.
+3. No assertion is removed or weakened, no audit is skipped, and no wait is lengthened to pass.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+After it lands the coordinator reruns `accessibility (group b)` twice more on the merged commit's pull request run or the next pull request, and reopens this task if the failure returns.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, await_checks=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940.
+
 ### CI09
 
 **Install the pinned project generator from a verified release file, not by cloning and compiling it in every job**
