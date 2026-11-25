@@ -414,16 +414,25 @@ final class AccessibilityAuditUITests: XCTestCase {
         audit("data-audio-redo-top", checksLabels: false)
     }
 
-    /// Swipes down until the screen title is inside the clear band (at most 8 swipes, no pause between them), then waits
-    /// for still frames as every settle stop does.
+    /// Swipes down until the large screen title is inside the clear band (at most 8 swipes, no pause between them), then
+    /// waits for still frames as every settle stop does. Other elements can carry the label "Audio" (the navigation bar's
+    /// own title once the large one has scrolled away), so the title is the tallest unidentified one. In run 45680574940
+    /// the first "Audio" in the snapshot satisfied the check at once, no swipe was made, and the stop began with the large
+    /// title at y = -75, owed again.
     private func scrollRedoScreenToTop() {
+        func largeTitle(in elements: [ScreenElement]) -> ScreenElement? {
+            elements.filter { $0.identifier.isEmpty && $0.label == "Audio" }.max { $0.frame.height < $1.frame.height }
+        }
         for _ in 0..<8 {
             let elements = screenElements()
-            if let title = elements.first(where: { $0.label == "Audio" }),
-               title.frame.minY >= clearBand(from: elements).lowerBound { break }
+            if let title = largeTitle(in: elements), title.frame.minY >= clearBand(from: elements).lowerBound { break }
             app.swipeDown()
         }
         waitForStillFrames()
+        let elements = screenElements()
+        XCTAssertTrue(
+            largeTitle(in: elements).map { $0.frame.minY >= clearBand(from: elements).lowerBound } ?? false,
+            "the Audio screen title is not inside the clear band after scrolling to the top")
     }
 
     func testDataSettingsEraseConfirmation() {
