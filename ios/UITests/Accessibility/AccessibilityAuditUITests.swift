@@ -393,10 +393,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         let summary = app.element(identifier: "data-settings.retention.redo")
         XCTAssertTrue(summary.exists, "the retention screen shows no redo summary")
         // The section follows the period choices, so at large text sizes it starts below the fold. An element that merely
-        // exists can be off screen: scroll until the button can be tapped, then require the section to be inside the
-        // visible band, so the screenshot and the audit are of the section on screen.
-        XCTAssertTrue(scrollUntilHittable(button), "the redo button cannot be reached")
-        for _ in 0..<3 where button.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
+        // exists can be off screen: drag the button into the visible band, the same way every run (`dragToStop`), then
+        // require the section to be inside the band, so the screenshot and the audit are of the section on screen.
+        XCTAssertTrue(dragToStop(button, "data-audio-redo"), "the redo button cannot be reached")
         let band = currentClearBand()
         XCTAssertTrue(button.isHittable, "the redo button is not on screen")
         XCTAssertTrue(
@@ -925,8 +924,8 @@ final class AccessibilityAuditUITests: XCTestCase {
                 if unobstructed { break }
                 switch placement {
                 case .scrollsUnderGlass:
-                    let visibleBottom = min(band.upperBound, screenFrame.maxY)
-                    scrollContent(by: target.frame.midY - (band.lowerBound + visibleBottom) / 2, between: band.lowerBound...visibleBottom)
+                    let dragBand = draggableBand(band)
+                    scrollContent(by: target.frame.midY - (dragBand.lowerBound + dragBand.upperBound) / 2, between: dragBand)
                 case .drawnOnGlass:
                     // Nothing is behind the header at the top of the screen, or behind the composer at its end.
                     if target.frame.midY < screenFrame.midY { app.swipeDown() } else { app.swipeUp() }
@@ -953,7 +952,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             }
         }
         for drag in 1...8 {
-            let band = currentClearBand()
+            let band = draggableBand(currentClearBand())
             scrollContent(by: band.upperBound - band.lowerBound, between: band)
             let elements = screenElements()
             if shows(elements) {
@@ -963,6 +962,41 @@ final class AccessibilityAuditUITests: XCTestCase {
         }
         auditLines.append("FIND \(currentScreen): '\(key)' was not found from the top through 8 drags")
         return nil
+    }
+
+    /// The part of `band` a drag can start in: on screen, below the status bar and above the home indicator (a drag that
+    /// starts there goes to the system, not the app; a screen without the composer has no band bottom of its own). On a
+    /// screen whose back button scrolls with the content, the clear band starts 12 points below the button wherever it is
+    /// (`clearBand`), so with the button scrolled off the top the band starts above the screen (`-87.33...` on Settings,
+    /// Audio at the largest size), and a drag started there touches nothing (F76: six such drags left the title where the
+    /// audit had left it).
+    private func draggableBand(_ band: ClosedRange<CGFloat>) -> ClosedRange<CGFloat> {
+        let lower = max(band.lowerBound, Self.statusBarBottom)
+        let upper = min(band.upperBound, app.frame.maxY - Self.homeIndicatorHeight)
+        return lower...max(lower, upper)
+    }
+
+    /// Brings `element` to the same place every run before a stop's audit: from where the screen opened (its top), slow
+    /// drags with a hold (`scrollContent`: no fling, so no momentum) move the content by the distance the frames give,
+    /// until the element's bottom is 24 points above the bottom of the visible band (within 12 points, what a drag's
+    /// start slop leaves) or a drag no longer moves it (the content's end). Each drag waits for still frames. Where the
+    /// element and the screen title stand is logged (`STOP`).
+    private func dragToStop(_ element: XCUIElement, _ stop: String) -> Bool {
+        guard element.waitForExistence(timeout: screenTimeout) else { return false }
+        waitForStillFrames()
+        var drags = 0
+        while drags < 8 {
+            let band = draggableBand(currentClearBand())
+            let before = element.frame
+            let remaining = before.maxY - (band.upperBound - 24)
+            if abs(remaining) <= 12 { break }
+            scrollContent(by: remaining, between: band)
+            drags += 1
+            if element.frame == before { break }
+        }
+        let title = screenElements().first { $0.identifier.isEmpty && $0.label == "Audio" }
+        auditLines.append("STOP \(stop): after \(drags) drag(s) '\(element.identifier)' is at \(element.frame.debugDescription), the title at \(title?.frame.debugDescription ?? "not listed"), the clear band \(currentClearBand())")
+        return element.isHittable
     }
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
@@ -1017,6 +1051,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// The top of the screenshot the measurement never reads: the status bar's clock and indicators end above it on the
     /// iPhone simulators the job uses.
     private static let statusBarBottom: CGFloat = 50
+    /// The bottom of the screen where a touch starts the system's home gesture on the iPhone simulators the job uses.
+    private static let homeIndicatorHeight: CGFloat = 34
 
     /// The contrast of the text in `frame` as a person sees it, from the pixels of `image`, the screenshot taken with the
     /// snapshot before the audit (`ScreenshotContrast`). Called only for text drawn on glass with nothing else overlapping

@@ -79,6 +79,7 @@ The audit log has one line per decision:
 | `MEASURED` | text drawn on glass, with nothing overlapping it, measured from the screenshot at 4.5:1 or above; or content scrolled under glass that the audit flagged in a pass during which it moved the content, measured from the screenshot taken before that pass, where it lay wholly in the clear band | no |
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
+| `STOP` | where a stop reached by drags (`dragToStop`) left its element and the screen title, after how many drags | no |
 | `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
 | `MOVED` | the audit scrolled the screen by the given number of points; a second screenshot (`<screen>-audited`) shows where it left it. Issues are still decided against the snapshot taken before the audit | no |
 | `FRAMES` | a tap at the card the accessibility frames place in the middle of the clear band opened that card (a mismatch is an `ISSUE`) | no |
@@ -157,7 +158,9 @@ snapshot of the screen taken just before the audit:
   element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
   element into the middle of the clear band, dragging down the left margin beside the cards (a drag started on a
   card would press it; the right edge would catch the scroll indicator, which scrubs the whole list), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
-  `<first screen of the test>-settle-<n>`); an
+  `<first screen of the test>-settle-<n>`). A drag starts only on screen, below the status bar and above the home
+  indicator, whatever the clear band says: with the back button scrolled off the top, the band starts above the screen
+  (F76); an
   element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
   it is on the list, never something else that shares its frame.
 - **Drawn on glass.** If no other element's frame overlaps the text (nothing scrolled behind the glass there and nothing
@@ -266,7 +269,7 @@ and two cards with the same caption that are settled separately.
 | "Done" (`home.done`), shown in the header while the keyboard is up | drawn on the header glass | capture text entry |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
-| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll) | Settings, Audio with a recording to redo |
+| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll). The title is owed when the audit's own scroll flags it, which some runs do and others do not from the same stop; the audit leaves the title at y = -75.33 either way, and the settle drags it back to the top of the screen, where it is clear (F76) | Settings, Audio with a recording to redo |
 
 ### Dynamic Type
 
@@ -358,3 +361,31 @@ Recorded by U10b.
 The glass ledger names an element by its card, with the age in the card's caption removed. `ScreenElement.cardName` removes what stands between the type's separator and the first comma, so "now", "4 sec. ago", "yesterday" and "in 4 sec." give one name. It once removed only `N unit ago`, so a card excused as "Action · now, …" was named "Action · , …" at the next stop and its excuse could never be settled.
 
 The audit also leaves the Home list elsewhere (the `MOVED` lines). The settle loop used to give up silently when the owed element was off screen at the start of its stop; it now scrolls to the top and down to find it, and logs `SETTLE-DRAG` (position and clear band at each drag) and `FIND` lines in `audit-<size>.log`.
+
+## The Audio title at the largest size (F76)
+
+`testSettingsAudioWithRecordingsToRedo` failed at the largest size with `'||Audio' was excused under or on glass at
+data-audio-redo and never audited unobstructed`, six times in fifteen completed attempts of `accessibility (group b)` before the
+fix, on both pull requests named in the task (CI09: runs 45113396496, 45123317888 attempts 1 and 2, 45142839927 attempt 2
+fail, attempt 3 passes; F75: runs 45101431672 and 45201994160 fail at attempt 1 and pass after). The generated project is
+not the cause: the same app and test code failed and passed on both pull requests, whichever way XcodeGen was installed.
+The job logs (kept 90 days) and the audit logs in the artifacts show two separate things:
+
+- **Whether the title is owed varies inside the audit.** At the redo stop the title is about 1,880 points above the
+  screen (`OWED … shown at (16.0, -1881.0, …)`, -1847 to -1890 across runs). `performAccessibilityAudit` scrolls up to
+  reach it and leaves the screen with the title at y = -75.33 in every run, failed or passed (the
+  `xxxl-data-audio-redo-audited` screenshots of runs 45142839927 attempt 3 and 45688129991 are the same picture). In
+  some runs it raises a contrast issue on the title while it passes it under the status bar, and in others it does not;
+  the `MOVED` distances overlap (2264 and 2273 points in both kinds of run). When the first pass found something else
+  and was repeated, the second pass starts with the title at -75.33 and always flags it.
+- **The settle could never clear it.** At -75.33 the back button is above the screen too, and the clear band starts
+  12 points below it: `SETTLE-DRAG … clear band -87.33333333333334...1.7976931348623157e+308` at each of six drags
+  (runs 45680574940 and 45688129991). The settle drag started 20 points below the band's top, at y = -67, off the
+  screen, so the title never moved, and the settle stop audited it at -75.33 again (`OWED data-audio-redo-settle-1`).
+
+The fix: the settle (and the search for an owed element) drags only from the visible part of the band
+(`draggableBand`), so the title is dragged down to where the screen opens, y = 146, where it is clear of the back button
+and audited clear (as the top-of-screen stops of run 45662785851 show at both sizes). The redo stop itself is reached the
+same way every run (`dragToStop`, `STOP` in the log): from the top of the screen, slow drags with a hold move the content
+by the distance the frames give until the button's bottom is 24 points above the bottom of the visible band, or the
+content ends. No exemption, glass-list entry or wait changed.
