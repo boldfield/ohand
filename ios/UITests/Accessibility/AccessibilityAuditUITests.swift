@@ -395,6 +395,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         // The section follows the period choices, so at large text sizes it starts below the fold. An element that merely
         // exists can be off screen: scroll until the button can be tapped, then require the section to be inside the
         // visible band, so the screenshot and the audit are of the section on screen.
+        // Fling momentum differs from run to run, so the stop is reached from the same place every run: the top of the
+        // screen, then the same swipes up until the button is reachable and inside the band.
+        scrollRedoScreenToTop()
         XCTAssertTrue(scrollUntilHittable(button), "the redo button cannot be reached")
         for _ in 0..<3 where button.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
         let band = currentClearBand()
@@ -406,6 +409,19 @@ final class AccessibilityAuditUITests: XCTestCase {
             summary.frame.intersects(app.windows.firstMatch.frame) && summary.frame.maxY > band.lowerBound,
             "the redo summary is not on screen")
         audit("data-audio-redo")
+        // The screen title scrolls under the status bar at this stop and is excused there. Back at the top it is in the
+        // clear, where it is audited in this test at both sizes (the ledger settles it); nothing is excused without that.
+        scrollRedoScreenToTop()
+        audit("data-audio-redo-top", checksLabels: false)
+    }
+
+    /// Swipes down a fixed number of times, with the pause the other settle stops use, so the screen is at its top.
+    private func scrollRedoScreenToTop() {
+        for _ in 0..<4 {
+            app.swipeDown()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        waitForStillFrames()
     }
 
     func testDataSettingsEraseConfirmation() {

@@ -266,7 +266,7 @@ and two cards with the same caption that are settled separately.
 | "Done" (`home.done`), shown in the header while the keyboard is up | drawn on the header glass | capture text entry |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
-| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll) | Settings, Audio with a recording to redo |
+| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll) | Settings, Audio with a recording to redo; the title is settled at `data-audio-redo-top`, the same test back at the top of the screen |
 
 ### Dynamic Type
 
