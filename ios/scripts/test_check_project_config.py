@@ -23,6 +23,93 @@ class ProjectConfigChecks(unittest.TestCase):
         path.write_text(yaml.safe_dump(workflow))
         return path
 
+    def test_xcodegen_pin_passes_as_committed(self):
+        self.assertEqual(checks.check_xcodegen_pin(), [])
+
+    def xcodegen_pin_errors(self, install=None, generate=None, mintfile=None, workflow=None):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        install_path, generate_path, mint_path, workflow_path = (root / name for name in ("install.sh", "generate.sh", "Mintfile", "ios.yml"))
+        install_path.write_text(install if install is not None else checks.INSTALL_XCODEGEN_SCRIPT.read_text())
+        generate_path.write_text(generate if generate is not None else checks.GENERATE_SCRIPT.read_text())
+        mint_path.write_text(mintfile if mintfile is not None else checks.MINTFILE.read_text())
+        workflow_path.write_text(yaml.safe_dump(workflow if workflow is not None else self.split_workflow()))
+        return checks.check_xcodegen_pin(install_path, generate_path, mint_path, (workflow_path,))
+
+    def test_xcodegen_pin_reports_a_version_that_differs(self):
+        self.assertTrue(any("Mintfile" in e for e in self.xcodegen_pin_errors(mintfile="yonaskolb/XcodeGen@2.39.0\n")))
+        generate = checks.GENERATE_SCRIPT.read_text().replace('PINNED_XCODEGEN_VERSION="2.40.0"', 'PINNED_XCODEGEN_VERSION="2.39.0"')
+        self.assertTrue(any("generate.sh" in e for e in self.xcodegen_pin_errors(generate=generate)))
+
+    def test_xcodegen_pin_reports_a_missing_or_malformed_digest(self):
+        install = checks.INSTALL_XCODEGEN_SCRIPT.read_text()
+        digest = install.split('PINNED_XCODEGEN_SHA256="')[1].split('"')[0]
+        for bad in ("", digest[:-1], digest.replace("a", "G")):
+            self.assertTrue(any("64" in e for e in self.xcodegen_pin_errors(install=install.replace(digest, bad))))
+
+    def test_xcodegen_pin_reports_mint_in_a_workflow(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["steps"].append({"name": "Install mint", "run": "brew install mint"})
+        self.assertTrue(any("uses mint" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_reports_generate_without_install_first(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["steps"] = [
+            step for step in workflow["jobs"]["simulator"]["steps"] if checks.INSTALL_XCODEGEN_COMMAND not in str(step.get("run", ""))
+        ]
+        self.assertTrue(any("without running" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_reports_a_cache_key_that_ignores_the_digest(self):
+        workflow = self.split_workflow()
+        for step in workflow["jobs"]["simulator"]["steps"]:
+            if str(step.get("uses", "")).startswith("actions/cache"):
+                step["with"]["key"] = "xcodegen-2.40.0"
+        self.assertTrue(any("cache key" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_reports_an_install_without_cache_restore_before_or_save_after(self):
+        for action, message in (("restore", "without restoring"), ("save", "without saving")):
+            workflow = self.split_workflow()
+            workflow["jobs"]["simulator"]["steps"] = [
+                step for step in workflow["jobs"]["simulator"]["steps"] if not checks.is_xcodegen_cache_step(step, action)
+            ]
+            self.assertTrue(any(message in e for e in self.xcodegen_pin_errors(workflow=workflow)), action)
+
+    def test_xcodegen_pin_reports_a_cache_that_is_restored_after_the_install(self):
+        workflow = self.split_workflow()
+        steps = workflow["jobs"]["simulator"]["steps"]
+        restore = next(step for step in steps if checks.is_xcodegen_cache_step(step, "restore"))
+        steps.remove(restore)
+        steps.insert(steps.index(next(step for step in steps if checks.is_xcodegen_cache_step(step, "save"))), restore)
+        self.assertTrue(any("without restoring" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_reports_a_combined_cache_step(self):
+        workflow = self.split_workflow()
+        workflow["jobs"]["simulator"]["steps"].insert(0, {
+            "name": "Cache XcodeGen", "uses": "actions/cache@v4",
+            "with": {"path": checks.XCODEGEN_ARCHIVE_CACHE_PATH, "key": "xcodegen"},
+        })
+        self.assertTrue(any("actions/cache/restore" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+
+    def test_xcodegen_pin_covers_jobs_that_generate_through_another_script(self):
+        workflow = {"jobs": {"upgrade": {"steps": [
+            {"uses": "actions/checkout@v4"},
+            {"name": "Upgrade check", "run": "tools/release/simulator_upgrade_check.sh"},
+        ]}}}
+        self.assertTrue(any("job upgrade generates the project" in e for e in self.xcodegen_pin_errors(workflow=workflow)))
+        workflow["jobs"]["upgrade"]["steps"][1]["run"] = "tools/bindings/generate.sh target/bindings"
+        self.assertEqual(self.xcodegen_pin_errors(workflow=workflow), [])
+
+    def test_every_script_that_generates_the_project_is_listed(self):
+        repository = checks.IOS_ROOT.parent
+        unlisted = []
+        for directory in ("ios", "tools", "core"):
+            for script in sorted((repository / directory).rglob("*.sh")):
+                relative = script.relative_to(repository).as_posix()
+                if checks.runs_project_generation(script.read_text()) and not relative.endswith(checks.PROJECT_GENERATING_SCRIPTS):
+                    unlisted.append(relative)
+        self.assertEqual(unlisted, [])
+
     def test_simulator_split_passes_as_committed(self):
         self.assertEqual(checks.check_simulator_job_split(), [])
 

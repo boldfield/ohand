@@ -49,9 +49,25 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
-      - name: Install XcodeGen launcher
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Record toolchain versions
         shell: bash
@@ -289,9 +305,25 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
-      - name: Install XcodeGen launcher
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Record toolchain versions
         shell: bash
@@ -477,9 +509,25 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
-      - name: Install XcodeGen launcher
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Record toolchain versions
         shell: bash
@@ -714,9 +762,25 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
-      - name: Install XcodeGen launcher
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       # A regular-width run needs an iPad; without one that leg selects nothing and its later steps are skipped.
       - name: Select simulator
@@ -847,9 +911,18 @@ jobs:
           # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
           xcode-version: '27.2'
 
-      - name: Install XcodeGen launcher
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
+        id: xcodegen-install
         shell: bash
-        run: brew install mint
+        run: ios/scripts/install-xcodegen.sh
 
       - name: Select simulator
         id: simulator
@@ -901,6 +974,14 @@ jobs:
           set -euo pipefail
           cd ios
           ./scripts/accessibility-simulator.sh "${SIMULATOR_UDID}" .evidence "${AUDIT_GROUP}"
+
+      # Unconditional steps only up to the audits (test_accessibility_gate.py), so this job saves the archive after them.
+      - name: Save XcodeGen archive cache
+        if: always() && steps.xcodegen-install.outcome == 'success' && steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       - name: Show host pressure
         if: always()
@@ -1105,8 +1186,26 @@ jobs:
           export app_path bundle_id
           ../../ios/scripts/retry-simulator-step.sh "${SIMULATOR_UDID}" .evidence/roundtrip-run.log -- bash -c 'set -euo pipefail; roundtrip_check'
 
-      - name: Install XcodeGen launcher
-        run: brew install mint
+      # CI09: the verified XcodeGen release archive, keyed by version and digest; a warm job downloads nothing.
+      - name: Restore XcodeGen archive cache
+        id: xcodegen-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
+
+      - name: Install XcodeGen
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: ios/scripts/install-xcodegen.sh
+
+      # Saved as soon as it is verified, so a cold job that fails later still fills the cache.
+      - name: Save XcodeGen archive cache
+        if: steps.xcodegen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ohand-xcodegen
+          key: xcodegen-2.40.0-7a57affbf81f57aaa3c76c2fa484d0dab940829e980951941aa7e5960dab64e6
 
       # Real handoff between two installed apps: CaptureProbe (native entry) opens this Tauri shell by URL.
       - name: Native-to-Tauri handoff UI tests (cold, warm, hostile routes, largest text)
