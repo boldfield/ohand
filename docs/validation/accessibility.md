@@ -368,7 +368,10 @@ The audit also leaves the Home list elsewhere (the `MOVED` lines). The settle lo
 data-audio-redo and never audited unobstructed`, six times in fifteen completed attempts of `accessibility (group b)` before the
 fix, on both pull requests named in the task (CI09: runs 45113396496, 45123317888 attempts 1 and 2, 45142839927 attempt 2
 fail, attempt 3 passes; F75: runs 45101431672 and 45201994160 fail at attempt 1 and pass after). The generated project is
-not the cause: the same app and test code failed and passed on both pull requests, whichever way XcodeGen was installed.
+not the cause, and does not differ: the same app and test code failed and passed on both pull requests, whichever way
+XcodeGen was installed, and CI09's comparison run 45110743096 (Xcode 27.2, XcodeGen 2.40.0, `ios/project.yml` unchanged
+since) generated `project.pbxproj` with the release binary and with mint byte-identical (`cmp`; SHA-256
+`7e4a83b4…2cd11f86` for both, 375,993 bytes), and every other file of the generated project identical.
 The job logs (kept 90 days) and the audit logs in the artifacts show two separate things:
 
 - **Whether the title is owed varies inside the audit.** At the redo stop the title is about 1,880 points above the
@@ -388,4 +391,7 @@ The fix: the settle (and the search for an owed element) drags only from the vis
 and audited clear (as the top-of-screen stops of run 45662785851 show at both sizes). The redo stop itself is reached the
 same way every run (`dragToStop`, `STOP` in the log): from the top of the screen, slow drags with a hold move the content
 by the distance the frames give until the button's bottom is 24 points above the bottom of the visible band, or the
-content ends. No exemption, glass-list entry or wait changed.
+content ends. No exemption, glass-list entry or wait changed. So that F71c's criterion 3 (the redo section on screen at
+both sizes) can be read from a green run, the routine `ios-accessibility-<group>` artifact carries this stop's
+default-size screenshot (`default-data-audio-redo-01.jpg`, compressed like the others) beside the largest-size ones; the
+other default-size screenshots still upload only with the failure diagnostics.

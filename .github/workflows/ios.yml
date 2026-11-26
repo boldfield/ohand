@@ -909,7 +909,7 @@ jobs:
 
       # The large-text screenshots go up as quality-60 JPEGs, about a fifth of the PNG size (CI artifact budget). The
       # second screenshot of a stop the audit scrolled (`*-audited-*`) goes up at half width and quality 40. The default-size
-      # screenshots are compressed the same way but upload only with the failure diagnostics (below).
+      # screenshots are compressed the same way but upload only with the failure diagnostics (below), except the Audio redo stop's.
       - name: Compress large-text screenshots
         if: always()
         shell: bash
@@ -923,7 +923,8 @@ jobs:
           done
           du -sh ios/.evidence/accessibility || true
 
-      # Routine evidence only (CI artifact budget): the audit logs, the summary and the large-text screenshots.
+      # Routine evidence only (CI artifact budget): the audit logs, the summary and the large-text screenshots, plus the one
+      # default-size screenshot a criterion reads from a green run (the Audio redo stop, F76; docs/validation/accessibility.md).
       - name: Upload audit log and large-text screenshots
         if: always()
         continue-on-error: true
@@ -935,6 +936,7 @@ jobs:
             ios/.evidence/accessibility/settled-*.txt
             ios/.evidence/accessibility/xxxl-*.jpg
             ios/.evidence/accessibility/xxxl-*.png
+            ios/.evidence/accessibility/default-data-audio-redo-01.jpg
             ios/.evidence/accessibility-summary.txt
             ios/.evidence/accessibility-*.log
             ios/.evidence/accessibility-*.attempt-1
