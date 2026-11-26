@@ -387,7 +387,8 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// Settings, Audio with a voice note whose text came from an earlier version: the section that offers to turn kept
     /// recordings into text again is on screen, with its button. The state while the replacement runs is not audited: the
-    /// job drains within a second of the tap, so no stable frame of it exists to audit.
+    /// job drains within a second of the tap, so no stable frame of it exists to audit. The largest-size run also writes
+    /// one picture of the stop at both sizes (`recordBothSizes`), since the routine artifact carries only its screenshots.
     func testSettingsAudioWithRecordingsToRedo() {
         guard launch(.redoable), openSettings(), openSettingsRow("Audio") else { return }
         let button = app.element(identifier: "data-settings.retention.redo-button")
@@ -411,6 +412,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             summary.frame.intersects(app.windows.firstMatch.frame) && summary.frame.maxY > band.lowerBound,
             "the redo summary is not on screen")
         audit("data-audio-redo")
+        recordBothSizes("data-audio-redo")
     }
 
     func testDataSettingsEraseConfirmation() {
@@ -1347,6 +1349,85 @@ final class AccessibilityAuditUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         element.tap()
         return true
+    }
+
+    /// At the largest size, writes one picture of the stop `screen` at both sizes: the default-size run's screenshot of it
+    /// (the one taken just before its audit, read from the shared output directory as `settled-default.txt` is) beside
+    /// this run's, each at half scale under a caption naming its file, as `xxxl-<screen>-beside-default-<n>.png`. The
+    /// routine artifact carries the largest-size run's screenshots and not the default-size run's (CI artifact budget), so
+    /// this is how a green run shows the audited stop at both sizes (F71c criterion 3, F76). It is evidence only: a missing
+    /// screenshot is noted in the log and decides nothing. At the default size there is nothing to put beside.
+    private func recordBothSizes(_ screen: String) {
+        guard sizeName == "xxxl" else { return }
+        guard let defaultFile = screenshotFile(size: "default", screen: screen),
+              let largestFile = screenshotFile(size: sizeName, screen: screen),
+              let defaultImage = UIImage(contentsOfFile: defaultFile.path),
+              let largestImage = UIImage(contentsOfFile: largestFile.path) else {
+            auditLines.append("NOTE \(screen): no screenshot of this stop at both sizes to put side by side")
+            return
+        }
+        let panels: [(image: UIImage, caption: String)] = [
+            (defaultImage, "default size: \(defaultFile.lastPathComponent)"),
+            (largestImage, "largest size: \(largestFile.lastPathComponent)"),
+        ]
+        let panelScale: CGFloat = 0.5
+        let captionHeight: CGFloat = 60
+        let gap: CGFloat = 12
+        let panelSizes = panels.map { panel in
+            CGSize(
+                width: (panel.image.size.width * panel.image.scale * panelScale).rounded(),
+                height: (panel.image.size.height * panel.image.scale * panelScale).rounded())
+        }
+        let canvas = CGSize(
+            width: panelSizes.reduce(0) { $0 + $1.width } + gap,
+            height: captionHeight + (panelSizes.map(\.height).max() ?? 0))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let picture = UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: canvas))
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22, weight: .semibold),
+                .foregroundColor: UIColor.black,
+            ]
+            var x: CGFloat = 0
+            for (index, panel) in panels.enumerated() {
+                NSAttributedString(string: panel.caption, attributes: attributes).draw(at: CGPoint(x: x + 12, y: 18))
+                panel.image.draw(in: CGRect(origin: CGPoint(x: x, y: captionHeight), size: panelSizes[index]))
+                x += panelSizes[index].width + gap
+            }
+        }
+        guard let data = picture.pngData() else {
+            auditLines.append("NOTE \(screen): the picture of this stop at both sizes could not be encoded")
+            return
+        }
+        screenshotIndex += 1
+        let name = String(format: "%@-%@-beside-default-%02d.png", sizeName, screen, screenshotIndex)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        do {
+            try data.write(to: outputDirectory.appendingPathComponent(name))
+            auditLines.append("BOTH-SIZES \(screen): \(name) shows \(defaultFile.lastPathComponent) (default size) beside \(largestFile.lastPathComponent) (largest size), each at half scale")
+        } catch {
+            XCTFail("could not write \(name): \(error)")
+        }
+    }
+
+    /// The screenshot `capture` took of `screen` just before its audit in the run at `size`: `<size>-<screen>-<nn>.png` in
+    /// the output directory, the first by index when the stop was captured more than once. A screenshot the audit's own
+    /// scroll led to (`-audited-`), a settle stop's or a both-sizes picture has more between the screen and the index and
+    /// is not it.
+    private func screenshotFile(size: String, screen: String) -> URL? {
+        let prefix = "\(size)-\(screen)-"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        let matches = names.filter { name in
+            guard name.hasPrefix(prefix), name.hasSuffix(".png") else { return false }
+            let index = name.dropFirst(prefix.count).dropLast(".png".count)
+            return index.count == 2 && index.allSatisfy(\.isNumber)
+        }
+        return matches.sorted().first.map { outputDirectory.appendingPathComponent($0) }
     }
 
     /// Swipes the screen up until `element` can take a tap, up to a few screens.

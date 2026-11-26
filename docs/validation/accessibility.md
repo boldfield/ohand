@@ -61,7 +61,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 
 Any audit issue fails the test, and so does an audit that throws instead of running (the log says `ERROR`; the test
 fails, it never records a pass). The job log and the artifact `ios-accessibility-<group>` (one per job; retention 2 days, per the CI artifact
-budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
+budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs; among them, for the Audio redo stop, one picture of the stop at both sizes, `xxxl-data-audio-redo-beside-default-*.jpg`, the `BOTH-SIZES` line below) and `accessibility-summary.txt`. A failed job
 uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
 failed tests' attachments as `ios-accessibility-<group>-failure` (retention 1 day, under 100 MB per job).
 
@@ -80,6 +80,7 @@ The audit log has one line per decision:
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
 | `STOP` | a stop reached by drags (`dragToStop`): after how many drags, where it left the element, the section and the screen title, with the clear band and the window | no |
+| `BOTH-SIZES` | at the largest size, the picture written of a stop at both sizes (`recordBothSizes`): the default-size run's screenshot of the stop beside this run's, each at half scale, named by file; a `NOTE` instead when one of the screenshots is missing | no |
 | `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
 | `MOVED` | the audit scrolled the screen by the given number of points; a second screenshot (`<screen>-audited`) shows where it left it. Issues are still decided against the snapshot taken before the audit | no |
 | `FRAMES` | a tap at the card the accessibility frames place in the middle of the clear band opened that card (a mismatch is an `ISSUE`) | no |
@@ -414,7 +415,17 @@ drag; largest: `(61.0, 700.67, 280.33, 125.33)` after three). The settle, and th
 from the visible part of the band (`draggableBand`), so the title is dragged down to where the screen opens, y = 146 with
 the band from 134, where it is clear of the back button and audited `CLEAR` at both sizes (the title keeps the same 12
 points below the band's top wherever the content stands, because the back button scrolls with it). Nothing is excused that
-is not audited clear in the same test; no exemption, glass-list entry, assertion or wait changed. The default-size
-screenshot of the stop, `default-data-audio-redo-01.png`, is written to the workspace and attached to the result bundle as
-before; the routine artifact carries only the largest-size screenshots (above), so at the default size a green run's
-evidence is the `STOP` line and the section assertions in `audit-default.log`.
+is not audited clear in the same test; no exemption, glass-list entry, assertion or wait changed.
+
+**The stop at both sizes in a green run's artifact.** F71c's criterion 3 asks for the audit to run with the redo section on
+screen, shown by the run's screenshot at both sizes. The default-size screenshot of the stop, `default-data-audio-redo-01.png`,
+is written to the workspace and attached to the result bundle as before, but the routine artifact carries only the
+largest-size run's screenshots (above; the default-size ones upload with the failure diagnostics), and the upload list is
+not this test's to change. The largest-size run runs second in the same job and already reads the default-size run's
+`settled-default.txt` from the shared output directory; after its audit of the stop it also reads the default-size run's
+screenshot of it and writes one picture, `xxxl-data-audio-redo-beside-default-<n>.png`, with that screenshot beside its own,
+each at half scale under a caption naming its file (`BOTH-SIZES` in `audit-xxxl.log`). The picture is named as the
+largest-size run's and goes up with its screenshots, compressed like them, so a green run shows the audited stop at both
+sizes. It is evidence only: a missing screenshot is a `NOTE`, not a failure, and the assertions on the stop are unchanged.
+Budget: the two groups' green artifacts were 5.8 MB and 3.0 MB on run 45764121728; at half scale the picture adds about
+0.2 MB, inside the 10 MB a green run's accessibility artifacts may total.
