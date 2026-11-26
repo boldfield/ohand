@@ -3612,6 +3612,8 @@ Contributes to original U10 criteria: 1 (device pass), 2, 3.
 
 Amendment 1 (coordinator, 2026-11-07, at the maintainer's direction): the maintainer has no hardware keyboard for the trial iPhone (recorded at P09 amendment 1 on 2026-10-09, unchanged). The Full Keyboard Access run of the procedure in `docs/validation/accessibility.md` section 3 moves out of U10b into U10c. U10b's criterion 1 is read as the VoiceOver and largest-text runs for every screen in the procedure; each screen's `keyboard` section in the record carries `"reachable": "not run"`, `"activation": "not run"` and the note `no hardware keyboard available; U10c`. The checks themselves are not lowered: the keyboard run is still owed, by U10c, before any distribution beyond the maintainer's phone. T05b, T06 and T08 do not wait for U10c.
 
+Amendment 2 (coordinator, 2026-11-25, at the maintainer's direction): step 11 of the procedure in `docs/validation/accessibility.md` section 3 (first run, with permissions not yet asked) is deferred. The trial phone holds the maintainer's real notes, the app has no import or restore, and the permissions return to "not yet asked" only when the app is deleted, which would lose those notes. U10b's criterion 1 is read as steps 1 to 10 and 12; the record's section for step 11 carries `"reading_order": "not run"`, `"labels_and_state": "not run"` and the note `needs an app that has never asked for permissions; deferred by U10b amendment 2`. In its place the maintainer opens Settings, Permissions in the state the phone is in and records that screen under its own slug, so the screen is still heard and read at the largest size. The first-run state itself is still owed, on a device with no notes to lose, before any distribution beyond the maintainer's phone (with the keyboard run, U10c). Synthetic notes made during the pass are removed as T05b amendment 1 item 4 describes. T05b, T06 and T08 do not wait for the deferred step.
+
 ### U10c
 
 Record the keyboard accessibility run
@@ -4894,6 +4896,30 @@ Contributes to original T05 criteria: 1, 2, 3, 4.
 
 Execution: Haiku, escalate=true, independent Opus and gpt-5.6-sol review, separate automatic merger. Never weaken acceptance to force completion.
 
+#### T05b amendment 1
+
+Coordinator, 2026-11-25, at the maintainer's direction. This is the written scope amendment criterion 2 asks for. It defers cases by name and adds a cleanup duty; it changes no expected outcome of any case that is run.
+
+Why: the trial phone is the maintainer's own, holds real notes (48 captures when candidate 439 was installed), and the app has no import or restore, so deleting the app loses them. Four places in the T05a procedure assume an app that was deleted or never opened. Two further cases are `blocked` by the procedure's own analysis of the shipped code, and criterion 2 would keep this task blocked on them for ever.
+
+1. **Deferred because they need a deleted or never-opened app.** Owed on a device with no notes to lose (or once the app can restore), before any distribution beyond the maintainer's phone. T06 and T08 do not wait for them.
+   - Section 1 item 2, "permissions at their first-run values (not yet asked) at the start of the session". The session starts with the permissions as they are. A case whose preparation says a permission is "not yet asked" is run from "denied" in iOS Settings, which the procedure already allows for Speech Recognition in `offline-5`; the case's `notes` say `first-time system prompt not observed; T05b amendment 1`. The expected outcomes of the case are unchanged.
+   - The first-run step of the accessibility procedure (U10b amendment 2).
+   - `deferred-provisional-ephemeral-authorization`: its preparation is a fresh install. Outcome `blocked`, reason `needs a fresh install on a phone that holds real notes; deferred by T05b amendment 1`. See also item 2.
+   - `deferred-reinstall-os-upgrade`, the half that deletes the app. The other half is run: install the same candidate over itself and compare counts before and after; apply a pending OS update if there is one. Outcome `blocked`, reason `delete-and-reinstall half needs a phone with no notes to lose; deferred by T05b amendment 1`, with the result of the half that was run in `notes` (counts only). The upgrade from 416 to 439 in `docs/validation/evidence/upgrade/device-2026-11-23-439.json` is the cited evidence that data survives an update in place.
+2. **Deferred because the shipped app cannot reach the state.** Owed by the first candidate whose code can, and re-examined when a task changes notification authorization or scheduling.
+   - `deferred-provisional-ephemeral-authorization`: the candidate requests only alert and sound authorization, and ephemeral authorization exists only for App Clips. The reason in item 1 is the one recorded; this one goes in `notes`.
+   - `deferred-pending-slots-repeating`: outcome `blocked`, reason `candidate schedules no repeating trigger; every request is one-shot`, as the procedure states.
+3. **Reading of criterion 2.** The three cases named in items 1 and 2 are the only `blocked` outcomes this amendment defers. Any other `blocked` case, and every `failed` case, keeps this task blocked as written. The results section lists the three with this amendment as their deferral, and does not count them as passed.
+4. **Synthetic data is removed and the phone is put back.** The matrix adds on the order of 150 synthetic notes and reminders to real ones and changes device settings. Before the record is committed:
+   - every item created for the matrix or the accessibility pass is deleted in the app with "Delete this item", including items made by cases that were abandoned or repeated, and synthetic profiles or credentials added for the configuration cases are removed;
+   - delivered synthetic notifications are cleared from Notification Center;
+   - every device setting a case changed is restored: Airplane Mode, Focus, Low Power Mode, the three permissions for Oh And, language and region, Set Automatically for date and time and the time zone, the passcode and Face ID, free space, and the daily prompt and default provider to what they were;
+   - the cleanup is checked from two database copies the maintainer approves, one before the first case and one after the cleanup, compared by counts only (no text is printed and both copies are deleted): items that are not deleted, pending reminders and stored profiles equal the before counts, and no item that is not deleted matches a synthetic phrase of section 1 of the procedure. A real reminder that came due during the sessions is expected to differ and is named by count.
+   - The record's `issues` carries one entry, `cleanup`, with the before and after counts and the settings restored. A cleanup that cannot reach the before counts is an issue with a severity like any other, and is not waved through.
+5. **Real reminders during the clock cases.** `deferred-time-zone-change` and `deferred-clock-date-dst` move the phone's clock while real reminders are pending. Before those two cases the maintainer notes how many real reminders are pending and when the next is due; a real reminder that fires or lapses because of the clock change is recorded by count in the case's `notes` and is not a defect of the case.
+6. **What the coordinator may do from the Mac while the phone is attached** (with the maintainer present; none of it replaces an observation on the phone): install and launch the candidate and read its build number; take the screenshots and screen recordings the cases name, straight into the private evidence directory under the names of section 1 item 4; restart the phone for the restart cases; put a synthetic phrase on the phone's pasteboard so it is pasted instead of typed; time the latency series from the recordings; and take the count-only database copies of item 4. Taps, typing, iOS Settings and everything heard or seen are the maintainer's.
+
 ### F67
 
 Record and export the content-free metrics in the shipped app
@@ -5469,6 +5495,37 @@ Acceptance:
 Validation: `make check`, and the exact-head `ios.yml` run.
 
 Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 937.
+
+### F76
+
+**Audio settings audit at the largest text size: the screen title is sometimes never audited clear, and the test fails**
+
+Filed 2026-11-25. `AccessibilityAuditUITests.testSettingsAudioWithRecordingsToRedo` (added by F71c) fails intermittently in `accessibility (group b)` at the largest text size only, with `'||Audio' was excused under or on glass at data-audio-redo and never audited unobstructed` (`ios/UITests/Accessibility/AccessibilityAuditUITests.swift:127`, raised in `tearDownWithError`). The same test passes at the default size in the same job.
+
+Evidence, all on the same runner image, simulator (iPhone 17, iOS 27.2) and app code:
+- failed at the largest size in runs 45113396496, 45123317888 (attempts 1 and 2) and 45142839927 (attempt 2), all on CI09's pull request #433, which changes only how XcodeGen is installed;
+- passed at both sizes in runs 45101431672, 45143002077 and 45201994160 (F75's pull requests). In those runs the log shows no `xxxl-data-audio-redo-settle-*` attachment: the title was never owed, so nothing had to be settled. In the failed run the settle pass ran (two downward drags, `xxxl-data-audio-redo-settle-1-03.png`, then an audit) and the title was still not clear.
+
+So whether the title is excused at this stop varies between runs, and when it is, the settle pass does not bring it clear. The coordinator has not found why it fell four times on one pull request and never on another; the task answers that before changing anything (the generated project is one thing to compare: `project.pbxproj` from the cached release archive against the one mint builds, for the same pinned version).
+
+Scope:
+1. From the failed and passing runs' logs and exported screenshots, state where the title was at the stop and after the settle drags in each, and why they differ.
+2. Make the stop deterministic: the test reaches the same scroll position every run before `audit("data-audio-redo")`, and the title is audited clear in the same test (by settling it where it is reliably unobstructed, as the ledger requires), at both sizes.
+3. Nothing is excused that is not audited clear later; the ledger's rule and the `scrollsUnderGlass` list keep their meaning. No entry is added to an exemption list to make this pass.
+
+Owned paths: `ios/UITests/Accessibility/AccessibilityAuditUITests.swift` (this test and the helpers it needs), `ios/UITests/Accessibility/` helpers, `docs/validation/accessibility.md` (what the stop audits). `ios/scripts/install-xcodegen.sh` is not owned; if the generated project is the cause, the task says so with the diff and stops there.
+
+Acceptance:
+1. The PR states the cause with the evidence of item 1.
+2. F71c's criterion 3 still holds: the audit runs with the redo section on screen, shown by the run's screenshot at both sizes.
+3. No assertion is removed or weakened, no audit is skipped, and no wait is lengthened to pass.
+4. Exact-head macOS CI evidence and the Linux checks.
+
+After it lands the coordinator reruns `accessibility (group b)` twice more on the merged commit's pull request run or the next pull request, and reopens this task if the failure returns.
+
+Validation: `make check`, and the exact-head `ios.yml` run.
+
+Execution: Sonnet, escalate=true, await_checks=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. Priority 940.
 
 ### CI09
 

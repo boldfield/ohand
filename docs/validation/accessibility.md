@@ -61,7 +61,7 @@ every default type except `.dynamicType` at the default size (see "Dynamic Type"
 
 Any audit issue fails the test, and so does an audit that throws instead of running (the log says `ERROR`; the test
 fails, it never records a pass). The job log and the artifact `ios-accessibility-<group>` (one per job; retention 2 days, per the CI artifact
-budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs) and `accessibility-summary.txt`. A failed job
+budget) hold `accessibility/audit-default.log` and `accessibility/audit-xxxl.log`, `accessibility/settled-default.txt` and `accessibility/settled-xxxl.txt` (what each size audited unobstructed), the large-text screenshots (`accessibility/xxxl-*.jpg`, compressed from the PNGs; among them, for the Audio redo stop, one picture of the stop at both sizes, `xxxl-data-audio-redo-beside-default-*.jpg`, the `BOTH-SIZES` line below) and `accessibility-summary.txt`. A failed job
 uploads no `.xcresult` bundle; it runs `ios/scripts/export-failure-diagnostics.sh` and uploads the exported test summary and the
 failed tests' attachments as `ios-accessibility-<group>-failure` (retention 1 day, under 100 MB per job).
 
@@ -79,6 +79,8 @@ The audit log has one line per decision:
 | `MEASURED` | text drawn on glass, with nothing overlapping it, measured from the screenshot at 4.5:1 or above; or content scrolled under glass that the audit flagged in a pass during which it moved the content, measured from the screenshot taken before that pass, where it lay wholly in the clear band | no |
 | `RETRY` | the first pass of an audit found something and was repeated after 3 seconds | no |
 | `SETTLE` | the test scrolled to audit an owed element unobstructed | no |
+| `STOP` | a stop reached by drags (`dragToStop`): after how many drags, where it left the element, the section and the screen title, with the clear band and the window | no |
+| `BOTH-SIZES` | at the largest size, the picture written of a stop at both sizes (`recordBothSizes`): the default-size run's screenshot of the stop beside this run's, each at half scale, named by file; a `NOTE` instead when one of the screenshots is missing | no |
 | `CLEAR-AT-DEFAULT` | at the largest size, an owed element settled by the default-size run's unobstructed audit of it | no |
 | `MOVED` | the audit scrolled the screen by the given number of points; a second screenshot (`<screen>-audited`) shows where it left it. Issues are still decided against the snapshot taken before the audit | no |
 | `FRAMES` | a tap at the card the accessibility frames place in the middle of the clear band opened that card (a mismatch is an `ISSUE`) | no |
@@ -157,7 +159,10 @@ snapshot of the screen taken just before the audit:
   element wholly inside the clear band with no contrast issue (`CLEAR`). After its own stops, the test drags each owed
   element into the middle of the clear band, dragging down the left margin beside the cards (a drag started on a
   card would press it; the right edge would catch the scroll indicator, which scrubs the whole list), waits until two snapshots a second apart agree, and audits there (`SETTLE`, a screen named
-  `<first screen of the test>-settle-<n>`); an
+  `<first screen of the test>-settle-<n>`). The drag starts only on screen, below the status bar and above the home
+  indicator (`draggableBand`), whatever the clear band says: on a screen whose back button scrolls with the content, the
+  band starts 12 points below the button wherever it is, so with the button scrolled off the top the band starts above the
+  screen, and a drag started there touches nothing (F76, below); an
   element that is still owed when the test ends fails it (`UNVERIFIED`). What is measured is the element itself, wherever
   it is on the list, never something else that shares its frame.
 - **Drawn on glass.** If no other element's frame overlaps the text (nothing scrolled behind the glass there and nothing
@@ -266,7 +271,7 @@ and two cards with the same caption that are settled separately.
 | "Done" (`home.done`), shown in the header while the keyboard is up | drawn on the header glass | capture text entry |
 | the Home card texts ("Synthetic typed …", "Synthetic spoken …", "Remind me 2099-01-15 …"), captions ("Note · …", "Action · …", "Idea · …", matched by prefix because the age changes from run to run, and told apart by their card) and the "Today" list heading (`home.recents.list`) | scrolled under the header or the composer | Home |
 | "Save topic" (`item-controls.topic.save`), "Save words" (`item-controls.text.save`), "What you wrote", "Type", and the reminder text "Remind me soon to call the plumber about the leaking tap" | scrolled under the back button | source detail |
-| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll) | Settings, Audio with a recording to redo |
+| the screen title "Audio" and the "None" line (`data-settings.retention.none-unresolved`) | scrolled under the status bar, or off screen below, while the redo section is shown at the largest size (run 45056680973: the audit sampled each mid-scroll). The audit flags the title in some runs and not in others from the same stop (F76, below); when it does, the title is owed where the audit's own scroll left it, just above the status bar, and the settle stop drags it back down to where the screen opens, clear of the back button, and audits it there | Settings, Audio with a recording to redo |
 
 ### Dynamic Type
 
@@ -358,3 +363,69 @@ Recorded by U10b.
 The glass ledger names an element by its card, with the age in the card's caption removed. `ScreenElement.cardName` removes what stands between the type's separator and the first comma, so "now", "4 sec. ago", "yesterday" and "in 4 sec." give one name. It once removed only `N unit ago`, so a card excused as "Action · now, …" was named "Action · , …" at the next stop and its excuse could never be settled.
 
 The audit also leaves the Home list elsewhere (the `MOVED` lines). The settle loop used to give up silently when the owed element was off screen at the start of its stop; it now scrolls to the top and down to find it, and logs `SETTLE-DRAG` (position and clear band at each drag) and `FIND` lines in `audit-<size>.log`.
+
+## The Audio title at the largest size (F76)
+
+`testSettingsAudioWithRecordingsToRedo` failed at the largest size with `'||Audio' was excused under or on glass at
+data-audio-redo and never audited unobstructed`. F76 was filed as four failures on CI09's pull request #433 and none on
+F75's; the job logs (kept 90 days; the `accessibility (group b)` summary of every attempt) say otherwise. The same test
+code failed six times and passed four times in the ten executions of that job on the two pull requests (an attempt that
+re-ran only other jobs carries the earlier log, byte for byte, and is not counted):
+
+| Run, attempt | Pull request | Audit scroll (`MOVED`) | Title in the snapshot before the audit | After the settle drags | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| 45113396496, 1 | CI09 #433 | 2290 pt, then 459 pt on the retry pass | retry pass: y = −75.33 | y = −75.33 | `UNVERIFIED` |
+| 45123317888, 1 | CI09 #433 | 2231 pt | y = −1847.33, owed | y = −75.33 | `UNVERIFIED` |
+| 45123317888, 2 | CI09 #433 | 2264 pt | y = −1880.67, owed | y = −75.33 | `UNVERIFIED` |
+| 45142839927, 2 | CI09 #433 | 2264 pt | y = −1880.33, owed | y = −75.33 | `UNVERIFIED` |
+| 45142839927, 3 | CI09 #433 | 2264 pt | not flagged | — | pass |
+| 45101431672, 1 | F75 | 2264 pt | y = −1881.00, owed | y = −75.33 | `UNVERIFIED` |
+| 45101431672, 2 | F75 | 2271 pt | not flagged | — | pass |
+| 45143002077, 1 | F75 | 2265 pt | not flagged | — | pass |
+| 45201994160, 1 | F75 #434 | 2293 pt, then 459 pt on the retry pass | retry pass: y = −75.33 | y = −75.33 | `UNVERIFIED` |
+| 45201994160, 2 | F75 #434 | 2273 pt | not flagged | — | pass |
+
+At the default size every execution passed the same way (`MOVED` 311 pt, a retry, `MOVED` 260 pt, `CLEAR` "None" at
+y = 839). What the rows show:
+
+- **The stop was not the same place every run.** The test reached it with `swipeUp()` flings, and the title stood between
+  y = −1847 and −1890 in the snapshot before the audit, 43 points apart. (The audit scroll distance does not separate the
+  rows: 2264 points in three failures and one pass.)
+- **Whether the audit flags the title is decided inside the audit.** `performAccessibilityAudit` scrolls the content to
+  reach the rest of the screen and samples the title as it passes under the status bar's edge effect; it raised a contrast
+  issue on it in six executions and not in four, with the same code, image, simulator and stop. When the first pass found
+  something else and was repeated, the second pass started where the audit had left the screen and flagged it every time.
+- **The audit leaves the title in the same place every run, and the settle could not move it.** After the audit the title
+  is at y = −75.33 (its bottom 22 points under the status bar; `xxxl-data-audio-redo-audited` is the same picture in every
+  run) and the back button is above the screen, so the clear band starts at y = −87.33. The settle dragged from 20 points
+  below the band's top, y = −67, off the screen: six drags in a row logged the title at −75.33 (`SETTLE-DRAG`, runs
+  45680574940 and 45688129991, which kept the earlier test code's settle), and the settle stop audited it there again
+  (`OWED data-audio-redo-settle-1`), so the excuse was never settled.
+- **The generated project is not the cause.** F75's branch predates CI09 and built XcodeGen with mint; it failed the same
+  way. CI09's comparison run 45110743096 generated the project with the release binary and with the mint build of the same
+  pinned version: `project.pbxproj` byte-identical (`cmp`), SHA-256
+  `7e4a83b4c3f685aa71b0b9cb58a785018ba49ba3b1780fecedbbc96d2cd11f86` and 375,993 bytes for both, and every other generated
+  file identical.
+
+The change: the stop is reached by `dragToStop`, slow drags with a hold (`scrollContent`, no fling) from the top of the
+screen by the distance the frames give, until the redo button's bottom is 24 points above the bottom of the draggable band
+(within 12 points), logged as `STOP` with the button, the summary, the title, the band and the window; with the same test
+code, two runs logged the button at exactly the same frame at each size (default: `(100.67, 776.0, 201.0, 50.0)` after one
+drag; largest: `(61.0, 700.67, 280.33, 125.33)` after three). The settle, and the search for an owed element, drag only
+from the visible part of the band (`draggableBand`), so the title is dragged down to where the screen opens, y = 146 with
+the band from 134, where it is clear of the back button and audited `CLEAR` at both sizes (the title keeps the same 12
+points below the band's top wherever the content stands, because the back button scrolls with it). Nothing is excused that
+is not audited clear in the same test; no exemption, glass-list entry, assertion or wait changed.
+
+**The stop at both sizes in a green run's artifact.** F71c's criterion 3 asks for the audit to run with the redo section on
+screen, shown by the run's screenshot at both sizes. The default-size screenshot of the stop, `default-data-audio-redo-01.png`,
+is written to the workspace and attached to the result bundle as before, but the routine artifact carries only the
+largest-size run's screenshots (above; the default-size ones upload with the failure diagnostics), and the upload list is
+not this test's to change. The largest-size run runs second in the same job and already reads the default-size run's
+`settled-default.txt` from the shared output directory; after its audit of the stop it also reads the default-size run's
+screenshot of it and writes one picture, `xxxl-data-audio-redo-beside-default-<n>.png`, with that screenshot beside its own,
+each at half scale under a caption naming its file (`BOTH-SIZES` in `audit-xxxl.log`). The picture is named as the
+largest-size run's and goes up with its screenshots, compressed like them, so a green run shows the audited stop at both
+sizes. It is evidence only: a missing screenshot is a `NOTE`, not a failure, and the assertions on the stop are unchanged.
+Budget: the two groups' green artifacts were 5.8 MB and 3.0 MB on run 45764121728; at half scale the picture adds about
+0.2 MB, inside the 10 MB a green run's accessibility artifacts may total.

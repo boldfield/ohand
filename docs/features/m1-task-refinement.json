@@ -5044,7 +5044,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "CI08"
+        "CI08",
+        "F76"
       ],
       "source_pointers": [
         "ios/scripts/generate.sh",
@@ -5070,6 +5071,26 @@
       "source_pointers": [
         "ios/Tests/HomeRecents/HomeRecentsModelTests.swift",
         "app/home/HomeRecentsModel.swift"
+      ]
+    },
+    {
+      "key": "F76",
+      "parent": null,
+      "title": "Audio settings audit at the largest text size: the screen title is sometimes never audited clear, and the test fails",
+      "file_scope": [
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift",
+        "ios/UITests/Accessibility/ (helpers)",
+        "docs/validation/accessibility.md"
+      ],
+      "intent": "Make the audited stop that F71c added deterministic, so the accessibility job stops failing intermittently at the largest text size, without excusing anything.",
+      "acceptance": [
+        "See the F76 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/UITests/Accessibility/AccessibilityAuditUITests.swift",
+        "docs/validation/accessibility.md"
       ]
     }
   ],
@@ -5960,9 +5981,11 @@
     ],
     "F74": [],
     "CI09": [
-      "CI08"
+      "CI08",
+      "F76"
     ],
-    "F75": []
+    "F75": [],
+    "F76": []
   },
   "retained_dependency_overrides": {
     "V06": [

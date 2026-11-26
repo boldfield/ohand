@@ -99,7 +99,9 @@ final class AccessibilityAuditUITests: XCTestCase {
         (identifier: "", label: "Type", placement: .scrollsUnderGlass),
         // Settings, Audio with a recording to redo, at the largest size: the screen title scrolls up under the status bar's
         // edge effect, and the "None" line lies below the screen while the redo section is shown. The audit scrolls to
-        // reach both and samples them there (run 45056680973).
+        // reach both and samples them there (run 45056680973). Whether it flags the title differs from one run to the next
+        // with nothing else different (F76: six of ten executions of the same code); when it does, the settle stop drags
+        // the title back down and audits it clear.
         (identifier: "", label: "Audio", placement: .scrollsUnderGlass),
         (identifier: "data-settings.retention.none-unresolved", label: "", placement: .scrollsUnderGlass),
     ]
@@ -385,7 +387,8 @@ final class AccessibilityAuditUITests: XCTestCase {
 
     /// Settings, Audio with a voice note whose text came from an earlier version: the section that offers to turn kept
     /// recordings into text again is on screen, with its button. The state while the replacement runs is not audited: the
-    /// job drains within a second of the tap, so no stable frame of it exists to audit.
+    /// job drains within a second of the tap, so no stable frame of it exists to audit. The largest-size run also writes
+    /// one picture of the stop at both sizes (`recordBothSizes`), since the routine artifact carries only its screenshots.
     func testSettingsAudioWithRecordingsToRedo() {
         guard launch(.redoable), openSettings(), openSettingsRow("Audio") else { return }
         let button = app.element(identifier: "data-settings.retention.redo-button")
@@ -393,10 +396,13 @@ final class AccessibilityAuditUITests: XCTestCase {
         let summary = app.element(identifier: "data-settings.retention.redo")
         XCTAssertTrue(summary.exists, "the retention screen shows no redo summary")
         // The section follows the period choices, so at large text sizes it starts below the fold. An element that merely
-        // exists can be off screen: scroll until the button can be tapped, then require the section to be inside the
-        // visible band, so the screenshot and the audit are of the section on screen.
-        XCTAssertTrue(scrollUntilHittable(button), "the redo button cannot be reached")
-        for _ in 0..<3 where button.frame.maxY > currentClearBand().upperBound { app.swipeUp() }
+        // exists can be off screen: drag the button to the same place every run (`dragToStop`; a swipe is a fling whose
+        // distance varies, and the title stood up to 43 points apart between runs at this stop), then require the
+        // section to be inside the visible band, so the screenshot and the audit are of the section on screen. The audit
+        // then scrolls the content itself and in some runs flags the title where it passes under the status bar (`OWED`);
+        // the settle stop drags the title back down, from the visible part of the band (`draggableBand`), and audits it
+        // clear (F76).
+        XCTAssertTrue(dragToStop(button, "data-audio-redo", reporting: [summary], titled: "Audio"), "the redo button cannot be reached")
         let band = currentClearBand()
         XCTAssertTrue(button.isHittable, "the redo button is not on screen")
         XCTAssertTrue(
@@ -406,6 +412,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             summary.frame.intersects(app.windows.firstMatch.frame) && summary.frame.maxY > band.lowerBound,
             "the redo summary is not on screen")
         audit("data-audio-redo")
+        recordBothSizes("data-audio-redo")
     }
 
     func testDataSettingsEraseConfirmation() {
@@ -925,8 +932,10 @@ final class AccessibilityAuditUITests: XCTestCase {
                 if unobstructed { break }
                 switch placement {
                 case .scrollsUnderGlass:
-                    let visibleBottom = min(band.upperBound, screenFrame.maxY)
-                    scrollContent(by: target.frame.midY - (band.lowerBound + visibleBottom) / 2, between: band.lowerBound...visibleBottom)
+                    // Into the middle of the part of the band a drag can start in: the band itself begins above the
+                    // screen once the back button has scrolled off the top (F76).
+                    let dragBand = draggableBand(band)
+                    scrollContent(by: target.frame.midY - (dragBand.lowerBound + dragBand.upperBound) / 2, between: dragBand)
                 case .drawnOnGlass:
                     // Nothing is behind the header at the top of the screen, or behind the composer at its end.
                     if target.frame.midY < screenFrame.midY { app.swipeDown() } else { app.swipeUp() }
@@ -953,7 +962,7 @@ final class AccessibilityAuditUITests: XCTestCase {
             }
         }
         for drag in 1...8 {
-            let band = currentClearBand()
+            let band = draggableBand(currentClearBand())
             scrollContent(by: band.upperBound - band.lowerBound, between: band)
             let elements = screenElements()
             if shows(elements) {
@@ -963,6 +972,53 @@ final class AccessibilityAuditUITests: XCTestCase {
         }
         auditLines.append("FIND \(currentScreen): '\(key)' was not found from the top through 8 drags")
         return nil
+    }
+
+    /// The part of `band` a drag can start in: on screen, below the status bar and above the home indicator (a touch that
+    /// starts there goes to the system, not the app). The clear band itself is not bounded by the screen: on a screen whose
+    /// back button scrolls with the content, it starts 12 points below the button wherever it is (`clearBand`), so once the
+    /// button has scrolled off the top the band starts above the screen (-87.33 on Settings, Audio at the largest size,
+    /// where the audit's own scroll leaves it), and a screen without the composer has no bottom. A drag started off screen
+    /// touches nothing: before F76, six settle drags from y = -67 left the title where the audit had put it.
+    private func draggableBand(_ band: ClosedRange<CGFloat>) -> ClosedRange<CGFloat> {
+        let lower = max(band.lowerBound, Self.statusBarBottom)
+        let upper = min(band.upperBound, app.frame.maxY - Self.homeIndicatorHeight)
+        return lower...max(lower, upper)
+    }
+
+    /// The stop a dragged element is brought to (`dragToStop`): its bottom this many points above the bottom of the band a
+    /// drag can start in, within `stopTolerance`, what a drag's start slop can leave.
+    private static let stopMargin: CGFloat = 24
+    private static let stopTolerance: CGFloat = 12
+
+    /// Brings `element` to the same place every run before a stop's audit: from where the screen opened (its top), slow
+    /// drags with a hold at the end (`scrollContent`: no fling, so no momentum) move the content by the distance the
+    /// frames give, until the element's bottom is `stopMargin` points above the bottom of the draggable band (within
+    /// `stopTolerance`) or a drag no longer moves it (the content's end). Each drag waits for still frames. Where the
+    /// element, the `reporting` elements and the elements labelled `titled` (the screen title) stand, with the clear band
+    /// and the window, is logged (`STOP`), so the stop can be compared across runs.
+    private func dragToStop(_ element: XCUIElement, _ stop: String, reporting: [XCUIElement] = [], titled title: String? = nil) -> Bool {
+        guard element.waitForExistence(timeout: screenTimeout) else { return false }
+        // The screen has just been pushed: its frames are read once the transition has ended.
+        waitForStillFrames()
+        var drags = 0
+        while drags < 8 {
+            let band = draggableBand(currentClearBand())
+            let before = element.frame
+            let remaining = before.maxY - (band.upperBound - Self.stopMargin)
+            if abs(remaining) <= Self.stopTolerance { break }
+            scrollContent(by: remaining, between: band)
+            drags += 1
+            if element.frame == before { break }
+        }
+        let elements = screenElements()
+        let reported = reporting.map { "'\($0.identifier)' at \($0.frame.debugDescription)" }
+        let titles = title.map { label in
+            elements.filter { $0.identifier.isEmpty && $0.label == label }.map { $0.frame.debugDescription }
+        } ?? []
+        let titleNote = title.map { "'\($0)' at \(titles.isEmpty ? "not listed" : titles.joined(separator: " and "))" } ?? "no title asked for"
+        auditLines.append("STOP \(stop): after \(drags) drag(s) '\(element.identifier)' is at \(element.frame.debugDescription), \((reported + [titleNote]).joined(separator: ", ")), the clear band \(clearBand(from: elements)), the window \(app.windows.firstMatch.frame.debugDescription)")
+        return element.isHittable
     }
 
     /// Drags the scrolling content up by `distance` points (down when negative), at most the height of `band` per drag,
@@ -1017,6 +1073,8 @@ final class AccessibilityAuditUITests: XCTestCase {
     /// The top of the screenshot the measurement never reads: the status bar's clock and indicators end above it on the
     /// iPhone simulators the job uses.
     private static let statusBarBottom: CGFloat = 50
+    /// The bottom of the screen where a touch starts the system's home gesture on the iPhone simulators the job uses.
+    private static let homeIndicatorHeight: CGFloat = 34
 
     /// The contrast of the text in `frame` as a person sees it, from the pixels of `image`, the screenshot taken with the
     /// snapshot before the audit (`ScreenshotContrast`). Called only for text drawn on glass with nothing else overlapping
@@ -1291,6 +1349,85 @@ final class AccessibilityAuditUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         element.tap()
         return true
+    }
+
+    /// At the largest size, writes one picture of the stop `screen` at both sizes: the default-size run's screenshot of it
+    /// (the one taken just before its audit, read from the shared output directory as `settled-default.txt` is) beside
+    /// this run's, each at half scale under a caption naming its file, as `xxxl-<screen>-beside-default-<n>.png`. The
+    /// routine artifact carries the largest-size run's screenshots and not the default-size run's (CI artifact budget), so
+    /// this is how a green run shows the audited stop at both sizes (F71c criterion 3, F76). It is evidence only: a missing
+    /// screenshot is noted in the log and decides nothing. At the default size there is nothing to put beside.
+    private func recordBothSizes(_ screen: String) {
+        guard sizeName == "xxxl" else { return }
+        guard let defaultFile = screenshotFile(size: "default", screen: screen),
+              let largestFile = screenshotFile(size: sizeName, screen: screen),
+              let defaultImage = UIImage(contentsOfFile: defaultFile.path),
+              let largestImage = UIImage(contentsOfFile: largestFile.path) else {
+            auditLines.append("NOTE \(screen): no screenshot of this stop at both sizes to put side by side")
+            return
+        }
+        let panels: [(image: UIImage, caption: String)] = [
+            (defaultImage, "default size: \(defaultFile.lastPathComponent)"),
+            (largestImage, "largest size: \(largestFile.lastPathComponent)"),
+        ]
+        let panelScale: CGFloat = 0.5
+        let captionHeight: CGFloat = 60
+        let gap: CGFloat = 12
+        let panelSizes = panels.map { panel in
+            CGSize(
+                width: (panel.image.size.width * panel.image.scale * panelScale).rounded(),
+                height: (panel.image.size.height * panel.image.scale * panelScale).rounded())
+        }
+        let canvas = CGSize(
+            width: panelSizes.reduce(0) { $0 + $1.width } + gap,
+            height: captionHeight + (panelSizes.map(\.height).max() ?? 0))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let picture = UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: canvas))
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22, weight: .semibold),
+                .foregroundColor: UIColor.black,
+            ]
+            var x: CGFloat = 0
+            for (index, panel) in panels.enumerated() {
+                NSAttributedString(string: panel.caption, attributes: attributes).draw(at: CGPoint(x: x + 12, y: 18))
+                panel.image.draw(in: CGRect(origin: CGPoint(x: x, y: captionHeight), size: panelSizes[index]))
+                x += panelSizes[index].width + gap
+            }
+        }
+        guard let data = picture.pngData() else {
+            auditLines.append("NOTE \(screen): the picture of this stop at both sizes could not be encoded")
+            return
+        }
+        screenshotIndex += 1
+        let name = String(format: "%@-%@-beside-default-%02d.png", sizeName, screen, screenshotIndex)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        do {
+            try data.write(to: outputDirectory.appendingPathComponent(name))
+            auditLines.append("BOTH-SIZES \(screen): \(name) shows \(defaultFile.lastPathComponent) (default size) beside \(largestFile.lastPathComponent) (largest size), each at half scale")
+        } catch {
+            XCTFail("could not write \(name): \(error)")
+        }
+    }
+
+    /// The screenshot `capture` took of `screen` just before its audit in the run at `size`: `<size>-<screen>-<nn>.png` in
+    /// the output directory, the first by index when the stop was captured more than once. A screenshot the audit's own
+    /// scroll led to (`-audited-`), a settle stop's or a both-sizes picture has more between the screen and the index and
+    /// is not it.
+    private func screenshotFile(size: String, screen: String) -> URL? {
+        let prefix = "\(size)-\(screen)-"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        let matches = names.filter { name in
+            guard name.hasPrefix(prefix), name.hasSuffix(".png") else { return false }
+            let index = name.dropFirst(prefix.count).dropLast(".png".count)
+            return index.count == 2 && index.allSatisfy(\.isNumber)
+        }
+        return matches.sorted().first.map { outputDirectory.appendingPathComponent($0) }
     }
 
     /// Swipes the screen up until `element` can take a tap, up to a few screens.
